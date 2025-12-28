@@ -97,6 +97,7 @@ func init() {
 
 	// Available commands
 	GCPCommands.AddCommand(
+		// Core/existing commands
 		commands.GCPBucketsCommand,
 		commands.GCPArtifactRegistryCommand,
 		commands.GCPBigQueryCommand,
@@ -105,6 +106,70 @@ func init() {
 		commands.GCPPermissionsCommand,
 		commands.GCPInstancesCommand,
 		commands.GCPWhoAmICommand,
+
+		// New compute/serverless commands
+		commands.GCPFunctionsCommand,
+		commands.GCPCloudRunCommand,
+		commands.GCPGKECommand,
+		commands.GCPCloudSQLCommand,
+
+		// New infrastructure commands
+		commands.GCPPubSubCommand,
+		commands.GCPKMSCommand,
+		commands.GCPLoggingCommand,
+		commands.GCPSchedulerCommand,
+		commands.GCPDNSCommand,
+		commands.GCPFirewallCommand,
+		commands.GCPServiceAccountsCommand,
+		commands.GCPAPIKeysCommand,
+		commands.GCPEndpointsCommand,
+		commands.GCPWorkloadIdentityCommand,
+		commands.GCPOrganizationsCommand,
+		commands.GCPCloudBuildCommand,
+		commands.GCPMemorystoreCommand,
+		commands.GCPFilestoreCommand,
+		commands.GCPSpannerCommand,
+		commands.GCPBigtableCommand,
+
+		// Data processing commands
+		commands.GCPDataflowCommand,
+		commands.GCPComposerCommand,
+
+		// Security/Compliance commands
+		commands.GCPVPCSCCommand,
+		commands.GCPAssetInventoryCommand,
+
+		// Network/Infrastructure commands
+		commands.GCPLoadBalancersCommand,
+		commands.GCPVPCNetworksCommand,
+
+		// ML/Data Science commands
+		commands.GCPNotebooksCommand,
+		commands.GCPDataprocCommand,
+
+		// Zero Trust/Access commands
+		commands.GCPIAPCommand,
+		commands.GCPBeyondCorpCommand,
+		commands.GCPAccessLevelsCommand,
+
+		// Pentest/Exploitation commands
+		commands.GCPHMACKeysCommand,
+		commands.GCPPrivescCommand,
+		commands.GCPOrgPoliciesCommand,
+		commands.GCPBucketEnumCommand,
+		commands.GCPCrossProjectCommand,
+		commands.GCPCustomRolesCommand,
+		commands.GCPPublicResourcesCommand,
+		commands.GCPLoggingGapsCommand,
+		commands.GCPSourceReposCommand,
+		commands.GCPSSHOsLoginCommand,
+		commands.GCPServiceAgentsCommand,
+		commands.GCPDomainWideDelegationCommand,
+		commands.GCPNetworkEndpointsCommand,
+		commands.GCPCloudArmorCommand,
+		commands.GCPCertManagerCommand,
+
+		// All checks (last)
 		GCPAllChecksCommand,
 	)
 }

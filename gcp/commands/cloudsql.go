@@ -1,0 +1,473 @@
+package commands
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"sync"
+
+	CloudSQLService "github.com/BishopFox/cloudfox/gcp/services/cloudsqlService"
+	"github.com/BishopFox/cloudfox/globals"
+	"github.com/BishopFox/cloudfox/internal"
+	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/spf13/cobra"
+)
+
+var GCPCloudSQLCommand = &cobra.Command{
+	Use:     globals.GCP_CLOUDSQL_MODULE_NAME,
+	Aliases: []string{"sql", "database", "db"},
+	Short:   "Enumerate Cloud SQL instances with security analysis",
+	Long: `Enumerate Cloud SQL instances across projects with security-relevant details.
+
+Features:
+- Lists all Cloud SQL instances (MySQL, PostgreSQL, SQL Server)
+- Shows network configuration (public/private IP, authorized networks)
+- Identifies publicly accessible databases
+- Shows SSL/TLS configuration and requirements
+- Checks backup and high availability configuration
+- Identifies common security misconfigurations
+- Generates gcloud commands for further analysis
+
+Security Columns:
+- PublicIP: Whether the instance has a public IP address
+- RequireSSL: Whether SSL/TLS is required for connections
+- AuthNetworks: Number of authorized network ranges
+- Backups: Automated backup status
+- HA: High availability configuration
+- Issues: Detected security misconfigurations
+
+Attack Surface:
+- Public IPs expose database to internet scanning
+- Missing SSL allows credential sniffing
+- 0.0.0.0/0 in authorized networks = world accessible
+- Default service accounts may have excessive permissions`,
+	Run: runGCPCloudSQLCommand,
+}
+
+// ------------------------------
+// Module Struct
+// ------------------------------
+type CloudSQLModule struct {
+	gcpinternal.BaseGCPModule
+
+	Instances []CloudSQLService.SQLInstanceInfo
+	LootMap   map[string]*internal.LootFile
+	mu        sync.Mutex
+}
+
+// ------------------------------
+// Output Struct
+// ------------------------------
+type CloudSQLOutput struct {
+	Table []internal.TableFile
+	Loot  []internal.LootFile
+}
+
+func (o CloudSQLOutput) TableFiles() []internal.TableFile { return o.Table }
+func (o CloudSQLOutput) LootFiles() []internal.LootFile   { return o.Loot }
+
+// ------------------------------
+// Command Entry Point
+// ------------------------------
+func runGCPCloudSQLCommand(cmd *cobra.Command, args []string) {
+	cmdCtx, err := gcpinternal.InitializeCommandContext(cmd, globals.GCP_CLOUDSQL_MODULE_NAME)
+	if err != nil {
+		return
+	}
+
+	module := &CloudSQLModule{
+		BaseGCPModule: gcpinternal.NewBaseGCPModule(cmdCtx),
+		Instances:     []CloudSQLService.SQLInstanceInfo{},
+		LootMap:       make(map[string]*internal.LootFile),
+	}
+
+	module.initializeLootFiles()
+	module.Execute(cmdCtx.Ctx, cmdCtx.Logger)
+}
+
+// ------------------------------
+// Module Execution
+// ------------------------------
+func (m *CloudSQLModule) Execute(ctx context.Context, logger internal.Logger) {
+	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_CLOUDSQL_MODULE_NAME, m.processProject)
+
+	if len(m.Instances) == 0 {
+		logger.InfoM("No Cloud SQL instances found", globals.GCP_CLOUDSQL_MODULE_NAME)
+		return
+	}
+
+	// Count public instances
+	publicCount := 0
+	for _, instance := range m.Instances {
+		if instance.HasPublicIP {
+			publicCount++
+		}
+	}
+
+	if publicCount > 0 {
+		logger.SuccessM(fmt.Sprintf("Found %d instance(s), %d with public IP", len(m.Instances), publicCount), globals.GCP_CLOUDSQL_MODULE_NAME)
+	} else {
+		logger.SuccessM(fmt.Sprintf("Found %d instance(s)", len(m.Instances)), globals.GCP_CLOUDSQL_MODULE_NAME)
+	}
+
+	m.writeOutput(ctx, logger)
+}
+
+// ------------------------------
+// Project Processor
+// ------------------------------
+func (m *CloudSQLModule) processProject(ctx context.Context, projectID string, logger internal.Logger) {
+	if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
+		logger.InfoM(fmt.Sprintf("Enumerating Cloud SQL instances in project: %s", projectID), globals.GCP_CLOUDSQL_MODULE_NAME)
+	}
+
+	cs := CloudSQLService.New()
+	instances, err := cs.Instances(projectID)
+	if err != nil {
+		m.CommandCounter.Error++
+		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
+			logger.ErrorM(fmt.Sprintf("Error enumerating Cloud SQL in project %s: %v", projectID, err), globals.GCP_CLOUDSQL_MODULE_NAME)
+		}
+		return
+	}
+
+	m.mu.Lock()
+	m.Instances = append(m.Instances, instances...)
+
+	for _, instance := range instances {
+		m.addInstanceToLoot(instance)
+	}
+	m.mu.Unlock()
+
+	if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
+		logger.InfoM(fmt.Sprintf("Found %d instance(s) in project %s", len(instances), projectID), globals.GCP_CLOUDSQL_MODULE_NAME)
+	}
+}
+
+// ------------------------------
+// Loot File Management
+// ------------------------------
+func (m *CloudSQLModule) initializeLootFiles() {
+	m.LootMap["cloudsql-gcloud-commands"] = &internal.LootFile{
+		Name:     "cloudsql-gcloud-commands",
+		Contents: "# Cloud SQL gcloud Commands\n# Generated by CloudFox\n\n",
+	}
+	m.LootMap["cloudsql-connection-strings"] = &internal.LootFile{
+		Name:     "cloudsql-connection-strings",
+		Contents: "# Cloud SQL Connection Strings\n# Generated by CloudFox\n# NOTE: You'll need to obtain credentials separately\n\n",
+	}
+	m.LootMap["cloudsql-exploitation"] = &internal.LootFile{
+		Name:     "cloudsql-exploitation",
+		Contents: "# Cloud SQL Exploitation Commands\n# Generated by CloudFox\n# WARNING: Only use with proper authorization\n\n",
+	}
+	m.LootMap["cloudsql-public"] = &internal.LootFile{
+		Name:     "cloudsql-public",
+		Contents: "# PUBLIC Cloud SQL Instances\n# Generated by CloudFox\n# These instances have public IP addresses!\n\n",
+	}
+	m.LootMap["cloudsql-security-issues"] = &internal.LootFile{
+		Name:     "cloudsql-security-issues",
+		Contents: "# Cloud SQL Security Issues Detected\n# Generated by CloudFox\n\n",
+	}
+}
+
+func (m *CloudSQLModule) addInstanceToLoot(instance CloudSQLService.SQLInstanceInfo) {
+	// gcloud commands
+	m.LootMap["cloudsql-gcloud-commands"].Contents += fmt.Sprintf(
+		"# Instance: %s (Project: %s, Region: %s)\n"+
+			"gcloud sql instances describe %s --project=%s\n"+
+			"gcloud sql databases list --instance=%s --project=%s\n"+
+			"gcloud sql users list --instance=%s --project=%s\n"+
+			"gcloud sql ssl-certs list --instance=%s --project=%s\n"+
+			"gcloud sql backups list --instance=%s --project=%s\n\n",
+		instance.Name, instance.ProjectID, instance.Region,
+		instance.Name, instance.ProjectID,
+		instance.Name, instance.ProjectID,
+		instance.Name, instance.ProjectID,
+		instance.Name, instance.ProjectID,
+		instance.Name, instance.ProjectID,
+	)
+
+	// Connection strings based on database type
+	dbType := getDatabaseType(instance.DatabaseVersion)
+	connectionInstance := fmt.Sprintf("%s:%s:%s", instance.ProjectID, instance.Region, instance.Name)
+
+	m.LootMap["cloudsql-connection-strings"].Contents += fmt.Sprintf(
+		"# Instance: %s (%s)\n"+
+			"# Public IP: %s\n"+
+			"# Private IP: %s\n"+
+			"# Connection Name: %s\n",
+		instance.Name, instance.DatabaseVersion,
+		instance.PublicIP,
+		instance.PrivateIP,
+		connectionInstance,
+	)
+
+	switch dbType {
+	case "mysql":
+		m.LootMap["cloudsql-connection-strings"].Contents += fmt.Sprintf(
+			"# MySQL Connection:\n"+
+				"mysql -h %s -u root -p\n"+
+				"# Cloud SQL Proxy:\n"+
+				"cloud_sql_proxy -instances=%s=tcp:3306\n"+
+				"mysql -h 127.0.0.1 -u root -p\n\n",
+			instance.PublicIP, connectionInstance,
+		)
+	case "postgres":
+		m.LootMap["cloudsql-connection-strings"].Contents += fmt.Sprintf(
+			"# PostgreSQL Connection:\n"+
+				"psql -h %s -U postgres\n"+
+				"# Cloud SQL Proxy:\n"+
+				"cloud_sql_proxy -instances=%s=tcp:5432\n"+
+				"psql -h 127.0.0.1 -U postgres\n\n",
+			instance.PublicIP, connectionInstance,
+		)
+	case "sqlserver":
+		m.LootMap["cloudsql-connection-strings"].Contents += fmt.Sprintf(
+			"# SQL Server Connection:\n"+
+				"sqlcmd -S %s -U sqlserver\n"+
+				"# Cloud SQL Proxy:\n"+
+				"cloud_sql_proxy -instances=%s=tcp:1433\n"+
+				"sqlcmd -S 127.0.0.1 -U sqlserver\n\n",
+			instance.PublicIP, connectionInstance,
+		)
+	}
+
+	// Exploitation commands
+	m.LootMap["cloudsql-exploitation"].Contents += fmt.Sprintf(
+		"# Instance: %s (Project: %s)\n"+
+			"# Database: %s\n"+
+			"# Public IP: %s, Private IP: %s\n"+
+			"# SSL Required: %v\n\n"+
+			"# Connect via Cloud SQL Proxy (recommended):\n"+
+			"cloud_sql_proxy -instances=%s=tcp:3306 &\n\n"+
+			"# Create a new user (if you have sql.users.create):\n"+
+			"gcloud sql users create attacker --instance=%s --password=AttackerPass123! --project=%s\n\n"+
+			"# Export database (if you have sql.instances.export):\n"+
+			"gcloud sql export sql %s gs://%s-backup/export.sql --database=mysql --project=%s\n\n",
+		instance.Name, instance.ProjectID,
+		instance.DatabaseVersion,
+		instance.PublicIP, instance.PrivateIP,
+		instance.RequireSSL,
+		connectionInstance,
+		instance.Name, instance.ProjectID,
+		instance.Name, instance.ProjectID, instance.ProjectID,
+	)
+
+	// Public instances
+	if instance.HasPublicIP {
+		m.LootMap["cloudsql-public"].Contents += fmt.Sprintf(
+			"# INSTANCE: %s\n"+
+				"# Project: %s, Region: %s\n"+
+				"# Database: %s\n"+
+				"# Public IP: %s\n"+
+				"# SSL Required: %v\n"+
+				"# Authorized Networks: %d\n",
+			instance.Name,
+			instance.ProjectID, instance.Region,
+			instance.DatabaseVersion,
+			instance.PublicIP,
+			instance.RequireSSL,
+			len(instance.AuthorizedNetworks),
+		)
+		for _, network := range instance.AuthorizedNetworks {
+			marker := ""
+			if network.IsPublic {
+				marker = " [WORLD ACCESSIBLE!]"
+			}
+			m.LootMap["cloudsql-public"].Contents += fmt.Sprintf(
+				"#   - %s: %s%s\n",
+				network.Name, network.Value, marker,
+			)
+		}
+		m.LootMap["cloudsql-public"].Contents += "\n"
+	}
+
+	// Security issues
+	if len(instance.SecurityIssues) > 0 {
+		m.LootMap["cloudsql-security-issues"].Contents += fmt.Sprintf(
+			"# INSTANCE: %s (Project: %s)\n"+
+				"# Database: %s\n"+
+				"# Issues:\n",
+			instance.Name, instance.ProjectID, instance.DatabaseVersion,
+		)
+		for _, issue := range instance.SecurityIssues {
+			m.LootMap["cloudsql-security-issues"].Contents += fmt.Sprintf("  - %s\n", issue)
+		}
+		m.LootMap["cloudsql-security-issues"].Contents += "\n"
+	}
+}
+
+// getDatabaseType returns the database type from version string
+func getDatabaseType(version string) string {
+	switch {
+	case strings.HasPrefix(version, "MYSQL"):
+		return "mysql"
+	case strings.HasPrefix(version, "POSTGRES"):
+		return "postgres"
+	case strings.HasPrefix(version, "SQLSERVER"):
+		return "sqlserver"
+	default:
+		return "unknown"
+	}
+}
+
+// ------------------------------
+// Output Generation
+// ------------------------------
+func (m *CloudSQLModule) writeOutput(ctx context.Context, logger internal.Logger) {
+	// Main instances table
+	header := []string{
+		"Project ID",
+		"Name",
+		"Region",
+		"Database",
+		"Tier",
+		"State",
+		"Public IP",
+		"Private IP",
+		"Require SSL",
+		"Auth Networks",
+		"Backups",
+		"HA",
+		"Issues",
+	}
+
+	var body [][]string
+	for _, instance := range m.Instances {
+		// Format authorized networks count
+		authNetworks := fmt.Sprintf("%d", len(instance.AuthorizedNetworks))
+		hasPublicNetwork := false
+		for _, network := range instance.AuthorizedNetworks {
+			if network.IsPublic {
+				hasPublicNetwork = true
+				break
+			}
+		}
+		if hasPublicNetwork {
+			authNetworks += " (PUBLIC!)"
+		}
+
+		// Format issues
+		issueDisplay := "-"
+		if len(instance.SecurityIssues) > 0 {
+			issueDisplay = fmt.Sprintf("%d issues", len(instance.SecurityIssues))
+		}
+
+		body = append(body, []string{
+			instance.ProjectID,
+			instance.Name,
+			instance.Region,
+			instance.DatabaseVersion,
+			instance.Tier,
+			instance.State,
+			instance.PublicIP,
+			instance.PrivateIP,
+			boolToYesNo(instance.RequireSSL),
+			authNetworks,
+			boolToYesNo(instance.BackupEnabled),
+			instance.AvailabilityType,
+			issueDisplay,
+		})
+	}
+
+	// Security issues table
+	issuesHeader := []string{
+		"Instance",
+		"Project ID",
+		"Database",
+		"Issue",
+	}
+
+	var issuesBody [][]string
+	for _, instance := range m.Instances {
+		for _, issue := range instance.SecurityIssues {
+			issuesBody = append(issuesBody, []string{
+				instance.Name,
+				instance.ProjectID,
+				instance.DatabaseVersion,
+				issue,
+			})
+		}
+	}
+
+	// Authorized networks table
+	networksHeader := []string{
+		"Instance",
+		"Project ID",
+		"Network Name",
+		"CIDR",
+		"Public Access",
+	}
+
+	var networksBody [][]string
+	for _, instance := range m.Instances {
+		for _, network := range instance.AuthorizedNetworks {
+			publicAccess := "No"
+			if network.IsPublic {
+				publicAccess = "YES - WORLD ACCESSIBLE"
+			}
+			networksBody = append(networksBody, []string{
+				instance.Name,
+				instance.ProjectID,
+				network.Name,
+				network.Value,
+				publicAccess,
+			})
+		}
+	}
+
+	// Collect loot files
+	var lootFiles []internal.LootFile
+	for _, loot := range m.LootMap {
+		if loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# Generated by CloudFox\n\n") {
+			lootFiles = append(lootFiles, *loot)
+		}
+	}
+
+	// Build table files
+	tableFiles := []internal.TableFile{
+		{
+			Name:   globals.GCP_CLOUDSQL_MODULE_NAME,
+			Header: header,
+			Body:   body,
+		},
+	}
+
+	if len(issuesBody) > 0 {
+		tableFiles = append(tableFiles, internal.TableFile{
+			Name:   "cloudsql-security-issues",
+			Header: issuesHeader,
+			Body:   issuesBody,
+		})
+	}
+
+	if len(networksBody) > 0 {
+		tableFiles = append(tableFiles, internal.TableFile{
+			Name:   "cloudsql-authorized-networks",
+			Header: networksHeader,
+			Body:   networksBody,
+		})
+	}
+
+	output := CloudSQLOutput{
+		Table: tableFiles,
+		Loot:  lootFiles,
+	}
+
+	err := internal.HandleOutputSmart(
+		"gcp",
+		m.Format,
+		m.OutputDirectory,
+		m.Verbosity,
+		m.WrapTable,
+		"project",
+		m.ProjectIDs,
+		m.ProjectIDs,
+		m.Account,
+		output,
+	)
+	if err != nil {
+		logger.ErrorM(fmt.Sprintf("Error writing output: %v", err), globals.GCP_CLOUDSQL_MODULE_NAME)
+		m.CommandCounter.Error++
+	}
+}

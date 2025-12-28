@@ -270,5 +270,337 @@ func parseFirewallRule(fw *compute.Firewall, projectID string) (FirewallRule, er
 	}, nil
 }
 
-// TODO
-// func (ns *NetworkService) ForwardingRules() {}
+// VPCInfo holds VPC network details
+type VPCInfo struct {
+	Name                  string
+	ProjectID             string
+	Description           string
+	AutoCreateSubnetworks bool
+	RoutingMode           string // REGIONAL or GLOBAL
+	Mtu                   int64
+	Subnetworks           []string
+	Peerings              []VPCPeering
+	CreationTime          string
+}
+
+// VPCPeering holds VPC peering details
+type VPCPeering struct {
+	Name                 string
+	Network              string
+	State                string
+	ExportCustomRoutes   bool
+	ImportCustomRoutes   bool
+	ExchangeSubnetRoutes bool
+}
+
+// SubnetInfo holds subnet details
+type SubnetInfo struct {
+	Name                  string
+	ProjectID             string
+	Region                string
+	Network               string
+	IPCidrRange           string
+	GatewayAddress        string
+	PrivateIPGoogleAccess bool
+	Purpose               string
+	StackType             string
+	CreationTime          string
+}
+
+// FirewallRuleInfo holds enhanced firewall rule details for security analysis
+type FirewallRuleInfo struct {
+	Name              string
+	ProjectID         string
+	Description       string
+	Network           string
+	Priority          int64
+	Direction         string // INGRESS or EGRESS
+	Disabled          bool
+
+	// Source/Destination
+	SourceRanges      []string
+	SourceTags        []string
+	SourceSAs         []string
+	DestinationRanges []string
+	TargetTags        []string
+	TargetSAs         []string
+
+	// Traffic
+	AllowedProtocols  map[string][]string // protocol -> ports
+	DeniedProtocols   map[string][]string
+
+	// Security analysis
+	IsPublicIngress   bool   // 0.0.0.0/0 in source ranges
+	IsPublicEgress    bool   // 0.0.0.0/0 in destination ranges
+	AllowsAllPorts    bool   // Empty ports = all ports
+	RiskLevel         string // HIGH, MEDIUM, LOW
+	SecurityIssues    []string
+}
+
+// Networks retrieves all VPC networks in a project
+func (ns *NetwworkService) Networks(projectID string) ([]VPCInfo, error) {
+	ctx := context.Background()
+	var computeService *compute.Service
+	var err error
+
+	if ns.session != nil {
+		computeService, err = compute.NewService(ctx, ns.session.GetClientOption())
+	} else {
+		computeService, err = compute.NewService(ctx)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var networks []VPCInfo
+
+	networkList, err := computeService.Networks.List(projectID).Do()
+	if err != nil {
+		return nil, err
+	}
+
+	for _, network := range networkList.Items {
+		info := VPCInfo{
+			Name:                  network.Name,
+			ProjectID:             projectID,
+			Description:           network.Description,
+			AutoCreateSubnetworks: network.AutoCreateSubnetworks,
+			RoutingMode:           network.RoutingConfig.RoutingMode,
+			Mtu:                   network.Mtu,
+			Subnetworks:           network.Subnetworks,
+			CreationTime:          network.CreationTimestamp,
+		}
+
+		// Parse peerings
+		for _, peering := range network.Peerings {
+			info.Peerings = append(info.Peerings, VPCPeering{
+				Name:                 peering.Name,
+				Network:              peering.Network,
+				State:                peering.State,
+				ExportCustomRoutes:   peering.ExportCustomRoutes,
+				ImportCustomRoutes:   peering.ImportCustomRoutes,
+				ExchangeSubnetRoutes: peering.ExchangeSubnetRoutes,
+			})
+		}
+
+		networks = append(networks, info)
+	}
+
+	return networks, nil
+}
+
+// Subnets retrieves all subnets in a project
+func (ns *NetwworkService) Subnets(projectID string) ([]SubnetInfo, error) {
+	ctx := context.Background()
+	var computeService *compute.Service
+	var err error
+
+	if ns.session != nil {
+		computeService, err = compute.NewService(ctx, ns.session.GetClientOption())
+	} else {
+		computeService, err = compute.NewService(ctx)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var subnets []SubnetInfo
+
+	// List subnets across all regions
+	subnetList, err := computeService.Subnetworks.AggregatedList(projectID).Do()
+	if err != nil {
+		return nil, err
+	}
+
+	for _, scopedList := range subnetList.Items {
+		for _, subnet := range scopedList.Subnetworks {
+			info := SubnetInfo{
+				Name:                  subnet.Name,
+				ProjectID:             projectID,
+				Region:                extractRegionFromURL(subnet.Region),
+				Network:               extractNameFromURL(subnet.Network),
+				IPCidrRange:           subnet.IpCidrRange,
+				GatewayAddress:        subnet.GatewayAddress,
+				PrivateIPGoogleAccess: subnet.PrivateIpGoogleAccess,
+				Purpose:               subnet.Purpose,
+				StackType:             subnet.StackType,
+				CreationTime:          subnet.CreationTimestamp,
+			}
+			subnets = append(subnets, info)
+		}
+	}
+
+	return subnets, nil
+}
+
+// FirewallRulesEnhanced retrieves firewall rules with security analysis
+func (ns *NetwworkService) FirewallRulesEnhanced(projectID string) ([]FirewallRuleInfo, error) {
+	ctx := context.Background()
+	var computeService *compute.Service
+	var err error
+
+	if ns.session != nil {
+		computeService, err = compute.NewService(ctx, ns.session.GetClientOption())
+	} else {
+		computeService, err = compute.NewService(ctx)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var rules []FirewallRuleInfo
+
+	firewallList, err := computeService.Firewalls.List(projectID).Do()
+	if err != nil {
+		return nil, err
+	}
+
+	for _, fw := range firewallList.Items {
+		info := FirewallRuleInfo{
+			Name:              fw.Name,
+			ProjectID:         projectID,
+			Description:       fw.Description,
+			Network:           extractNameFromURL(fw.Network),
+			Priority:          fw.Priority,
+			Direction:         fw.Direction,
+			Disabled:          fw.Disabled,
+			SourceRanges:      fw.SourceRanges,
+			SourceTags:        fw.SourceTags,
+			SourceSAs:         fw.SourceServiceAccounts,
+			DestinationRanges: fw.DestinationRanges,
+			TargetTags:        fw.TargetTags,
+			TargetSAs:         fw.TargetServiceAccounts,
+			AllowedProtocols:  make(map[string][]string),
+			DeniedProtocols:   make(map[string][]string),
+		}
+
+		// Parse allowed protocols
+		for _, allowed := range fw.Allowed {
+			info.AllowedProtocols[allowed.IPProtocol] = allowed.Ports
+			if len(allowed.Ports) == 0 {
+				info.AllowsAllPorts = true
+			}
+		}
+
+		// Parse denied protocols
+		for _, denied := range fw.Denied {
+			info.DeniedProtocols[denied.IPProtocol] = denied.Ports
+		}
+
+		// Security analysis
+		analyzeFirewallRule(&info)
+
+		rules = append(rules, info)
+	}
+
+	return rules, nil
+}
+
+// analyzeFirewallRule performs security analysis on a firewall rule
+func analyzeFirewallRule(rule *FirewallRuleInfo) {
+	// Check for public ingress (0.0.0.0/0 in source ranges)
+	for _, source := range rule.SourceRanges {
+		if source == "0.0.0.0/0" || source == "::/0" {
+			rule.IsPublicIngress = true
+			break
+		}
+	}
+
+	// Check for public egress
+	for _, dest := range rule.DestinationRanges {
+		if dest == "0.0.0.0/0" || dest == "::/0" {
+			rule.IsPublicEgress = true
+			break
+		}
+	}
+
+	// Determine risk level and security issues
+	if rule.Direction == "INGRESS" && rule.IsPublicIngress && len(rule.AllowedProtocols) > 0 {
+		// Check for high-risk configurations
+		for proto, ports := range rule.AllowedProtocols {
+			if len(ports) == 0 {
+				// All ports allowed
+				rule.SecurityIssues = append(rule.SecurityIssues,
+					"Allows all "+proto+" ports from 0.0.0.0/0")
+				rule.RiskLevel = "HIGH"
+			} else {
+				// Check for sensitive ports
+				for _, port := range ports {
+					if isSensitivePort(port) {
+						rule.SecurityIssues = append(rule.SecurityIssues,
+							"Exposes sensitive port "+port+" ("+proto+") to internet")
+						if rule.RiskLevel != "HIGH" {
+							rule.RiskLevel = "HIGH"
+						}
+					}
+				}
+			}
+		}
+
+		if rule.RiskLevel == "" && rule.IsPublicIngress {
+			rule.RiskLevel = "MEDIUM"
+			rule.SecurityIssues = append(rule.SecurityIssues, "Allows ingress from 0.0.0.0/0")
+		}
+	}
+
+	if rule.RiskLevel == "" {
+		rule.RiskLevel = "LOW"
+	}
+
+	// Check if no target restrictions (applies to all instances)
+	if len(rule.TargetTags) == 0 && len(rule.TargetSAs) == 0 && rule.IsPublicIngress {
+		rule.SecurityIssues = append(rule.SecurityIssues, "No target restrictions - applies to ALL instances in network")
+	}
+}
+
+// isSensitivePort checks if a port is considered sensitive
+func isSensitivePort(port string) bool {
+	sensitivePorts := map[string]bool{
+		"22": true, "3389": true, "5985": true, "5986": true, // Remote access
+		"3306": true, "5432": true, "1433": true, "1521": true, "27017": true, // Databases
+		"6379": true, "11211": true, // Caches
+		"9200": true, "9300": true, // Elasticsearch
+		"2379": true, "2380": true, // etcd
+		"8080": true, "8443": true, // Common web
+		"23": true, // Telnet
+		"21": true, "20": true, // FTP
+		"25": true, "587": true, "465": true, // SMTP
+		"110": true, "143": true, // POP3/IMAP
+		"445": true, "139": true, // SMB
+		"135": true, // RPC
+	}
+	return sensitivePorts[port]
+}
+
+// Helper functions
+func extractNameFromURL(url string) string {
+	parts := strings.Split(url, "/")
+	if len(parts) > 0 {
+		return parts[len(parts)-1]
+	}
+	return url
+}
+
+func extractRegionFromURL(url string) string {
+	parts := strings.Split(url, "/")
+	if len(parts) > 0 {
+		return parts[len(parts)-1]
+	}
+	return url
+}
+
+// GetComputeService returns a compute.Service instance for external use
+func (ns *NetwworkService) GetComputeService(ctx context.Context) (*compute.Service, error) {
+	var computeService *compute.Service
+	var err error
+
+	if ns.session != nil {
+		computeService, err = compute.NewService(ctx, ns.session.GetClientOption())
+	} else {
+		computeService, err = compute.NewService(ctx)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return computeService, nil
+}

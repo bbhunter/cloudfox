@@ -70,6 +70,12 @@ type ComputeEngineInfo struct {
 	OSLogin2FAEnabled   bool `json:"osLogin2FAEnabled"`   // OS Login 2FA enabled
 	SerialPortEnabled   bool `json:"serialPortEnabled"`   // Serial port access enabled
 
+	// Pentest-specific fields: actual content extraction
+	StartupScriptContent string   `json:"startupScriptContent"` // Actual startup script content
+	StartupScriptURL     string   `json:"startupScriptURL"`     // URL to startup script if remote
+	SSHKeys              []string `json:"sshKeys"`              // Extracted SSH keys
+	CustomMetadata       []string `json:"customMetadata"`       // Other custom metadata keys
+
 	// Disk encryption
 	BootDiskEncryption string `json:"bootDiskEncryption"` // "Google-managed", "CMEK", or "CSEK"
 	BootDiskKMSKey     string `json:"bootDiskKMSKey"`     // KMS key for CMEK
@@ -77,6 +83,30 @@ type ComputeEngineInfo struct {
 	// Timestamps
 	CreationTimestamp  string `json:"creationTimestamp"`
 	LastStartTimestamp string `json:"lastStartTimestamp"`
+}
+
+// ProjectMetadataInfo contains project-level metadata security info
+type ProjectMetadataInfo struct {
+	ProjectID               string   `json:"projectId"`
+	HasProjectSSHKeys       bool     `json:"hasProjectSSHKeys"`
+	ProjectSSHKeys          []string `json:"projectSSHKeys"`
+	HasProjectStartupScript bool     `json:"hasProjectStartupScript"`
+	ProjectStartupScript    string   `json:"projectStartupScript"`
+	OSLoginEnabled          bool     `json:"osLoginEnabled"`
+	OSLogin2FAEnabled       bool     `json:"osLogin2FAEnabled"`
+	SerialPortEnabled       bool     `json:"serialPortEnabled"`
+	CustomMetadataKeys      []string `json:"customMetadataKeys"`
+}
+
+// InstanceIAMInfo contains IAM policy info for an instance
+type InstanceIAMInfo struct {
+	InstanceName    string   `json:"instanceName"`
+	Zone            string   `json:"zone"`
+	ProjectID       string   `json:"projectId"`
+	ComputeAdmins   []string `json:"computeAdmins"`   // compute.admin or owner
+	InstanceAdmins  []string `json:"instanceAdmins"`  // compute.instanceAdmin
+	SSHUsers        []string `json:"sshUsers"`        // compute.osLogin or osAdminLogin
+	MetadataSetters []string `json:"metadataSetters"` // compute.instances.setMetadata
 }
 
 // getService returns a compute service, using session if available
@@ -145,10 +175,19 @@ func (ces *ComputeEngineService) Instances(projectID string) ([]ComputeEngineInf
 					info.ConfidentialVM = instance.ConfidentialInstanceConfig.EnableConfidentialCompute
 				}
 
-				// Parse metadata for security-relevant items
+				// Parse metadata for security-relevant items including content
 				if instance.Metadata != nil {
-					info.HasStartupScript, info.HasSSHKeys, info.BlockProjectSSHKeys,
-						info.OSLoginEnabled, info.OSLogin2FAEnabled, info.SerialPortEnabled = parseMetadata(instance.Metadata)
+					metaResult := parseMetadataFull(instance.Metadata)
+					info.HasStartupScript = metaResult.HasStartupScript
+					info.HasSSHKeys = metaResult.HasSSHKeys
+					info.BlockProjectSSHKeys = metaResult.BlockProjectSSHKeys
+					info.OSLoginEnabled = metaResult.OSLoginEnabled
+					info.OSLogin2FAEnabled = metaResult.OSLogin2FA
+					info.SerialPortEnabled = metaResult.SerialPortEnabled
+					info.StartupScriptContent = metaResult.StartupScriptContent
+					info.StartupScriptURL = metaResult.StartupScriptURL
+					info.SSHKeys = metaResult.SSHKeys
+					info.CustomMetadata = metaResult.CustomMetadata
 				}
 
 				// Parse boot disk encryption
@@ -231,10 +270,46 @@ func parseServiceAccounts(sas []*compute.ServiceAccount, projectID string) ([]Se
 	return accounts, hasDefaultSA, hasCloudScopes
 }
 
+// MetadataParseResult contains all parsed metadata fields
+type MetadataParseResult struct {
+	HasStartupScript     bool
+	HasSSHKeys           bool
+	BlockProjectSSHKeys  bool
+	OSLoginEnabled       bool
+	OSLogin2FA           bool
+	SerialPortEnabled    bool
+	StartupScriptContent string
+	StartupScriptURL     string
+	SSHKeys              []string
+	CustomMetadata       []string
+}
+
 // parseMetadata checks instance metadata for security-relevant settings
 func parseMetadata(metadata *compute.Metadata) (hasStartupScript, hasSSHKeys, blockProjectSSHKeys, osLoginEnabled, osLogin2FA, serialPortEnabled bool) {
+	result := parseMetadataFull(metadata)
+	return result.HasStartupScript, result.HasSSHKeys, result.BlockProjectSSHKeys,
+		result.OSLoginEnabled, result.OSLogin2FA, result.SerialPortEnabled
+}
+
+// parseMetadataFull extracts all metadata including content
+func parseMetadataFull(metadata *compute.Metadata) MetadataParseResult {
+	result := MetadataParseResult{}
 	if metadata == nil || metadata.Items == nil {
-		return
+		return result
+	}
+
+	// Known metadata keys to exclude from custom metadata
+	knownKeys := map[string]bool{
+		"startup-script":         true,
+		"startup-script-url":     true,
+		"ssh-keys":               true,
+		"sshKeys":                true,
+		"block-project-ssh-keys": true,
+		"enable-oslogin":         true,
+		"enable-oslogin-2fa":     true,
+		"serial-port-enable":     true,
+		"google-compute-default-zone": true,
+		"google-compute-default-region": true,
 	}
 
 	for _, item := range metadata.Items {
@@ -243,30 +318,53 @@ func parseMetadata(metadata *compute.Metadata) (hasStartupScript, hasSSHKeys, bl
 		}
 
 		switch item.Key {
-		case "startup-script", "startup-script-url":
-			hasStartupScript = true
+		case "startup-script":
+			result.HasStartupScript = true
+			if item.Value != nil {
+				result.StartupScriptContent = *item.Value
+			}
+		case "startup-script-url":
+			result.HasStartupScript = true
+			if item.Value != nil {
+				result.StartupScriptURL = *item.Value
+			}
 		case "ssh-keys", "sshKeys":
-			hasSSHKeys = true
+			result.HasSSHKeys = true
+			if item.Value != nil {
+				// Parse SSH keys - format is "user:ssh-rsa KEY comment"
+				lines := strings.Split(*item.Value, "\n")
+				for _, line := range lines {
+					line = strings.TrimSpace(line)
+					if line != "" {
+						result.SSHKeys = append(result.SSHKeys, line)
+					}
+				}
+			}
 		case "block-project-ssh-keys":
 			if item.Value != nil && *item.Value == "true" {
-				blockProjectSSHKeys = true
+				result.BlockProjectSSHKeys = true
 			}
 		case "enable-oslogin":
 			if item.Value != nil && strings.ToLower(*item.Value) == "true" {
-				osLoginEnabled = true
+				result.OSLoginEnabled = true
 			}
 		case "enable-oslogin-2fa":
 			if item.Value != nil && strings.ToLower(*item.Value) == "true" {
-				osLogin2FA = true
+				result.OSLogin2FA = true
 			}
 		case "serial-port-enable":
 			if item.Value != nil && *item.Value == "true" {
-				serialPortEnabled = true
+				result.SerialPortEnabled = true
+			}
+		default:
+			// Track custom metadata keys (may contain secrets)
+			if !knownKeys[item.Key] {
+				result.CustomMetadata = append(result.CustomMetadata, item.Key)
 			}
 		}
 	}
 
-	return
+	return result
 }
 
 // parseBootDiskEncryption checks the boot disk encryption type
@@ -308,4 +406,146 @@ func FormatScopes(scopes []string) string {
 		}
 	}
 	return strings.Join(shortScopes, ", ")
+}
+
+// GetProjectMetadata retrieves project-level compute metadata
+func (ces *ComputeEngineService) GetProjectMetadata(projectID string) (*ProjectMetadataInfo, error) {
+	ctx := context.Background()
+	computeService, err := ces.getService(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	project, err := computeService.Projects.Get(projectID).Do()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get project metadata: %v", err)
+	}
+
+	info := &ProjectMetadataInfo{
+		ProjectID: projectID,
+	}
+
+	if project.CommonInstanceMetadata != nil {
+		for _, item := range project.CommonInstanceMetadata.Items {
+			if item == nil {
+				continue
+			}
+
+			switch item.Key {
+			case "ssh-keys", "sshKeys":
+				info.HasProjectSSHKeys = true
+				if item.Value != nil {
+					lines := strings.Split(*item.Value, "\n")
+					for _, line := range lines {
+						line = strings.TrimSpace(line)
+						if line != "" {
+							info.ProjectSSHKeys = append(info.ProjectSSHKeys, line)
+						}
+					}
+				}
+			case "startup-script":
+				info.HasProjectStartupScript = true
+				if item.Value != nil {
+					info.ProjectStartupScript = *item.Value
+				}
+			case "enable-oslogin":
+				if item.Value != nil && strings.ToLower(*item.Value) == "true" {
+					info.OSLoginEnabled = true
+				}
+			case "enable-oslogin-2fa":
+				if item.Value != nil && strings.ToLower(*item.Value) == "true" {
+					info.OSLogin2FAEnabled = true
+				}
+			case "serial-port-enable":
+				if item.Value != nil && *item.Value == "true" {
+					info.SerialPortEnabled = true
+				}
+			default:
+				// Track other custom metadata that might contain secrets
+				if !isKnownMetadataKey(item.Key) {
+					info.CustomMetadataKeys = append(info.CustomMetadataKeys, item.Key)
+				}
+			}
+		}
+	}
+
+	return info, nil
+}
+
+// isKnownMetadataKey checks if a metadata key is a known system key
+func isKnownMetadataKey(key string) bool {
+	knownKeys := map[string]bool{
+		"ssh-keys":                        true,
+		"sshKeys":                         true,
+		"startup-script":                  true,
+		"startup-script-url":              true,
+		"block-project-ssh-keys":          true,
+		"enable-oslogin":                  true,
+		"enable-oslogin-2fa":              true,
+		"serial-port-enable":              true,
+		"google-compute-default-zone":     true,
+		"google-compute-default-region":   true,
+		"google-compute-enable-logging":   true,
+		"google-compute-enable-ssh-agent": true,
+	}
+	return knownKeys[key]
+}
+
+// GetInstanceIAMPolicy retrieves IAM policy for a specific instance
+func (ces *ComputeEngineService) GetInstanceIAMPolicy(projectID, zone, instanceName string) (*InstanceIAMInfo, error) {
+	ctx := context.Background()
+	computeService, err := ces.getService(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	policy, err := computeService.Instances.GetIamPolicy(projectID, zone, instanceName).Do()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get instance IAM policy: %v", err)
+	}
+
+	info := &InstanceIAMInfo{
+		InstanceName: instanceName,
+		Zone:         zone,
+		ProjectID:    projectID,
+	}
+
+	for _, binding := range policy.Bindings {
+		if binding == nil {
+			continue
+		}
+
+		switch binding.Role {
+		case "roles/compute.admin", "roles/owner":
+			info.ComputeAdmins = append(info.ComputeAdmins, binding.Members...)
+		case "roles/compute.instanceAdmin", "roles/compute.instanceAdmin.v1":
+			info.InstanceAdmins = append(info.InstanceAdmins, binding.Members...)
+		case "roles/compute.osLogin", "roles/compute.osAdminLogin":
+			info.SSHUsers = append(info.SSHUsers, binding.Members...)
+		}
+
+		// Check for specific permissions via custom roles (more complex detection)
+		if strings.HasPrefix(binding.Role, "projects/") || strings.HasPrefix(binding.Role, "organizations/") {
+			// Custom role - would need to check permissions, but we note the binding
+			info.InstanceAdmins = append(info.InstanceAdmins, binding.Members...)
+		}
+	}
+
+	return info, nil
+}
+
+// InstancesWithMetadata retrieves instances with full metadata content
+func (ces *ComputeEngineService) InstancesWithMetadata(projectID string) ([]ComputeEngineInfo, *ProjectMetadataInfo, error) {
+	instances, err := ces.Instances(projectID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	projectMeta, err := ces.GetProjectMetadata(projectID)
+	if err != nil {
+		// Don't fail if we can't get project metadata
+		projectMeta = &ProjectMetadataInfo{ProjectID: projectID}
+	}
+
+	return instances, projectMeta, nil
 }

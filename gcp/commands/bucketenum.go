@@ -1,0 +1,391 @@
+package commands
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"sync"
+
+	bucketenumservice "github.com/BishopFox/cloudfox/gcp/services/bucketEnumService"
+	"github.com/BishopFox/cloudfox/globals"
+	"github.com/BishopFox/cloudfox/internal"
+	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/spf13/cobra"
+)
+
+var (
+	bucketEnumMaxObjects int
+)
+
+var GCPBucketEnumCommand = &cobra.Command{
+	Use:     globals.GCP_BUCKETENUM_MODULE_NAME,
+	Aliases: []string{"bucket-scan", "gcs-enum", "sensitive-files"},
+	Short:   "Enumerate GCS buckets for sensitive files (credentials, secrets, configs)",
+	Long: `Enumerate GCS buckets to find potentially sensitive files.
+
+This module scans bucket contents for files that may contain:
+- Credentials (service account keys, SSH keys, certificates)
+- Secrets (environment files, API keys, tokens)
+- Configuration files (may contain hardcoded secrets)
+- Database backups
+- Terraform state files
+- Source code/git repositories
+
+File categories detected:
+- Credential: .json keys, .pem, .key, .p12, SSH keys
+- Secret: .env, passwords, API keys, tokens
+- Config: YAML, properties, settings files
+- Backup: SQL dumps, archives
+- Source: Git repositories
+- Cloud: Cloud Functions source, build artifacts
+
+WARNING: This may take a long time for buckets with many objects.
+Use --max-objects to limit the scan.`,
+	Run: runGCPBucketEnumCommand,
+}
+
+func init() {
+	GCPBucketEnumCommand.Flags().IntVar(&bucketEnumMaxObjects, "max-objects", 1000, "Maximum objects to scan per bucket (0 for unlimited)")
+}
+
+type BucketEnumModule struct {
+	gcpinternal.BaseGCPModule
+	SensitiveFiles []bucketenumservice.SensitiveFileInfo
+	LootMap        map[string]*internal.LootFile
+	mu             sync.Mutex
+}
+
+type BucketEnumOutput struct {
+	Table []internal.TableFile
+	Loot  []internal.LootFile
+}
+
+func (o BucketEnumOutput) TableFiles() []internal.TableFile { return o.Table }
+func (o BucketEnumOutput) LootFiles() []internal.LootFile   { return o.Loot }
+
+func runGCPBucketEnumCommand(cmd *cobra.Command, args []string) {
+	cmdCtx, err := gcpinternal.InitializeCommandContext(cmd, globals.GCP_BUCKETENUM_MODULE_NAME)
+	if err != nil {
+		return
+	}
+
+	module := &BucketEnumModule{
+		BaseGCPModule:  gcpinternal.NewBaseGCPModule(cmdCtx),
+		SensitiveFiles: []bucketenumservice.SensitiveFileInfo{},
+		LootMap:        make(map[string]*internal.LootFile),
+	}
+	module.initializeLootFiles()
+	module.Execute(cmdCtx.Ctx, cmdCtx.Logger)
+}
+
+func (m *BucketEnumModule) Execute(ctx context.Context, logger internal.Logger) {
+	logger.InfoM(fmt.Sprintf("Scanning buckets for sensitive files (max %d objects per bucket)...", bucketEnumMaxObjects), globals.GCP_BUCKETENUM_MODULE_NAME)
+	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_BUCKETENUM_MODULE_NAME, m.processProject)
+
+	if len(m.SensitiveFiles) == 0 {
+		logger.InfoM("No sensitive files found", globals.GCP_BUCKETENUM_MODULE_NAME)
+		return
+	}
+
+	// Count by risk level
+	criticalCount := 0
+	highCount := 0
+	for _, file := range m.SensitiveFiles {
+		switch file.RiskLevel {
+		case "CRITICAL":
+			criticalCount++
+		case "HIGH":
+			highCount++
+		}
+	}
+
+	logger.SuccessM(fmt.Sprintf("Found %d potentially sensitive file(s) (%d CRITICAL, %d HIGH)",
+		len(m.SensitiveFiles), criticalCount, highCount), globals.GCP_BUCKETENUM_MODULE_NAME)
+	m.writeOutput(ctx, logger)
+}
+
+func (m *BucketEnumModule) processProject(ctx context.Context, projectID string, logger internal.Logger) {
+	if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
+		logger.InfoM(fmt.Sprintf("Scanning buckets in project: %s", projectID), globals.GCP_BUCKETENUM_MODULE_NAME)
+	}
+
+	svc := bucketenumservice.New()
+
+	// Get list of buckets
+	buckets, err := svc.GetBucketsList(projectID)
+	if err != nil {
+		m.CommandCounter.Error++
+		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
+			logger.ErrorM(fmt.Sprintf("Error listing buckets in project %s: %v", projectID, err), globals.GCP_BUCKETENUM_MODULE_NAME)
+		}
+		return
+	}
+
+	if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
+		logger.InfoM(fmt.Sprintf("Found %d bucket(s) in project %s", len(buckets), projectID), globals.GCP_BUCKETENUM_MODULE_NAME)
+	}
+
+	// Scan each bucket
+	for _, bucketName := range buckets {
+		files, err := svc.EnumerateBucketSensitiveFiles(bucketName, projectID, bucketEnumMaxObjects)
+		if err != nil {
+			if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
+				logger.ErrorM(fmt.Sprintf("Error scanning bucket %s: %v", bucketName, err), globals.GCP_BUCKETENUM_MODULE_NAME)
+			}
+			continue
+		}
+
+		m.mu.Lock()
+		m.SensitiveFiles = append(m.SensitiveFiles, files...)
+		for _, file := range files {
+			m.addFileToLoot(file)
+		}
+		m.mu.Unlock()
+	}
+}
+
+func (m *BucketEnumModule) initializeLootFiles() {
+	m.LootMap["bucket-sensitive-files"] = &internal.LootFile{
+		Name:     "bucket-sensitive-files",
+		Contents: "# GCS Sensitive Files\n# Generated by CloudFox\n\n",
+	}
+	m.LootMap["bucket-download-commands"] = &internal.LootFile{
+		Name:     "bucket-download-commands",
+		Contents: "# GCS Download Commands for Sensitive Files\n# Generated by CloudFox\n# WARNING: Only use with proper authorization\n\n",
+	}
+	m.LootMap["bucket-credentials"] = &internal.LootFile{
+		Name:     "bucket-credentials",
+		Contents: "# Potential Credential Files in GCS\n# Generated by CloudFox\n# CRITICAL: These may contain service account keys or secrets\n\n",
+	}
+	m.LootMap["bucket-configs"] = &internal.LootFile{
+		Name:     "bucket-configs",
+		Contents: "# Configuration Files in GCS\n# Generated by CloudFox\n# May contain hardcoded secrets\n\n",
+	}
+	m.LootMap["bucket-terraform"] = &internal.LootFile{
+		Name:     "bucket-terraform",
+		Contents: "# Terraform State Files in GCS\n# Generated by CloudFox\n# CRITICAL: Terraform state contains all secrets in plaintext!\n\n",
+	}
+}
+
+func (m *BucketEnumModule) addFileToLoot(file bucketenumservice.SensitiveFileInfo) {
+	// All sensitive files
+	m.LootMap["bucket-sensitive-files"].Contents += fmt.Sprintf(
+		"## [%s] %s\n"+
+			"## Bucket: %s\n"+
+			"## Object: %s\n"+
+			"## Category: %s\n"+
+			"## Description: %s\n"+
+			"## Size: %d bytes\n"+
+			"## Updated: %s\n\n",
+		file.RiskLevel, file.Category,
+		file.BucketName,
+		file.ObjectName,
+		file.Category,
+		file.Description,
+		file.Size,
+		file.Updated,
+	)
+
+	// Download commands
+	m.LootMap["bucket-download-commands"].Contents += fmt.Sprintf(
+		"# [%s] %s - %s\n%s\n\n",
+		file.RiskLevel, file.Category, file.ObjectName,
+		file.DownloadCmd,
+	)
+
+	// Credentials specifically
+	if file.Category == "Credential" || file.RiskLevel == "CRITICAL" {
+		m.LootMap["bucket-credentials"].Contents += fmt.Sprintf(
+			"## [CRITICAL] %s\n"+
+				"## Bucket: gs://%s/%s\n"+
+				"## Description: %s\n"+
+				"## Download: %s\n\n",
+			file.ObjectName,
+			file.BucketName, file.ObjectName,
+			file.Description,
+			file.DownloadCmd,
+		)
+	}
+
+	// Config files
+	if file.Category == "Config" {
+		m.LootMap["bucket-configs"].Contents += fmt.Sprintf(
+			"## [%s] %s\n"+
+				"## Bucket: gs://%s/%s\n"+
+				"## Description: %s\n"+
+				"## Download: %s\n\n",
+			file.RiskLevel, file.ObjectName,
+			file.BucketName, file.ObjectName,
+			file.Description,
+			file.DownloadCmd,
+		)
+	}
+
+	// Terraform state files specifically
+	if strings.Contains(strings.ToLower(file.ObjectName), "tfstate") ||
+		strings.Contains(strings.ToLower(file.ObjectName), "terraform") {
+		m.LootMap["bucket-terraform"].Contents += fmt.Sprintf(
+			"## [CRITICAL] Terraform State Found!\n"+
+				"## Bucket: gs://%s/%s\n"+
+				"## Size: %d bytes\n"+
+				"## Download: %s\n"+
+				"## \n"+
+				"## After download, extract secrets with:\n"+
+				"## cat %s | jq -r '.resources[].instances[].attributes | select(.password != null or .secret != null or .private_key != null)'\n"+
+				"## \n\n",
+			file.BucketName, file.ObjectName,
+			file.Size,
+			file.DownloadCmd,
+			strings.ReplaceAll(file.ObjectName, "/", "_"),
+		)
+	}
+}
+
+func (m *BucketEnumModule) writeOutput(ctx context.Context, logger internal.Logger) {
+	// Main sensitive files table
+	header := []string{
+		"Risk",
+		"Category",
+		"Bucket",
+		"Object Name",
+		"Size",
+		"Description",
+		"Project",
+	}
+
+	var body [][]string
+	for _, file := range m.SensitiveFiles {
+		// Truncate long object names
+		objName := file.ObjectName
+		if len(objName) > 50 {
+			objName = "..." + objName[len(objName)-47:]
+		}
+
+		body = append(body, []string{
+			file.RiskLevel,
+			file.Category,
+			file.BucketName,
+			objName,
+			formatFileSize(file.Size),
+			file.Description,
+			file.ProjectID,
+		})
+	}
+
+	// Critical files table
+	critHeader := []string{
+		"Bucket",
+		"Object Name",
+		"Category",
+		"Description",
+		"Download Command",
+	}
+
+	var critBody [][]string
+	for _, file := range m.SensitiveFiles {
+		if file.RiskLevel == "CRITICAL" {
+			critBody = append(critBody, []string{
+				file.BucketName,
+				file.ObjectName,
+				file.Category,
+				file.Description,
+				file.DownloadCmd,
+			})
+		}
+	}
+
+	// By bucket summary
+	bucketCounts := make(map[string]int)
+	for _, file := range m.SensitiveFiles {
+		bucketCounts[file.BucketName]++
+	}
+
+	bucketHeader := []string{
+		"Bucket",
+		"Sensitive Files",
+		"Project",
+	}
+
+	var bucketBody [][]string
+	bucketProjects := make(map[string]string)
+	for _, file := range m.SensitiveFiles {
+		bucketProjects[file.BucketName] = file.ProjectID
+	}
+	for bucket, count := range bucketCounts {
+		bucketBody = append(bucketBody, []string{
+			bucket,
+			fmt.Sprintf("%d", count),
+			bucketProjects[bucket],
+		})
+	}
+
+	// Collect loot files
+	var lootFiles []internal.LootFile
+	for _, loot := range m.LootMap {
+		if loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# Generated by CloudFox\n\n") {
+			lootFiles = append(lootFiles, *loot)
+		}
+	}
+
+	tables := []internal.TableFile{
+		{
+			Name:   "bucket-enum",
+			Header: header,
+			Body:   body,
+		},
+	}
+
+	if len(critBody) > 0 {
+		tables = append(tables, internal.TableFile{
+			Name:   "bucket-enum-critical",
+			Header: critHeader,
+			Body:   critBody,
+		})
+		logger.InfoM(fmt.Sprintf("[PENTEST] Found %d CRITICAL files (potential credentials)!", len(critBody)), globals.GCP_BUCKETENUM_MODULE_NAME)
+	}
+
+	if len(bucketBody) > 0 {
+		tables = append(tables, internal.TableFile{
+			Name:   "bucket-enum-summary",
+			Header: bucketHeader,
+			Body:   bucketBody,
+		})
+	}
+
+	output := BucketEnumOutput{Table: tables, Loot: lootFiles}
+
+	err := internal.HandleOutputSmart(
+		"gcp",
+		m.Format,
+		m.OutputDirectory,
+		m.Verbosity,
+		m.WrapTable,
+		"project",
+		m.ProjectIDs,
+		m.ProjectIDs,
+		m.Account,
+		output,
+	)
+	if err != nil {
+		logger.ErrorM(fmt.Sprintf("Error writing output: %v", err), globals.GCP_BUCKETENUM_MODULE_NAME)
+	}
+}
+
+func formatFileSize(bytes int64) string {
+	const (
+		KB = 1024
+		MB = KB * 1024
+		GB = MB * 1024
+	)
+
+	switch {
+	case bytes >= GB:
+		return fmt.Sprintf("%.1f GB", float64(bytes)/GB)
+	case bytes >= MB:
+		return fmt.Sprintf("%.1f MB", float64(bytes)/MB)
+	case bytes >= KB:
+		return fmt.Sprintf("%.1f KB", float64(bytes)/KB)
+	default:
+		return fmt.Sprintf("%d B", bytes)
+	}
+}

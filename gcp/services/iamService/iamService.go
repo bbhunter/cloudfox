@@ -104,6 +104,29 @@ type ServiceAccountInfo struct {
 	CustomRoles      []string  `json:"customRoles"`
 	HasHighPrivilege bool      `json:"hasHighPrivilege"`
 	HighPrivRoles    []string  `json:"highPrivRoles"`
+	// Pentest: Impersonation information
+	CanBeImpersonatedBy    []string `json:"canBeImpersonatedBy"`    // Principals who can impersonate this SA
+	CanCreateKeysBy        []string `json:"canCreateKeysBy"`        // Principals who can create keys for this SA
+	CanGetAccessTokenBy    []string `json:"canGetAccessTokenBy"`    // Principals with getAccessToken
+	CanSignBlobBy          []string `json:"canSignBlobBy"`          // Principals with signBlob
+	CanSignJwtBy           []string `json:"canSignJwtBy"`           // Principals with signJwt
+	HasImpersonationRisk   bool     `json:"hasImpersonationRisk"`   // True if any impersonation path exists
+	ImpersonationRiskLevel string   `json:"impersonationRiskLevel"` // CRITICAL, HIGH, MEDIUM, LOW
+}
+
+// SAImpersonationInfo represents who can impersonate/abuse a service account
+type SAImpersonationInfo struct {
+	ServiceAccount      string   `json:"serviceAccount"`
+	ProjectID           string   `json:"projectId"`
+	TokenCreators       []string `json:"tokenCreators"`       // iam.serviceAccounts.getAccessToken
+	KeyCreators         []string `json:"keyCreators"`         // iam.serviceAccountKeys.create
+	SignBlobUsers       []string `json:"signBlobUsers"`       // iam.serviceAccounts.signBlob
+	SignJwtUsers        []string `json:"signJwtUsers"`        // iam.serviceAccounts.signJwt
+	ImplicitDelegators  []string `json:"implicitDelegators"`  // iam.serviceAccounts.implicitDelegation
+	ActAsUsers          []string `json:"actAsUsers"`          // iam.serviceAccounts.actAs
+	SAAdmins            []string `json:"saAdmins"`            // iam.serviceAccounts.* (full admin)
+	RiskLevel           string   `json:"riskLevel"`
+	RiskReasons         []string `json:"riskReasons"`
 }
 
 // ServiceAccountKeyInfo represents a service account key
@@ -1214,4 +1237,216 @@ func (s *IAMService) GetAllEntityPermissionsWithGroupExpansion(projectID string)
 	}
 
 	return expandedPerms, enrichedGroups, nil
+}
+
+// ============================================================================
+// PENTEST: Service Account Impersonation Analysis
+// ============================================================================
+
+// Dangerous permissions for SA impersonation/abuse
+var saImpersonationPermissions = map[string]string{
+	"iam.serviceAccounts.getAccessToken":     "tokenCreator",
+	"iam.serviceAccountKeys.create":          "keyCreator",
+	"iam.serviceAccounts.signBlob":           "signBlob",
+	"iam.serviceAccounts.signJwt":            "signJwt",
+	"iam.serviceAccounts.implicitDelegation": "implicitDelegation",
+	"iam.serviceAccounts.actAs":              "actAs",
+}
+
+// GetServiceAccountIAMPolicy gets the IAM policy for a specific service account
+func (s *IAMService) GetServiceAccountIAMPolicy(ctx context.Context, saEmail string, projectID string) (*SAImpersonationInfo, error) {
+	var iamService *iam.Service
+	var err error
+
+	if s.session != nil {
+		iamService, err = iam.NewService(ctx, s.session.GetClientOption())
+	} else {
+		iamService, err = iam.NewService(ctx)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to create IAM service: %v", err)
+	}
+
+	saResource := fmt.Sprintf("projects/%s/serviceAccounts/%s", projectID, saEmail)
+
+	policy, err := iamService.Projects.ServiceAccounts.GetIamPolicy(saResource).Context(ctx).Do()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get IAM policy for SA %s: %v", saEmail, err)
+	}
+
+	info := &SAImpersonationInfo{
+		ServiceAccount: saEmail,
+		ProjectID:      projectID,
+		RiskReasons:    []string{},
+	}
+
+	// Analyze each binding
+	for _, binding := range policy.Bindings {
+		role := binding.Role
+		members := binding.Members
+
+		// Check for specific dangerous roles
+		switch role {
+		case "roles/iam.serviceAccountTokenCreator":
+			info.TokenCreators = append(info.TokenCreators, members...)
+		case "roles/iam.serviceAccountKeyAdmin":
+			info.KeyCreators = append(info.KeyCreators, members...)
+			info.SAAdmins = append(info.SAAdmins, members...)
+		case "roles/iam.serviceAccountAdmin":
+			info.SAAdmins = append(info.SAAdmins, members...)
+			info.TokenCreators = append(info.TokenCreators, members...)
+			info.KeyCreators = append(info.KeyCreators, members...)
+		case "roles/iam.serviceAccountUser":
+			info.ActAsUsers = append(info.ActAsUsers, members...)
+		case "roles/owner", "roles/editor":
+			// These grant broad SA access
+			info.SAAdmins = append(info.SAAdmins, members...)
+		}
+	}
+
+	// Calculate risk level
+	info.RiskLevel, info.RiskReasons = calculateSAImpersonationRisk(info)
+
+	return info, nil
+}
+
+// GetAllServiceAccountImpersonation analyzes impersonation risks for all SAs in a project
+func (s *IAMService) GetAllServiceAccountImpersonation(projectID string) ([]SAImpersonationInfo, error) {
+	ctx := context.Background()
+
+	// Get all service accounts
+	serviceAccounts, err := s.ServiceAccounts(projectID)
+	if err != nil {
+		return nil, err
+	}
+
+	var results []SAImpersonationInfo
+
+	for _, sa := range serviceAccounts {
+		info, err := s.GetServiceAccountIAMPolicy(ctx, sa.Email, projectID)
+		if err != nil {
+			// Log but don't fail - we might not have permission
+			logger.InfoM(fmt.Sprintf("Could not get IAM policy for SA %s: %v", sa.Email, err), globals.GCP_IAM_MODULE_NAME)
+			continue
+		}
+		results = append(results, *info)
+	}
+
+	return results, nil
+}
+
+// ServiceAccountsWithImpersonation returns service accounts with impersonation analysis
+func (s *IAMService) ServiceAccountsWithImpersonation(projectID string) ([]ServiceAccountInfo, error) {
+	ctx := context.Background()
+
+	// Get base service account info
+	serviceAccounts, err := s.ServiceAccounts(projectID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Enrich with impersonation info
+	for i := range serviceAccounts {
+		sa := &serviceAccounts[i]
+
+		info, err := s.GetServiceAccountIAMPolicy(ctx, sa.Email, projectID)
+		if err != nil {
+			// Log but continue
+			continue
+		}
+
+		// Populate impersonation fields
+		sa.CanGetAccessTokenBy = info.TokenCreators
+		sa.CanCreateKeysBy = info.KeyCreators
+		sa.CanSignBlobBy = info.SignBlobUsers
+		sa.CanSignJwtBy = info.SignJwtUsers
+
+		// Combine all impersonation paths
+		allImpersonators := make(map[string]bool)
+		for _, m := range info.TokenCreators {
+			allImpersonators[m] = true
+		}
+		for _, m := range info.KeyCreators {
+			allImpersonators[m] = true
+		}
+		for _, m := range info.SignBlobUsers {
+			allImpersonators[m] = true
+		}
+		for _, m := range info.SignJwtUsers {
+			allImpersonators[m] = true
+		}
+		for _, m := range info.SAAdmins {
+			allImpersonators[m] = true
+		}
+
+		for m := range allImpersonators {
+			sa.CanBeImpersonatedBy = append(sa.CanBeImpersonatedBy, m)
+		}
+
+		sa.HasImpersonationRisk = len(sa.CanBeImpersonatedBy) > 0
+		sa.ImpersonationRiskLevel = info.RiskLevel
+	}
+
+	return serviceAccounts, nil
+}
+
+func calculateSAImpersonationRisk(info *SAImpersonationInfo) (string, []string) {
+	var reasons []string
+	score := 0
+
+	// Token creators are critical - direct impersonation
+	if len(info.TokenCreators) > 0 {
+		reasons = append(reasons, fmt.Sprintf("%d principal(s) can get access tokens (impersonate)", len(info.TokenCreators)))
+		score += 3
+
+		// Check for public access
+		for _, m := range info.TokenCreators {
+			if m == "allUsers" || m == "allAuthenticatedUsers" {
+				reasons = append(reasons, "PUBLIC can impersonate this SA!")
+				score += 5
+			}
+		}
+	}
+
+	// Key creators are critical - persistent access
+	if len(info.KeyCreators) > 0 {
+		reasons = append(reasons, fmt.Sprintf("%d principal(s) can create keys (persistent access)", len(info.KeyCreators)))
+		score += 3
+
+		for _, m := range info.KeyCreators {
+			if m == "allUsers" || m == "allAuthenticatedUsers" {
+				reasons = append(reasons, "PUBLIC can create keys for this SA!")
+				score += 5
+			}
+		}
+	}
+
+	// SignBlob/SignJwt - can forge tokens
+	if len(info.SignBlobUsers) > 0 || len(info.SignJwtUsers) > 0 {
+		reasons = append(reasons, "Principals can sign blobs/JWTs (token forgery)")
+		score += 2
+	}
+
+	// SA Admins
+	if len(info.SAAdmins) > 0 {
+		reasons = append(reasons, fmt.Sprintf("%d SA admin(s)", len(info.SAAdmins)))
+		score += 1
+	}
+
+	// ActAs users (needed for attaching SA to resources)
+	if len(info.ActAsUsers) > 0 {
+		reasons = append(reasons, fmt.Sprintf("%d principal(s) can actAs this SA", len(info.ActAsUsers)))
+		score += 1
+	}
+
+	if score >= 5 {
+		return "CRITICAL", reasons
+	} else if score >= 3 {
+		return "HIGH", reasons
+	} else if score >= 2 {
+		return "MEDIUM", reasons
+	} else if score >= 1 {
+		return "LOW", reasons
+	}
+	return "INFO", reasons
 }

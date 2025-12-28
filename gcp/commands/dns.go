@@ -1,0 +1,398 @@
+package commands
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"sync"
+
+	DNSService "github.com/BishopFox/cloudfox/gcp/services/dnsService"
+	"github.com/BishopFox/cloudfox/globals"
+	"github.com/BishopFox/cloudfox/internal"
+	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/spf13/cobra"
+)
+
+var GCPDNSCommand = &cobra.Command{
+	Use:     globals.GCP_DNS_MODULE_NAME,
+	Aliases: []string{"zones", "cloud-dns"},
+	Short:   "Enumerate Cloud DNS zones and records with security analysis",
+	Long: `Enumerate Cloud DNS managed zones and records across projects.
+
+Features:
+- Lists all DNS managed zones (public and private)
+- Shows zone configuration (DNSSEC, visibility, peering)
+- Enumerates DNS records for each zone
+- Identifies interesting records (A, CNAME, TXT, MX)
+- Shows private zone VPC bindings
+- Generates gcloud commands for DNS management
+
+Security Columns:
+- Visibility: public or private
+- DNSSEC: Whether DNSSEC is enabled
+- Networks: VPC networks for private zones
+- Peering: Cross-project DNS peering
+
+Attack Surface:
+- Public zones expose domain infrastructure
+- TXT records may contain sensitive info (SPF, DKIM, verification)
+- Private zones indicate internal network structure
+- DNS forwarding may expose internal resolvers`,
+	Run: runGCPDNSCommand,
+}
+
+// ------------------------------
+// Module Struct
+// ------------------------------
+type DNSModule struct {
+	gcpinternal.BaseGCPModule
+
+	Zones   []DNSService.ZoneInfo
+	Records []DNSService.RecordInfo
+	LootMap map[string]*internal.LootFile
+	mu      sync.Mutex
+}
+
+// ------------------------------
+// Output Struct
+// ------------------------------
+type DNSOutput struct {
+	Table []internal.TableFile
+	Loot  []internal.LootFile
+}
+
+func (o DNSOutput) TableFiles() []internal.TableFile { return o.Table }
+func (o DNSOutput) LootFiles() []internal.LootFile   { return o.Loot }
+
+// ------------------------------
+// Command Entry Point
+// ------------------------------
+func runGCPDNSCommand(cmd *cobra.Command, args []string) {
+	cmdCtx, err := gcpinternal.InitializeCommandContext(cmd, globals.GCP_DNS_MODULE_NAME)
+	if err != nil {
+		return
+	}
+
+	module := &DNSModule{
+		BaseGCPModule: gcpinternal.NewBaseGCPModule(cmdCtx),
+		Zones:         []DNSService.ZoneInfo{},
+		Records:       []DNSService.RecordInfo{},
+		LootMap:       make(map[string]*internal.LootFile),
+	}
+
+	module.initializeLootFiles()
+	module.Execute(cmdCtx.Ctx, cmdCtx.Logger)
+}
+
+// ------------------------------
+// Module Execution
+// ------------------------------
+func (m *DNSModule) Execute(ctx context.Context, logger internal.Logger) {
+	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_DNS_MODULE_NAME, m.processProject)
+
+	if len(m.Zones) == 0 {
+		logger.InfoM("No DNS zones found", globals.GCP_DNS_MODULE_NAME)
+		return
+	}
+
+	// Count zone types
+	publicCount := 0
+	privateCount := 0
+	for _, zone := range m.Zones {
+		if zone.Visibility == "public" {
+			publicCount++
+		} else {
+			privateCount++
+		}
+	}
+
+	msg := fmt.Sprintf("Found %d zone(s), %d record(s)", len(m.Zones), len(m.Records))
+	if publicCount > 0 {
+		msg += fmt.Sprintf(" [%d public]", publicCount)
+	}
+	if privateCount > 0 {
+		msg += fmt.Sprintf(" [%d private]", privateCount)
+	}
+	logger.SuccessM(msg, globals.GCP_DNS_MODULE_NAME)
+
+	m.writeOutput(ctx, logger)
+}
+
+// ------------------------------
+// Project Processor
+// ------------------------------
+func (m *DNSModule) processProject(ctx context.Context, projectID string, logger internal.Logger) {
+	if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
+		logger.InfoM(fmt.Sprintf("Enumerating DNS in project: %s", projectID), globals.GCP_DNS_MODULE_NAME)
+	}
+
+	ds := DNSService.New()
+
+	// Get zones
+	zones, err := ds.Zones(projectID)
+	if err != nil {
+		m.CommandCounter.Error++
+		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
+			logger.ErrorM(fmt.Sprintf("Error enumerating DNS zones in project %s: %v", projectID, err), globals.GCP_DNS_MODULE_NAME)
+		}
+		return
+	}
+
+	m.mu.Lock()
+	m.Zones = append(m.Zones, zones...)
+
+	for _, zone := range zones {
+		m.addZoneToLoot(zone)
+
+		// Get records for each zone
+		records, err := ds.Records(projectID, zone.Name)
+		if err != nil {
+			if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
+				logger.ErrorM(fmt.Sprintf("Error enumerating DNS records in zone %s: %v", zone.Name, err), globals.GCP_DNS_MODULE_NAME)
+			}
+			continue
+		}
+
+		m.Records = append(m.Records, records...)
+		for _, record := range records {
+			m.addRecordToLoot(record, zone)
+		}
+	}
+	m.mu.Unlock()
+
+	if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
+		logger.InfoM(fmt.Sprintf("Found %d zone(s) in project %s", len(zones), projectID), globals.GCP_DNS_MODULE_NAME)
+	}
+}
+
+// ------------------------------
+// Loot File Management
+// ------------------------------
+func (m *DNSModule) initializeLootFiles() {
+	m.LootMap["dns-gcloud-commands"] = &internal.LootFile{
+		Name:     "dns-gcloud-commands",
+		Contents: "# Cloud DNS gcloud Commands\n# Generated by CloudFox\n\n",
+	}
+	m.LootMap["dns-public-zones"] = &internal.LootFile{
+		Name:     "dns-public-zones",
+		Contents: "# Public DNS Zones\n# Generated by CloudFox\n# These zones are publicly resolvable\n\n",
+	}
+	m.LootMap["dns-txt-records"] = &internal.LootFile{
+		Name:     "dns-txt-records",
+		Contents: "# DNS TXT Records\n# Generated by CloudFox\n# May contain SPF, DKIM, verification tokens, etc.\n\n",
+	}
+	m.LootMap["dns-a-records"] = &internal.LootFile{
+		Name:     "dns-a-records",
+		Contents: "# DNS A Records\n# Generated by CloudFox\n# IP addresses associated with domains\n\n",
+	}
+	m.LootMap["dns-exploitation"] = &internal.LootFile{
+		Name:     "dns-exploitation",
+		Contents: "# DNS Exploitation Commands\n# Generated by CloudFox\n# WARNING: Only use with proper authorization\n\n",
+	}
+}
+
+func (m *DNSModule) addZoneToLoot(zone DNSService.ZoneInfo) {
+	// gcloud commands
+	m.LootMap["dns-gcloud-commands"].Contents += fmt.Sprintf(
+		"# Zone: %s (Project: %s)\n"+
+			"gcloud dns managed-zones describe %s --project=%s\n"+
+			"gcloud dns record-sets list --zone=%s --project=%s\n\n",
+		zone.Name, zone.ProjectID,
+		zone.Name, zone.ProjectID,
+		zone.Name, zone.ProjectID,
+	)
+
+	// Public zones
+	if zone.Visibility == "public" {
+		m.LootMap["dns-public-zones"].Contents += fmt.Sprintf(
+			"# Zone: %s\n"+
+				"# DNS Name: %s\n"+
+				"# Project: %s\n"+
+				"# DNSSEC: %s\n\n",
+			zone.Name,
+			zone.DNSName,
+			zone.ProjectID,
+			zone.DNSSECState,
+		)
+	}
+
+	// Exploitation commands
+	m.LootMap["dns-exploitation"].Contents += fmt.Sprintf(
+		"# Zone: %s (Project: %s)\n"+
+			"# DNS Name: %s\n"+
+			"# Visibility: %s\n",
+		zone.Name, zone.ProjectID,
+		zone.DNSName,
+		zone.Visibility,
+	)
+
+	if len(zone.PrivateNetworks) > 0 {
+		m.LootMap["dns-exploitation"].Contents += fmt.Sprintf(
+			"# Private Networks: %s\n",
+			strings.Join(zone.PrivateNetworks, ", "),
+		)
+	}
+
+	m.LootMap["dns-exploitation"].Contents += fmt.Sprintf(
+		"\n# Add a record (if you have dns.changes.create):\n"+
+			"gcloud dns record-sets create attacker.%s --type=A --ttl=300 --rrdatas=\"1.2.3.4\" --zone=%s --project=%s\n\n"+
+			"# Delete zone (if you have dns.managedZones.delete):\n"+
+			"gcloud dns managed-zones delete %s --project=%s\n\n",
+		zone.DNSName, zone.Name, zone.ProjectID,
+		zone.Name, zone.ProjectID,
+	)
+}
+
+func (m *DNSModule) addRecordToLoot(record DNSService.RecordInfo, zone DNSService.ZoneInfo) {
+	// TXT records (may contain sensitive info)
+	if record.Type == "TXT" {
+		m.LootMap["dns-txt-records"].Contents += fmt.Sprintf(
+			"# %s (Zone: %s)\n",
+			record.Name, zone.DNSName,
+		)
+		for _, data := range record.RRDatas {
+			m.LootMap["dns-txt-records"].Contents += fmt.Sprintf("%s\n", data)
+		}
+		m.LootMap["dns-txt-records"].Contents += "\n"
+	}
+
+	// A records (IP addresses)
+	if record.Type == "A" || record.Type == "AAAA" {
+		m.LootMap["dns-a-records"].Contents += fmt.Sprintf(
+			"%s\t%s\t%s\n",
+			record.Name, record.Type, strings.Join(record.RRDatas, ", "),
+		)
+	}
+}
+
+// ------------------------------
+// Output Generation
+// ------------------------------
+func (m *DNSModule) writeOutput(ctx context.Context, logger internal.Logger) {
+	// Zones table
+	zonesHeader := []string{
+		"Project ID",
+		"Zone Name",
+		"DNS Name",
+		"Visibility",
+		"DNSSEC",
+		"Networks/Peering",
+		"Forwarding",
+	}
+
+	var zonesBody [][]string
+	for _, zone := range m.Zones {
+		// Format DNSSEC
+		dnssec := zone.DNSSECState
+		if dnssec == "" {
+			dnssec = "off"
+		}
+
+		// Format networks/peering
+		networkInfo := "-"
+		if len(zone.PrivateNetworks) > 0 {
+			networkInfo = strings.Join(zone.PrivateNetworks, ", ")
+		} else if zone.PeeringNetwork != "" {
+			networkInfo = fmt.Sprintf("Peering: %s", zone.PeeringNetwork)
+			if zone.PeeringTargetProject != "" {
+				networkInfo += fmt.Sprintf(" (%s)", zone.PeeringTargetProject)
+			}
+		}
+
+		// Format forwarding
+		forwarding := "-"
+		if len(zone.ForwardingTargets) > 0 {
+			forwarding = strings.Join(zone.ForwardingTargets, ", ")
+		}
+
+		zonesBody = append(zonesBody, []string{
+			zone.ProjectID,
+			zone.Name,
+			zone.DNSName,
+			zone.Visibility,
+			dnssec,
+			networkInfo,
+			forwarding,
+		})
+	}
+
+	// Records table (interesting types only)
+	recordsHeader := []string{
+		"Zone",
+		"Name",
+		"Type",
+		"TTL",
+		"Data",
+	}
+
+	var recordsBody [][]string
+	interestingTypes := map[string]bool{"A": true, "AAAA": true, "CNAME": true, "MX": true, "TXT": true, "SRV": true}
+	for _, record := range m.Records {
+		if !interestingTypes[record.Type] {
+			continue
+		}
+
+		// Format data
+		data := strings.Join(record.RRDatas, ", ")
+		if len(data) > 60 {
+			data = data[:57] + "..."
+		}
+
+		recordsBody = append(recordsBody, []string{
+			record.ZoneName,
+			record.Name,
+			record.Type,
+			fmt.Sprintf("%d", record.TTL),
+			data,
+		})
+	}
+
+	// Collect loot files
+	var lootFiles []internal.LootFile
+	for _, loot := range m.LootMap {
+		if loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# Generated by CloudFox\n\n") {
+			lootFiles = append(lootFiles, *loot)
+		}
+	}
+
+	// Build table files
+	tableFiles := []internal.TableFile{}
+
+	if len(zonesBody) > 0 {
+		tableFiles = append(tableFiles, internal.TableFile{
+			Name:   globals.GCP_DNS_MODULE_NAME + "-zones",
+			Header: zonesHeader,
+			Body:   zonesBody,
+		})
+	}
+
+	if len(recordsBody) > 0 {
+		tableFiles = append(tableFiles, internal.TableFile{
+			Name:   globals.GCP_DNS_MODULE_NAME + "-records",
+			Header: recordsHeader,
+			Body:   recordsBody,
+		})
+	}
+
+	output := DNSOutput{
+		Table: tableFiles,
+		Loot:  lootFiles,
+	}
+
+	err := internal.HandleOutputSmart(
+		"gcp",
+		m.Format,
+		m.OutputDirectory,
+		m.Verbosity,
+		m.WrapTable,
+		"project",
+		m.ProjectIDs,
+		m.ProjectIDs,
+		m.Account,
+		output,
+	)
+	if err != nil {
+		logger.ErrorM(fmt.Sprintf("Error writing output: %v", err), globals.GCP_DNS_MODULE_NAME)
+		m.CommandCounter.Error++
+	}
+}
