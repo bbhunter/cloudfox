@@ -200,6 +200,7 @@ func (m *PrivescModule) writeOutput(ctx context.Context, logger internal.Logger)
 		"Type",
 		"Target",
 		"Permissions",
+		"Project Name",
 		"Project",
 	}
 
@@ -217,6 +218,7 @@ func (m *PrivescModule) writeOutput(ctx context.Context, logger internal.Logger)
 			path.PrincipalType,
 			path.TargetResource,
 			perms,
+			m.GetProjectName(path.ProjectID),
 			path.ProjectID,
 		})
 	}
@@ -228,6 +230,7 @@ func (m *PrivescModule) writeOutput(ctx context.Context, logger internal.Logger)
 		"Target",
 		"Description",
 		"Exploit Command",
+		"Project Name",
 		"Project",
 	}
 
@@ -245,6 +248,7 @@ func (m *PrivescModule) writeOutput(ctx context.Context, logger internal.Logger)
 				path.TargetResource,
 				path.Description,
 				cmd,
+				m.GetProjectName(path.ProjectID),
 				path.ProjectID,
 			})
 		}
@@ -314,6 +318,11 @@ func (m *PrivescModule) writeOutput(ctx context.Context, logger internal.Logger)
 
 	output := PrivescOutput{Table: tables, Loot: lootFiles}
 
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
+
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
@@ -321,7 +330,7 @@ func (m *PrivescModule) writeOutput(ctx context.Context, logger internal.Logger)
 		m.Verbosity,
 		m.WrapTable,
 		"project",
-		m.ProjectIDs,
+		scopeNames,
 		m.ProjectIDs,
 		m.Account,
 		output,

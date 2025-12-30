@@ -687,7 +687,8 @@ func (m *NetworkTopologyModule) writeOutput(ctx context.Context, logger internal
 	// VPC Networks table
 	networksHeader := []string{
 		"Network",
-		"Project",
+		"Project Name",
+		"Project ID",
 		"Routing Mode",
 		"Subnets",
 		"Peerings",
@@ -704,6 +705,7 @@ func (m *NetworkTopologyModule) writeOutput(ctx context.Context, logger internal
 
 		networksBody = append(networksBody, []string{
 			n.Name,
+			m.GetProjectName(n.ProjectID),
 			n.ProjectID,
 			n.RoutingMode,
 			fmt.Sprintf("%d", n.SubnetCount),
@@ -822,7 +824,8 @@ func (m *NetworkTopologyModule) writeOutput(ctx context.Context, logger internal
 	// Cloud NAT table
 	natHeader := []string{
 		"Name",
-		"Project",
+		"Project Name",
+		"Project ID",
 		"Region",
 		"Network",
 		"NAT IPs",
@@ -838,6 +841,7 @@ func (m *NetworkTopologyModule) writeOutput(ctx context.Context, logger internal
 
 		natBody = append(natBody, []string{
 			nat.Name,
+			m.GetProjectName(nat.ProjectID),
 			nat.ProjectID,
 			nat.Region,
 			m.extractNetworkName(nat.Network),
@@ -933,6 +937,12 @@ func (m *NetworkTopologyModule) writeOutput(ctx context.Context, logger internal
 		Loot:  lootFiles,
 	}
 
+	// Build scope names with project names
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, projectID := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(projectID)
+	}
+
 	// Write output
 	err := internal.HandleOutputSmart(
 		"gcp",
@@ -942,7 +952,7 @@ func (m *NetworkTopologyModule) writeOutput(ctx context.Context, logger internal
 		m.WrapTable,
 		"project",
 		m.ProjectIDs,
-		m.ProjectIDs,
+		scopeNames,
 		m.Account,
 		output,
 	)

@@ -504,6 +504,7 @@ func (m *EndpointsModule) writeOutput(ctx context.Context, logger internal.Logge
 		"Resource",
 		"Resource Type",
 		"Region",
+		"Project Name",
 		"Project",
 		"Status",
 	}
@@ -518,6 +519,7 @@ func (m *EndpointsModule) writeOutput(ctx context.Context, logger internal.Logge
 			ep.Resource,
 			ep.ResourceType,
 			ep.Region,
+			m.GetProjectName(ep.ProjectID),
 			ep.ProjectID,
 			ep.Status,
 		})
@@ -531,6 +533,7 @@ func (m *EndpointsModule) writeOutput(ctx context.Context, logger internal.Logge
 		"Ports",
 		"Target",
 		"Region",
+		"Project Name",
 		"Project",
 	}
 
@@ -544,6 +547,7 @@ func (m *EndpointsModule) writeOutput(ctx context.Context, logger internal.Logge
 				ep.Port,
 				ep.Resource,
 				ep.Region,
+				m.GetProjectName(ep.ProjectID),
 				ep.ProjectID,
 			})
 		}
@@ -555,6 +559,7 @@ func (m *EndpointsModule) writeOutput(ctx context.Context, logger internal.Logge
 		"Address",
 		"Zone",
 		"Status",
+		"Project Name",
 		"Project",
 	}
 
@@ -566,6 +571,7 @@ func (m *EndpointsModule) writeOutput(ctx context.Context, logger internal.Logge
 				ep.Address,
 				ep.Region,
 				ep.Status,
+				m.GetProjectName(ep.ProjectID),
 				ep.ProjectID,
 			})
 		}
@@ -578,6 +584,7 @@ func (m *EndpointsModule) writeOutput(ctx context.Context, logger internal.Logge
 		"Used By",
 		"Region",
 		"Status",
+		"Project Name",
 		"Project",
 	}
 
@@ -590,6 +597,7 @@ func (m *EndpointsModule) writeOutput(ctx context.Context, logger internal.Logge
 				ep.Resource,
 				ep.Region,
 				ep.Status,
+				m.GetProjectName(ep.ProjectID),
 				ep.ProjectID,
 			})
 		}
@@ -646,6 +654,10 @@ func (m *EndpointsModule) writeOutput(ctx context.Context, logger internal.Logge
 	}
 
 	// Write output using HandleOutputSmart with scope support
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
@@ -654,7 +666,7 @@ func (m *EndpointsModule) writeOutput(ctx context.Context, logger internal.Logge
 		m.WrapTable,
 		"project",           // scopeType
 		m.ProjectIDs,        // scopeIdentifiers
-		m.ProjectIDs,        // scopeNames (same as IDs for GCP projects)
+		scopeNames,          // scopeNames
 		m.Account,
 		output,
 	)

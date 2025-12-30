@@ -224,6 +224,7 @@ func (m *OrgPoliciesModule) writeOutput(ctx context.Context, logger internal.Log
 		"DenyAll",
 		"Inherit",
 		"Security Impact",
+		"Project Name",
 		"Project",
 	}
 
@@ -242,6 +243,7 @@ func (m *OrgPoliciesModule) writeOutput(ctx context.Context, logger internal.Log
 			orgPolicyBoolToYesNo(policy.DenyAll),
 			orgPolicyBoolToYesNo(policy.InheritParent),
 			impact,
+			m.GetProjectName(policy.ProjectID),
 			policy.ProjectID,
 		})
 	}
@@ -250,6 +252,7 @@ func (m *OrgPoliciesModule) writeOutput(ctx context.Context, logger internal.Log
 	weakHeader := []string{
 		"Risk",
 		"Constraint",
+		"Project Name",
 		"Project",
 		"Security Impact",
 		"Reasons",
@@ -266,6 +269,7 @@ func (m *OrgPoliciesModule) writeOutput(ctx context.Context, logger internal.Log
 			weakBody = append(weakBody, []string{
 				policy.RiskLevel,
 				policy.Constraint,
+				m.GetProjectName(policy.ProjectID),
 				policy.ProjectID,
 				policy.SecurityImpact,
 				reasons,
@@ -300,6 +304,11 @@ func (m *OrgPoliciesModule) writeOutput(ctx context.Context, logger internal.Log
 
 	output := OrgPoliciesOutput{Table: tables, Loot: lootFiles}
 
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
+
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
@@ -307,7 +316,7 @@ func (m *OrgPoliciesModule) writeOutput(ctx context.Context, logger internal.Log
 		m.Verbosity,
 		m.WrapTable,
 		"project",
-		m.ProjectIDs,
+		scopeNames,
 		m.ProjectIDs,
 		m.Account,
 		output,

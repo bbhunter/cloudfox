@@ -129,7 +129,7 @@ func (m *DataflowModule) addToLoot(job dataflowservice.JobInfo) {
 func (m *DataflowModule) writeOutput(ctx context.Context, logger internal.Logger) {
 	header := []string{
 		"Name", "Type", "State", "Location", "Service Account",
-		"Public IPs", "Workers", "Risk", "Project",
+		"Public IPs", "Workers", "Risk", "Project Name", "Project",
 	}
 
 	var body [][]string
@@ -155,6 +155,7 @@ func (m *DataflowModule) writeOutput(ctx context.Context, logger internal.Logger
 			publicIPs,
 			fmt.Sprintf("%d", job.NumWorkers),
 			job.RiskLevel,
+			m.GetProjectName(job.ProjectID),
 			job.ProjectID,
 		})
 	}
@@ -176,6 +177,7 @@ func (m *DataflowModule) writeOutput(ctx context.Context, logger internal.Logger
 				job.Name,
 				job.RiskLevel,
 				strings.Join(job.RiskReasons, "; "),
+				m.GetProjectName(job.ProjectID),
 				job.ProjectID,
 			})
 		}
@@ -184,15 +186,20 @@ func (m *DataflowModule) writeOutput(ctx context.Context, logger internal.Logger
 	if len(highRiskBody) > 0 {
 		tables = append(tables, internal.TableFile{
 			Name:   "dataflow-risks",
-			Header: []string{"Job", "Risk Level", "Reasons", "Project"},
+			Header: []string{"Job", "Risk Level", "Reasons", "Project Name", "Project"},
 			Body:   highRiskBody,
 		})
 	}
 
 	output := DataflowOutput{Table: tables, Loot: lootFiles}
 
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
+
 	err := internal.HandleOutputSmart("gcp", m.Format, m.OutputDirectory, m.Verbosity, m.WrapTable,
-		"project", m.ProjectIDs, m.ProjectIDs, m.Account, output)
+		"project", m.ProjectIDs, scopeNames, m.Account, output)
 	if err != nil {
 		logger.ErrorM(fmt.Sprintf("Error writing output: %v", err), globals.GCP_DATAFLOW_MODULE_NAME)
 	}

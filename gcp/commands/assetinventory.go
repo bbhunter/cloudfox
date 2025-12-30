@@ -239,7 +239,7 @@ func (m *AssetInventoryModule) writeOutput(ctx context.Context, logger internal.
 			Body:   body,
 		})
 	} else {
-		header := []string{"Name", "Asset Type", "Location", "Project"}
+		header := []string{"Name", "Asset Type", "Location", "Project Name", "Project"}
 		if checkIAM {
 			header = append(header, "IAM Bindings", "Public Access", "Risk")
 		}
@@ -250,6 +250,7 @@ func (m *AssetInventoryModule) writeOutput(ctx context.Context, logger internal.
 				asset.Name,
 				assetservice.ExtractAssetTypeShort(asset.AssetType),
 				asset.Location,
+				m.GetProjectName(asset.ProjectID),
 				asset.ProjectID,
 			}
 			if checkIAM {
@@ -277,6 +278,7 @@ func (m *AssetInventoryModule) writeOutput(ctx context.Context, logger internal.
 						asset.AssetType,
 						asset.RiskLevel,
 						strings.Join(asset.RiskReasons, "; "),
+						m.GetProjectName(asset.ProjectID),
 						asset.ProjectID,
 					})
 				}
@@ -285,7 +287,7 @@ func (m *AssetInventoryModule) writeOutput(ctx context.Context, logger internal.
 			if len(publicBody) > 0 {
 				tables = append(tables, internal.TableFile{
 					Name:   "public-assets",
-					Header: []string{"Name", "Asset Type", "Risk Level", "Reasons", "Project"},
+					Header: []string{"Name", "Asset Type", "Risk Level", "Reasons", "Project Name", "Project"},
 					Body:   publicBody,
 				})
 			}
@@ -301,8 +303,13 @@ func (m *AssetInventoryModule) writeOutput(ctx context.Context, logger internal.
 
 	output := AssetInventoryOutput{Table: tables, Loot: lootFiles}
 
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
+
 	err := internal.HandleOutputSmart("gcp", m.Format, m.OutputDirectory, m.Verbosity, m.WrapTable,
-		"project", m.ProjectIDs, m.ProjectIDs, m.Account, output)
+		"project", m.ProjectIDs, scopeNames, m.Account, output)
 	if err != nil {
 		logger.ErrorM(fmt.Sprintf("Error writing output: %v", err), globals.GCP_ASSET_INVENTORY_MODULE_NAME)
 	}

@@ -181,6 +181,7 @@ func (m *SourceReposModule) writeOutput(ctx context.Context, logger internal.Log
 		"Mirror",
 		"Triggers",
 		"Risk",
+		"Project Name",
 		"Project",
 	}
 
@@ -208,6 +209,7 @@ func (m *SourceReposModule) writeOutput(ctx context.Context, logger internal.Log
 			mirror,
 			fmt.Sprintf("%d", repo.PubsubConfigs),
 			repo.RiskLevel,
+			m.GetProjectName(repo.ProjectID),
 			repo.ProjectID,
 		})
 	}
@@ -233,6 +235,11 @@ func (m *SourceReposModule) writeOutput(ctx context.Context, logger internal.Log
 		Loot:  lootFiles,
 	}
 
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
+
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
@@ -241,7 +248,7 @@ func (m *SourceReposModule) writeOutput(ctx context.Context, logger internal.Log
 		m.WrapTable,
 		"project",
 		m.ProjectIDs,
-		m.ProjectIDs,
+		scopeNames,
 		m.Account,
 		output,
 	)

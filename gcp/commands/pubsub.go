@@ -413,6 +413,7 @@ func (m *PubSubModule) addSubscriptionToLoot(sub PubSubService.SubscriptionInfo)
 func (m *PubSubModule) writeOutput(ctx context.Context, logger internal.Logger) {
 	// Topics table
 	topicsHeader := []string{
+		"Project Name",
 		"Project ID",
 		"Topic Name",
 		"Subscriptions",
@@ -447,6 +448,7 @@ func (m *PubSubModule) writeOutput(ctx context.Context, logger internal.Logger) 
 		}
 
 		topicsBody = append(topicsBody, []string{
+			m.GetProjectName(topic.ProjectID),
 			topic.ProjectID,
 			topic.Name,
 			fmt.Sprintf("%d", topic.SubscriptionCount),
@@ -459,6 +461,7 @@ func (m *PubSubModule) writeOutput(ctx context.Context, logger internal.Logger) 
 
 	// Subscriptions table
 	subsHeader := []string{
+		"Project Name",
 		"Project ID",
 		"Subscription",
 		"Topic",
@@ -498,6 +501,7 @@ func (m *PubSubModule) writeOutput(ctx context.Context, logger internal.Logger) 
 		}
 
 		subsBody = append(subsBody, []string{
+			m.GetProjectName(sub.ProjectID),
 			sub.ProjectID,
 			sub.Name,
 			sub.Topic,
@@ -541,6 +545,11 @@ func (m *PubSubModule) writeOutput(ctx context.Context, logger internal.Logger) 
 		Loot:  lootFiles,
 	}
 
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
+
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
@@ -549,7 +558,7 @@ func (m *PubSubModule) writeOutput(ctx context.Context, logger internal.Logger) 
 		m.WrapTable,
 		"project",
 		m.ProjectIDs,
-		m.ProjectIDs,
+		scopeNames,
 		m.Account,
 		output,
 	)

@@ -269,6 +269,7 @@ func (m *OrganizationsModule) writeOutput(ctx context.Context, logger internal.L
 
 	// Projects table
 	projectsHeader := []string{
+		"Project Name",
 		"Project ID",
 		"Display Name",
 		"Parent",
@@ -278,6 +279,7 @@ func (m *OrganizationsModule) writeOutput(ctx context.Context, logger internal.L
 	var projectsBody [][]string
 	for _, proj := range m.Projects {
 		projectsBody = append(projectsBody, []string{
+			m.GetProjectName(proj.ProjectID),
 			proj.ProjectID,
 			proj.DisplayName,
 			proj.Parent,
@@ -287,6 +289,7 @@ func (m *OrganizationsModule) writeOutput(ctx context.Context, logger internal.L
 
 	// Ancestry table
 	ancestryHeader := []string{
+		"Project Name",
 		"Project",
 		"Ancestry Path",
 	}
@@ -304,6 +307,7 @@ func (m *OrganizationsModule) writeOutput(ctx context.Context, logger internal.L
 				path = append(path, fmt.Sprintf("%s:%s", node.Type, node.ID))
 			}
 			ancestryBody = append(ancestryBody, []string{
+				m.GetProjectName(projectID),
 				projectID,
 				strings.Join(path, " -> "),
 			})
@@ -359,6 +363,10 @@ func (m *OrganizationsModule) writeOutput(ctx context.Context, logger internal.L
 	}
 
 	// Write output using HandleOutputSmart with scope support
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
@@ -367,7 +375,7 @@ func (m *OrganizationsModule) writeOutput(ctx context.Context, logger internal.L
 		m.WrapTable,
 		"project",           // scopeType
 		m.ProjectIDs,        // scopeIdentifiers
-		m.ProjectIDs,        // scopeNames (same as IDs for GCP projects)
+		scopeNames,          // scopeNames
 		m.Account,
 		output,
 	)

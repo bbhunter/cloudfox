@@ -120,7 +120,7 @@ func (m *IAPModule) writeOutput(ctx context.Context, logger internal.Logger) {
 	var tables []internal.TableFile
 
 	// Tunnel Destination Groups table
-	header := []string{"Name", "Region", "CIDRs", "FQDNs", "Risk", "Project"}
+	header := []string{"Name", "Region", "CIDRs", "FQDNs", "Risk", "Project Name", "Project"}
 	var body [][]string
 	for _, group := range m.TunnelDestGroups {
 		cidrs := strings.Join(group.CIDRs, ", ")
@@ -138,6 +138,7 @@ func (m *IAPModule) writeOutput(ctx context.Context, logger internal.Logger) {
 			cidrs,
 			fqdns,
 			group.RiskLevel,
+			m.GetProjectName(group.ProjectID),
 			group.ProjectID,
 		})
 	}
@@ -155,6 +156,7 @@ func (m *IAPModule) writeOutput(ctx context.Context, logger internal.Logger) {
 				group.Name,
 				group.RiskLevel,
 				strings.Join(group.RiskReasons, "; "),
+				m.GetProjectName(group.ProjectID),
 				group.ProjectID,
 			})
 		}
@@ -163,7 +165,7 @@ func (m *IAPModule) writeOutput(ctx context.Context, logger internal.Logger) {
 	if len(highRiskBody) > 0 {
 		tables = append(tables, internal.TableFile{
 			Name:   "iap-risks",
-			Header: []string{"Group", "Risk Level", "Reasons", "Project"},
+			Header: []string{"Group", "Risk Level", "Reasons", "Project Name", "Project"},
 			Body:   highRiskBody,
 		})
 	}
@@ -177,8 +179,13 @@ func (m *IAPModule) writeOutput(ctx context.Context, logger internal.Logger) {
 
 	output := IAPOutput{Table: tables, Loot: lootFiles}
 
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
+
 	err := internal.HandleOutputSmart("gcp", m.Format, m.OutputDirectory, m.Verbosity, m.WrapTable,
-		"project", m.ProjectIDs, m.ProjectIDs, m.Account, output)
+		"project", m.ProjectIDs, scopeNames, m.Account, output)
 	if err != nil {
 		logger.ErrorM(fmt.Sprintf("Error writing output: %v", err), globals.GCP_IAP_MODULE_NAME)
 	}

@@ -559,7 +559,8 @@ func (m *DataExfiltrationModule) writeOutput(ctx context.Context, logger interna
 	pathsHeader := []string{
 		"Type",
 		"Resource",
-		"Project",
+		"Project Name",
+		"Project ID",
 		"Destination",
 		"Risk",
 	}
@@ -569,6 +570,7 @@ func (m *DataExfiltrationModule) writeOutput(ctx context.Context, logger interna
 		pathsBody = append(pathsBody, []string{
 			p.PathType,
 			truncateString(p.ResourceName, 30),
+			m.GetProjectName(p.ProjectID),
 			p.ProjectID,
 			truncateString(p.Destination, 30),
 			p.RiskLevel,
@@ -579,7 +581,8 @@ func (m *DataExfiltrationModule) writeOutput(ctx context.Context, logger interna
 	exportsHeader := []string{
 		"Type",
 		"Resource",
-		"Project",
+		"Project Name",
+		"Project ID",
 		"Access Level",
 		"Data Type",
 		"Risk",
@@ -590,6 +593,7 @@ func (m *DataExfiltrationModule) writeOutput(ctx context.Context, logger interna
 		exportsBody = append(exportsBody, []string{
 			e.ResourceType,
 			e.ResourceName,
+			m.GetProjectName(e.ProjectID),
 			e.ProjectID,
 			e.AccessLevel,
 			e.DataType,
@@ -630,6 +634,12 @@ func (m *DataExfiltrationModule) writeOutput(ctx context.Context, logger interna
 		Loot:  lootFiles,
 	}
 
+	// Build scope names with project names
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, projectID := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(projectID)
+	}
+
 	// Write output
 	err := internal.HandleOutputSmart(
 		"gcp",
@@ -639,7 +649,7 @@ func (m *DataExfiltrationModule) writeOutput(ctx context.Context, logger interna
 		m.WrapTable,
 		"project",
 		m.ProjectIDs,
-		m.ProjectIDs,
+		scopeNames,
 		m.Account,
 		output,
 	)

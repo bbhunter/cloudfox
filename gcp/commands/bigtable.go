@@ -103,7 +103,7 @@ func (m *BigtableModule) addToLoot(instance bigtableservice.BigtableInstanceInfo
 }
 
 func (m *BigtableModule) writeOutput(ctx context.Context, logger internal.Logger) {
-	header := []string{"Name", "Display Name", "Type", "Tables", "Clusters", "State", "Project"}
+	header := []string{"Name", "Display Name", "Type", "Tables", "Clusters", "State", "Project Name", "Project"}
 
 	var body [][]string
 	for _, instance := range m.Instances {
@@ -114,6 +114,7 @@ func (m *BigtableModule) writeOutput(ctx context.Context, logger internal.Logger
 			strings.Join(instance.Tables, ", "),
 			fmt.Sprintf("%d", len(instance.Clusters)),
 			instance.State,
+			m.GetProjectName(instance.ProjectID),
 			instance.ProjectID,
 		})
 	}
@@ -130,6 +131,11 @@ func (m *BigtableModule) writeOutput(ctx context.Context, logger internal.Logger
 		Loot:  lootFiles,
 	}
 
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
+
 	internal.HandleOutputSmart("gcp", m.Format, m.OutputDirectory, m.Verbosity, m.WrapTable,
-		"project", m.ProjectIDs, m.ProjectIDs, m.Account, output)
+		"project", m.ProjectIDs, scopeNames, m.Account, output)
 }

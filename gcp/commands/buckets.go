@@ -450,6 +450,7 @@ func getMemberType(member string) string {
 func (m *BucketsModule) writeOutput(ctx context.Context, logger internal.Logger) {
 	// Main table with security-relevant columns
 	header := []string{
+		"Project Name",
 		"Project ID",
 		"Name",
 		"Location",
@@ -499,6 +500,7 @@ func (m *BucketsModule) writeOutput(ctx context.Context, logger internal.Logger)
 		}
 
 		body = append(body, []string{
+			m.GetProjectName(bucket.ProjectID),
 			bucket.ProjectID,
 			bucket.Name,
 			bucket.Location,
@@ -514,6 +516,7 @@ func (m *BucketsModule) writeOutput(ctx context.Context, logger internal.Logger)
 	// Security config table
 	securityHeader := []string{
 		"Bucket",
+		"Project Name",
 		"Project ID",
 		"PublicAccessPrevention",
 		"UniformAccess",
@@ -539,6 +542,7 @@ func (m *BucketsModule) writeOutput(ctx context.Context, logger internal.Logger)
 
 		securityBody = append(securityBody, []string{
 			bucket.Name,
+			m.GetProjectName(bucket.ProjectID),
 			bucket.ProjectID,
 			bucket.PublicAccessPrevention,
 			boolToCheckMark(bucket.UniformBucketLevelAccess),
@@ -551,6 +555,7 @@ func (m *BucketsModule) writeOutput(ctx context.Context, logger internal.Logger)
 	// Detailed IAM table - one row per member for granular view
 	iamHeader := []string{
 		"Bucket",
+		"Project Name",
 		"Project ID",
 		"Role",
 		"Member Type",
@@ -564,6 +569,7 @@ func (m *BucketsModule) writeOutput(ctx context.Context, logger internal.Logger)
 				memberType := getMemberType(member)
 				iamBody = append(iamBody, []string{
 					bucket.Name,
+					m.GetProjectName(bucket.ProjectID),
 					bucket.ProjectID,
 					binding.Role,
 					memberType,
@@ -576,6 +582,7 @@ func (m *BucketsModule) writeOutput(ctx context.Context, logger internal.Logger)
 	// Public buckets table (if any)
 	publicHeader := []string{
 		"Bucket",
+		"Project Name",
 		"Project ID",
 		"Public Access",
 		"Public Access Prevention",
@@ -587,6 +594,7 @@ func (m *BucketsModule) writeOutput(ctx context.Context, logger internal.Logger)
 		if bucket.IsPublic {
 			publicBody = append(publicBody, []string{
 				bucket.Name,
+				m.GetProjectName(bucket.ProjectID),
 				bucket.ProjectID,
 				bucket.PublicAccess,
 				bucket.PublicAccessPrevention,
@@ -640,6 +648,12 @@ func (m *BucketsModule) writeOutput(ctx context.Context, logger internal.Logger)
 		Loot:  lootFiles,
 	}
 
+	// Build scope names from project names map
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
+
 	// Write output using HandleOutputSmart with scope support
 	err := internal.HandleOutputSmart(
 		"gcp",
@@ -647,9 +661,9 @@ func (m *BucketsModule) writeOutput(ctx context.Context, logger internal.Logger)
 		m.OutputDirectory,
 		m.Verbosity,
 		m.WrapTable,
-		"project",           // scopeType
-		m.ProjectIDs,        // scopeIdentifiers
-		m.ProjectIDs,        // scopeNames (same as IDs for GCP projects)
+		"project",      // scopeType
+		m.ProjectIDs,   // scopeIdentifiers
+		scopeNames,     // scopeNames (display names)
 		m.Account,
 		output,
 	)

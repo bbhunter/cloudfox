@@ -63,7 +63,6 @@ const GCP_CERTMANAGER_MODULE_NAME string = "cert-manager"
 
 // New security analysis modules (Azure equivalents)
 const GCP_SECURITYCENTER_MODULE_NAME string = "security-center"
-const GCP_WHOAMI_ENHANCED_MODULE_NAME string = "whoami-full"
 const GCP_LATERALMOVEMENT_MODULE_NAME string = "lateral-movement"
 const GCP_NETWORKEXPOSURE_MODULE_NAME string = "network-exposure"
 const GCP_DATAEXFILTRATION_MODULE_NAME string = "data-exfiltration"

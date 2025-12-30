@@ -125,7 +125,7 @@ func (m *BeyondCorpModule) writeOutput(ctx context.Context, logger internal.Logg
 
 	// App Connectors table
 	if len(m.AppConnectors) > 0 {
-		header := []string{"Name", "Location", "State", "Service Account", "Risk", "Project"}
+		header := []string{"Name", "Location", "State", "Service Account", "Risk", "Project Name", "Project"}
 		var body [][]string
 		for _, connector := range m.AppConnectors {
 			body = append(body, []string{
@@ -134,6 +134,7 @@ func (m *BeyondCorpModule) writeOutput(ctx context.Context, logger internal.Logg
 				connector.State,
 				connector.PrincipalInfo,
 				connector.RiskLevel,
+				m.GetProjectName(connector.ProjectID),
 				connector.ProjectID,
 			})
 		}
@@ -146,7 +147,7 @@ func (m *BeyondCorpModule) writeOutput(ctx context.Context, logger internal.Logg
 
 	// App Connections table
 	if len(m.AppConnections) > 0 {
-		header := []string{"Name", "Location", "State", "Endpoint", "Gateway", "Risk", "Project"}
+		header := []string{"Name", "Location", "State", "Endpoint", "Gateway", "Risk", "Project Name", "Project"}
 		var body [][]string
 		for _, conn := range m.AppConnections {
 			body = append(body, []string{
@@ -156,6 +157,7 @@ func (m *BeyondCorpModule) writeOutput(ctx context.Context, logger internal.Logg
 				conn.ApplicationEndpoint,
 				conn.Gateway,
 				conn.RiskLevel,
+				m.GetProjectName(conn.ProjectID),
 				conn.ProjectID,
 			})
 		}
@@ -175,8 +177,13 @@ func (m *BeyondCorpModule) writeOutput(ctx context.Context, logger internal.Logg
 
 	output := BeyondCorpOutput{Table: tables, Loot: lootFiles}
 
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
+
 	err := internal.HandleOutputSmart("gcp", m.Format, m.OutputDirectory, m.Verbosity, m.WrapTable,
-		"project", m.ProjectIDs, m.ProjectIDs, m.Account, output)
+		"project", m.ProjectIDs, scopeNames, m.Account, output)
 	if err != nil {
 		logger.ErrorM(fmt.Sprintf("Error writing output: %v", err), globals.GCP_BEYONDCORP_MODULE_NAME)
 	}

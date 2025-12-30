@@ -482,6 +482,7 @@ func getDatabaseType(version string) string {
 func (m *CloudSQLModule) writeOutput(ctx context.Context, logger internal.Logger) {
 	// Main instances table with enhanced columns
 	header := []string{
+		"Project Name",
 		"Project ID",
 		"Name",
 		"Region",
@@ -531,6 +532,7 @@ func (m *CloudSQLModule) writeOutput(ctx context.Context, logger internal.Logger
 		}
 
 		body = append(body, []string{
+			m.GetProjectName(instance.ProjectID),
 			instance.ProjectID,
 			instance.Name,
 			instance.Region,
@@ -554,6 +556,7 @@ func (m *CloudSQLModule) writeOutput(ctx context.Context, logger internal.Logger
 	// Security issues table
 	issuesHeader := []string{
 		"Instance",
+		"Project Name",
 		"Project ID",
 		"Database",
 		"Issue",
@@ -564,6 +567,7 @@ func (m *CloudSQLModule) writeOutput(ctx context.Context, logger internal.Logger
 		for _, issue := range instance.SecurityIssues {
 			issuesBody = append(issuesBody, []string{
 				instance.Name,
+				m.GetProjectName(instance.ProjectID),
 				instance.ProjectID,
 				instance.DatabaseVersion,
 				issue,
@@ -574,6 +578,7 @@ func (m *CloudSQLModule) writeOutput(ctx context.Context, logger internal.Logger
 	// Authorized networks table
 	networksHeader := []string{
 		"Instance",
+		"Project Name",
 		"Project ID",
 		"Network Name",
 		"CIDR",
@@ -589,6 +594,7 @@ func (m *CloudSQLModule) writeOutput(ctx context.Context, logger internal.Logger
 			}
 			networksBody = append(networksBody, []string{
 				instance.Name,
+				m.GetProjectName(instance.ProjectID),
 				instance.ProjectID,
 				network.Name,
 				network.Value,
@@ -600,6 +606,7 @@ func (m *CloudSQLModule) writeOutput(ctx context.Context, logger internal.Logger
 	// Backup configuration table
 	backupHeader := []string{
 		"Instance",
+		"Project Name",
 		"Project ID",
 		"Backups",
 		"PITR",
@@ -621,6 +628,7 @@ func (m *CloudSQLModule) writeOutput(ctx context.Context, logger internal.Logger
 		}
 		backupBody = append(backupBody, []string{
 			instance.Name,
+			m.GetProjectName(instance.ProjectID),
 			instance.ProjectID,
 			boolToYesNo(instance.BackupEnabled),
 			boolToYesNo(instance.PointInTimeRecovery),
@@ -634,6 +642,7 @@ func (m *CloudSQLModule) writeOutput(ctx context.Context, logger internal.Logger
 	// Encryption and security configuration table
 	securityConfigHeader := []string{
 		"Instance",
+		"Project Name",
 		"Project ID",
 		"Encryption",
 		"KMS Key",
@@ -666,6 +675,7 @@ func (m *CloudSQLModule) writeOutput(ctx context.Context, logger internal.Logger
 		}
 		securityConfigBody = append(securityConfigBody, []string{
 			instance.Name,
+			m.GetProjectName(instance.ProjectID),
 			instance.ProjectID,
 			instance.EncryptionType,
 			kmsKey,
@@ -729,6 +739,11 @@ func (m *CloudSQLModule) writeOutput(ctx context.Context, logger internal.Logger
 		Loot:  lootFiles,
 	}
 
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
+
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
@@ -737,7 +752,7 @@ func (m *CloudSQLModule) writeOutput(ctx context.Context, logger internal.Logger
 		m.WrapTable,
 		"project",
 		m.ProjectIDs,
-		m.ProjectIDs,
+		scopeNames,
 		m.Account,
 		output,
 	)

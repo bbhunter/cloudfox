@@ -565,6 +565,7 @@ func (m *ServiceAccountsModule) writeOutput(ctx context.Context, logger internal
 	saHeader := []string{
 		"Email",
 		"Display Name",
+		"Project Name",
 		"Project",
 		"Disabled",
 		"Default SA",
@@ -598,6 +599,7 @@ func (m *ServiceAccountsModule) writeOutput(ctx context.Context, logger internal
 		saBody = append(saBody, []string{
 			sa.Email,
 			sa.DisplayName,
+			m.GetProjectName(sa.ProjectID),
 			sa.ProjectID,
 			disabled,
 			defaultSA,
@@ -610,6 +612,7 @@ func (m *ServiceAccountsModule) writeOutput(ctx context.Context, logger internal
 	// Service accounts with keys table
 	keysHeader := []string{
 		"Service Account",
+		"Project Name",
 		"Project",
 		"Key Count",
 		"Oldest Key Age",
@@ -632,6 +635,7 @@ func (m *ServiceAccountsModule) writeOutput(ctx context.Context, logger internal
 
 			keysBody = append(keysBody, []string{
 				sa.Email,
+				m.GetProjectName(sa.ProjectID),
 				sa.ProjectID,
 				fmt.Sprintf("%d", sa.KeyCount),
 				fmt.Sprintf("%d days", sa.OldestKeyAge),
@@ -645,6 +649,7 @@ func (m *ServiceAccountsModule) writeOutput(ctx context.Context, logger internal
 	// High-risk service accounts table
 	highRiskHeader := []string{
 		"Service Account",
+		"Project Name",
 		"Project",
 		"Risk Level",
 		"Risk Reasons",
@@ -655,6 +660,7 @@ func (m *ServiceAccountsModule) writeOutput(ctx context.Context, logger internal
 		if sa.RiskLevel == "HIGH" || sa.RiskLevel == "MEDIUM" {
 			highRiskBody = append(highRiskBody, []string{
 				sa.Email,
+				m.GetProjectName(sa.ProjectID),
 				sa.ProjectID,
 				sa.RiskLevel,
 				strings.Join(sa.RiskReasons, "; "),
@@ -665,6 +671,7 @@ func (m *ServiceAccountsModule) writeOutput(ctx context.Context, logger internal
 	// Default service accounts table
 	defaultHeader := []string{
 		"Service Account",
+		"Project Name",
 		"Project",
 		"Type",
 		"Has Keys",
@@ -685,6 +692,7 @@ func (m *ServiceAccountsModule) writeOutput(ctx context.Context, logger internal
 
 			defaultBody = append(defaultBody, []string{
 				sa.Email,
+				m.GetProjectName(sa.ProjectID),
 				sa.ProjectID,
 				sa.DefaultSAType,
 				hasKeys,
@@ -742,6 +750,7 @@ func (m *ServiceAccountsModule) writeOutput(ctx context.Context, logger internal
 	// Pentest: Impersonation table
 	impersonationHeader := []string{
 		"Service Account",
+		"Project Name",
 		"Project",
 		"Token Creators",
 		"Key Creators",
@@ -771,6 +780,7 @@ func (m *ServiceAccountsModule) writeOutput(ctx context.Context, logger internal
 
 				impersonationBody = append(impersonationBody, []string{
 					sa.Email,
+					m.GetProjectName(sa.ProjectID),
 					sa.ProjectID,
 					tokenCreators,
 					keyCreators,
@@ -796,6 +806,10 @@ func (m *ServiceAccountsModule) writeOutput(ctx context.Context, logger internal
 	}
 
 	// Write output using HandleOutputSmart with scope support
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
@@ -804,7 +818,7 @@ func (m *ServiceAccountsModule) writeOutput(ctx context.Context, logger internal
 		m.WrapTable,
 		"project",           // scopeType
 		m.ProjectIDs,        // scopeIdentifiers
-		m.ProjectIDs,        // scopeNames (same as IDs for GCP projects)
+		scopeNames,          // scopeNames
 		m.Account,
 		output,
 	)

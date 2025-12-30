@@ -792,7 +792,8 @@ func (m *IdentityProtectionModule) writeOutput(ctx context.Context, logger inter
 	// Service Account Risks table
 	saRisksHeader := []string{
 		"Service Account",
-		"Project",
+		"Project Name",
+		"Project ID",
 		"Risk Level",
 		"Keys",
 		"Key Age",
@@ -809,6 +810,7 @@ func (m *IdentityProtectionModule) writeOutput(ctx context.Context, logger inter
 
 		saRisksBody = append(saRisksBody, []string{
 			truncateString(sa.Email, 40),
+			m.GetProjectName(sa.ProjectID),
 			sa.ProjectID,
 			sa.RiskLevel,
 			fmt.Sprintf("%d", sa.KeyCount),
@@ -823,7 +825,8 @@ func (m *IdentityProtectionModule) writeOutput(ctx context.Context, logger inter
 		"Identity",
 		"Type",
 		"Domain",
-		"Project",
+		"Project Name",
+		"Project ID",
 		"Risk Level",
 		"Details",
 	}
@@ -834,6 +837,7 @@ func (m *IdentityProtectionModule) writeOutput(ctx context.Context, logger inter
 			truncateString(e.Principal, 40),
 			e.IdentityType,
 			e.Domain,
+			m.GetProjectName(e.ProjectID),
 			e.ProjectID,
 			e.RiskLevel,
 			truncateString(e.Details, 40),
@@ -906,6 +910,12 @@ func (m *IdentityProtectionModule) writeOutput(ctx context.Context, logger inter
 		Loot:  lootFiles,
 	}
 
+	// Build scope names using project names
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, projectID := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(projectID)
+	}
+
 	// Write output
 	err := internal.HandleOutputSmart(
 		"gcp",
@@ -914,7 +924,7 @@ func (m *IdentityProtectionModule) writeOutput(ctx context.Context, logger inter
 		m.Verbosity,
 		m.WrapTable,
 		"project",
-		m.ProjectIDs,
+		scopeNames,
 		m.ProjectIDs,
 		m.Account,
 		output,

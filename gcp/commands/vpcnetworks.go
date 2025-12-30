@@ -198,7 +198,7 @@ func (m *VPCNetworksModule) writeOutput(ctx context.Context, logger internal.Log
 	var tables []internal.TableFile
 
 	// Networks table
-	netHeader := []string{"Name", "Routing Mode", "Auto Subnets", "Subnets", "Peerings", "Risk", "Project"}
+	netHeader := []string{"Name", "Routing Mode", "Auto Subnets", "Subnets", "Peerings", "Risk", "Project Name", "Project"}
 	var netBody [][]string
 	for _, network := range m.Networks {
 		autoSubnets := "No"
@@ -212,6 +212,7 @@ func (m *VPCNetworksModule) writeOutput(ctx context.Context, logger internal.Log
 			fmt.Sprintf("%d", len(network.Subnetworks)),
 			fmt.Sprintf("%d", len(network.Peerings)),
 			network.RiskLevel,
+			m.GetProjectName(network.ProjectID),
 			network.ProjectID,
 		})
 	}
@@ -223,7 +224,7 @@ func (m *VPCNetworksModule) writeOutput(ctx context.Context, logger internal.Log
 
 	// Subnets table
 	if len(m.Subnets) > 0 {
-		subHeader := []string{"Name", "Network", "Region", "CIDR", "Private Access", "Flow Logs", "Risk", "Project"}
+		subHeader := []string{"Name", "Network", "Region", "CIDR", "Private Access", "Flow Logs", "Risk", "Project Name", "Project"}
 		var subBody [][]string
 		for _, subnet := range m.Subnets {
 			privateAccess := "No"
@@ -242,6 +243,7 @@ func (m *VPCNetworksModule) writeOutput(ctx context.Context, logger internal.Log
 				privateAccess,
 				flowLogs,
 				subnet.RiskLevel,
+				m.GetProjectName(subnet.ProjectID),
 				subnet.ProjectID,
 			})
 		}
@@ -254,7 +256,7 @@ func (m *VPCNetworksModule) writeOutput(ctx context.Context, logger internal.Log
 
 	// Peerings table
 	if len(m.Peerings) > 0 {
-		peerHeader := []string{"Name", "Network", "Peer Network", "Peer Project", "State", "Lateral Move", "Risk", "Project"}
+		peerHeader := []string{"Name", "Network", "Peer Network", "Peer Project", "State", "Lateral Move", "Risk", "Project Name", "Project"}
 		var peerBody [][]string
 		for _, peering := range m.Peerings {
 			lateralMove := "No"
@@ -273,6 +275,7 @@ func (m *VPCNetworksModule) writeOutput(ctx context.Context, logger internal.Log
 				peering.State,
 				lateralMove,
 				peering.RiskLevel,
+				m.GetProjectName(peering.ProjectID),
 				peering.ProjectID,
 			})
 		}
@@ -291,7 +294,7 @@ func (m *VPCNetworksModule) writeOutput(ctx context.Context, logger internal.Log
 		}
 	}
 	if len(customRoutes) > 0 {
-		routeHeader := []string{"Name", "Network", "Dest Range", "Next Hop Type", "Next Hop", "Priority", "Project"}
+		routeHeader := []string{"Name", "Network", "Dest Range", "Next Hop Type", "Next Hop", "Priority", "Project Name", "Project"}
 		var routeBody [][]string
 		for _, route := range customRoutes {
 			routeBody = append(routeBody, []string{
@@ -301,6 +304,7 @@ func (m *VPCNetworksModule) writeOutput(ctx context.Context, logger internal.Log
 				route.NextHopType,
 				route.NextHop,
 				fmt.Sprintf("%d", route.Priority),
+				m.GetProjectName(route.ProjectID),
 				route.ProjectID,
 			})
 		}
@@ -320,8 +324,13 @@ func (m *VPCNetworksModule) writeOutput(ctx context.Context, logger internal.Log
 
 	output := VPCNetworksOutput{Table: tables, Loot: lootFiles}
 
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
+
 	err := internal.HandleOutputSmart("gcp", m.Format, m.OutputDirectory, m.Verbosity, m.WrapTable,
-		"project", m.ProjectIDs, m.ProjectIDs, m.Account, output)
+		"project", m.ProjectIDs, scopeNames, m.Account, output)
 	if err != nil {
 		logger.ErrorM(fmt.Sprintf("Error writing output: %v", err), globals.GCP_VPCNETWORKS_MODULE_NAME)
 	}

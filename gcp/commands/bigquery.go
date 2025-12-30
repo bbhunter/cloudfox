@@ -355,6 +355,7 @@ func (m *BigQueryModule) addTableToLoot(table BigQueryService.BigqueryTable) {
 func (m *BigQueryModule) writeOutput(ctx context.Context, logger internal.Logger) {
 	// Dataset table with security columns
 	datasetHeader := []string{
+		"Project Name",
 		"Project ID",
 		"Dataset ID",
 		"Name",
@@ -373,6 +374,7 @@ func (m *BigQueryModule) writeOutput(ctx context.Context, logger internal.Logger
 		}
 
 		datasetBody = append(datasetBody, []string{
+			m.GetProjectName(dataset.ProjectID),
 			dataset.ProjectID,
 			dataset.DatasetID,
 			dataset.Name,
@@ -386,6 +388,7 @@ func (m *BigQueryModule) writeOutput(ctx context.Context, logger internal.Logger
 
 	// Table table with security columns
 	tableHeader := []string{
+		"Project Name",
 		"Project ID",
 		"Dataset ID",
 		"Table ID",
@@ -405,6 +408,7 @@ func (m *BigQueryModule) writeOutput(ctx context.Context, logger internal.Logger
 		}
 
 		tableBody = append(tableBody, []string{
+			m.GetProjectName(table.ProjectID),
 			table.ProjectID,
 			table.DatasetID,
 			table.TableID,
@@ -420,6 +424,7 @@ func (m *BigQueryModule) writeOutput(ctx context.Context, logger internal.Logger
 	// Access bindings table (one row per access entry)
 	accessHeader := []string{
 		"Dataset",
+		"Project Name",
 		"Project ID",
 		"Location",
 		"Role",
@@ -433,6 +438,7 @@ func (m *BigQueryModule) writeOutput(ctx context.Context, logger internal.Logger
 			memberType := BigQueryService.GetMemberType(entry.EntityType, entry.Entity)
 			accessBody = append(accessBody, []string{
 				dataset.DatasetID,
+				m.GetProjectName(dataset.ProjectID),
 				dataset.ProjectID,
 				dataset.Location,
 				entry.Role,
@@ -445,6 +451,7 @@ func (m *BigQueryModule) writeOutput(ctx context.Context, logger internal.Logger
 	// Public datasets table
 	publicHeader := []string{
 		"Dataset",
+		"Project Name",
 		"Project ID",
 		"Location",
 		"Public Access",
@@ -456,6 +463,7 @@ func (m *BigQueryModule) writeOutput(ctx context.Context, logger internal.Logger
 		if dataset.IsPublic {
 			publicBody = append(publicBody, []string{
 				dataset.DatasetID,
+				m.GetProjectName(dataset.ProjectID),
 				dataset.ProjectID,
 				dataset.Location,
 				dataset.PublicAccess,
@@ -511,15 +519,19 @@ func (m *BigQueryModule) writeOutput(ctx context.Context, logger internal.Logger
 	}
 
 	// Write output using HandleOutputSmart with scope support
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
 		m.OutputDirectory,
 		m.Verbosity,
 		m.WrapTable,
-		"project",           // scopeType
-		m.ProjectIDs,        // scopeIdentifiers
-		m.ProjectIDs,        // scopeNames (same as IDs for GCP projects)
+		"project",    // scopeType
+		m.ProjectIDs, // scopeIdentifiers
+		scopeNames,   // scopeNames
 		m.Account,
 		output,
 	)

@@ -264,6 +264,7 @@ func (m *CloudBuildModule) writeOutput(ctx context.Context, logger internal.Logg
 		"Config File",
 		"Service Account",
 		"Disabled",
+		"Project Name",
 		"Project",
 	}
 
@@ -292,6 +293,7 @@ func (m *CloudBuildModule) writeOutput(ctx context.Context, logger internal.Logg
 			trigger.Filename,
 			sa,
 			disabled,
+			m.GetProjectName(trigger.ProjectID),
 			trigger.ProjectID,
 		})
 	}
@@ -303,6 +305,7 @@ func (m *CloudBuildModule) writeOutput(ctx context.Context, logger internal.Logg
 		"Trigger",
 		"Source",
 		"Created",
+		"Project Name",
 		"Project",
 	}
 
@@ -314,6 +317,7 @@ func (m *CloudBuildModule) writeOutput(ctx context.Context, logger internal.Logg
 			build.TriggerID,
 			build.Source,
 			build.CreateTime,
+			m.GetProjectName(build.ProjectID),
 			build.ProjectID,
 		})
 	}
@@ -349,6 +353,7 @@ func (m *CloudBuildModule) writeOutput(ctx context.Context, logger internal.Logg
 		"Service Account",
 		"Privesc",
 		"Reasons",
+		"Project Name",
 		"Project",
 	}
 
@@ -372,6 +377,7 @@ func (m *CloudBuildModule) writeOutput(ctx context.Context, logger internal.Logg
 			analysis.ServiceAccount,
 			privesc,
 			reasons,
+			m.GetProjectName(analysis.ProjectID),
 			analysis.ProjectID,
 		})
 	}
@@ -392,6 +398,11 @@ func (m *CloudBuildModule) writeOutput(ctx context.Context, logger internal.Logg
 		Loot:  lootFiles,
 	}
 
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
+
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
@@ -400,7 +411,7 @@ func (m *CloudBuildModule) writeOutput(ctx context.Context, logger internal.Logg
 		m.WrapTable,
 		"project",
 		m.ProjectIDs,
-		m.ProjectIDs,
+		scopeNames,
 		m.Account,
 		output,
 	)

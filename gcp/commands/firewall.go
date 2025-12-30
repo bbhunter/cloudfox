@@ -509,6 +509,7 @@ func (m *FirewallModule) addFirewallSecurityRecommendations(rule NetworkService.
 func (m *FirewallModule) writeOutput(ctx context.Context, logger internal.Logger) {
 	// Firewall rules table
 	rulesHeader := []string{
+		"Project Name",
 		"Project ID",
 		"Rule Name",
 		"Network",
@@ -552,6 +553,7 @@ func (m *FirewallModule) writeOutput(ctx context.Context, logger internal.Logger
 		}
 
 		rulesBody = append(rulesBody, []string{
+			m.GetProjectName(rule.ProjectID),
 			rule.ProjectID,
 			rule.Name,
 			rule.Network,
@@ -567,6 +569,7 @@ func (m *FirewallModule) writeOutput(ctx context.Context, logger internal.Logger
 
 	// Networks table
 	networksHeader := []string{
+		"Project Name",
 		"Project ID",
 		"Network Name",
 		"Routing Mode",
@@ -600,6 +603,7 @@ func (m *FirewallModule) writeOutput(ctx context.Context, logger internal.Logger
 		}
 
 		networksBody = append(networksBody, []string{
+			m.GetProjectName(network.ProjectID),
 			network.ProjectID,
 			network.Name,
 			network.RoutingMode,
@@ -611,6 +615,7 @@ func (m *FirewallModule) writeOutput(ctx context.Context, logger internal.Logger
 
 	// Subnets table
 	subnetsHeader := []string{
+		"Project Name",
 		"Project ID",
 		"Network",
 		"Subnet Name",
@@ -627,6 +632,7 @@ func (m *FirewallModule) writeOutput(ctx context.Context, logger internal.Logger
 		}
 
 		subnetsBody = append(subnetsBody, []string{
+			m.GetProjectName(subnet.ProjectID),
 			subnet.ProjectID,
 			subnet.Network,
 			subnet.Name,
@@ -676,6 +682,11 @@ func (m *FirewallModule) writeOutput(ctx context.Context, logger internal.Logger
 		Loot:  lootFiles,
 	}
 
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
+
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
@@ -684,7 +695,7 @@ func (m *FirewallModule) writeOutput(ctx context.Context, logger internal.Logger
 		m.WrapTable,
 		"project",
 		m.ProjectIDs,
-		m.ProjectIDs,
+		scopeNames,
 		m.Account,
 		output,
 	)

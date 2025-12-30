@@ -183,6 +183,7 @@ func (m *HMACKeysModule) writeOutput(ctx context.Context, logger internal.Logger
 		"Created",
 		"Age (Days)",
 		"Risk",
+		"Project Name",
 		"Project",
 	}
 
@@ -201,6 +202,7 @@ func (m *HMACKeysModule) writeOutput(ctx context.Context, logger internal.Logger
 			key.TimeCreated.Format("2006-01-02"),
 			age,
 			key.RiskLevel,
+			m.GetProjectName(key.ProjectID),
 			key.ProjectID,
 		})
 	}
@@ -212,6 +214,7 @@ func (m *HMACKeysModule) writeOutput(ctx context.Context, logger internal.Logger
 		"Created",
 		"Risk",
 		"Risk Reasons",
+		"Project Name",
 		"Project",
 	}
 
@@ -224,6 +227,7 @@ func (m *HMACKeysModule) writeOutput(ctx context.Context, logger internal.Logger
 				key.TimeCreated.Format("2006-01-02"),
 				key.RiskLevel,
 				strings.Join(key.RiskReasons, "; "),
+				m.GetProjectName(key.ProjectID),
 				key.ProjectID,
 			})
 		}
@@ -256,6 +260,11 @@ func (m *HMACKeysModule) writeOutput(ctx context.Context, logger internal.Logger
 
 	output := HMACKeysOutput{Table: tables, Loot: lootFiles}
 
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
+
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
@@ -263,7 +272,7 @@ func (m *HMACKeysModule) writeOutput(ctx context.Context, logger internal.Logger
 		m.Verbosity,
 		m.WrapTable,
 		"project",
-		m.ProjectIDs,
+		scopeNames,
 		m.ProjectIDs,
 		m.Account,
 		output,

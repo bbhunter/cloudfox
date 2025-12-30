@@ -501,7 +501,8 @@ func (m *LateralMovementModule) writeOutput(ctx context.Context, logger internal
 	vectorsHeader := []string{
 		"Resource Type",
 		"Resource",
-		"Project",
+		"Project Name",
+		"Project ID",
 		"Attack Vector",
 		"Risk",
 	}
@@ -511,6 +512,7 @@ func (m *LateralMovementModule) writeOutput(ctx context.Context, logger internal
 		vectorsBody = append(vectorsBody, []string{
 			vector.ResourceType,
 			truncateString(vector.ResourceName, 30),
+			m.GetProjectName(vector.ProjectID),
 			vector.ProjectID,
 			vector.AttackVector,
 			vector.RiskLevel,
@@ -519,8 +521,10 @@ func (m *LateralMovementModule) writeOutput(ctx context.Context, logger internal
 
 	// Cross-project paths table
 	crossHeader := []string{
-		"Source Project",
-		"Target Project",
+		"Source Project Name",
+		"Source Project ID",
+		"Target Project Name",
+		"Target Project ID",
 		"Principal",
 		"Role",
 		"Risk",
@@ -529,7 +533,9 @@ func (m *LateralMovementModule) writeOutput(ctx context.Context, logger internal
 	var crossBody [][]string
 	for _, path := range m.CrossProjectPaths {
 		crossBody = append(crossBody, []string{
+			m.GetProjectName(path.SourceProject),
 			path.SourceProject,
+			m.GetProjectName(path.TargetProject),
 			path.TargetProject,
 			truncateString(path.Principal, 40),
 			path.Role,
@@ -579,6 +585,12 @@ func (m *LateralMovementModule) writeOutput(ctx context.Context, logger internal
 		Loot:  lootFiles,
 	}
 
+	// Build scopeNames using GetProjectName
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, projectID := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(projectID)
+	}
+
 	// Write output
 	err := internal.HandleOutputSmart(
 		"gcp",
@@ -588,7 +600,7 @@ func (m *LateralMovementModule) writeOutput(ctx context.Context, logger internal
 		m.WrapTable,
 		"project",
 		m.ProjectIDs,
-		m.ProjectIDs,
+		scopeNames,
 		m.Account,
 		output,
 	)

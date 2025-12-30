@@ -241,6 +241,7 @@ func (m *LoggingGapsModule) writeOutput(ctx context.Context, logger internal.Log
 		"Resource",
 		"Status",
 		"Missing Logs",
+		"Project Name",
 		"Project",
 	}
 
@@ -257,6 +258,7 @@ func (m *LoggingGapsModule) writeOutput(ctx context.Context, logger internal.Log
 			gap.ResourceName,
 			gap.LoggingStatus,
 			missingLogs,
+			m.GetProjectName(gap.ProjectID),
 			gap.ProjectID,
 		})
 	}
@@ -326,6 +328,11 @@ func (m *LoggingGapsModule) writeOutput(ctx context.Context, logger internal.Log
 		Loot:  lootFiles,
 	}
 
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
+
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
@@ -334,7 +341,7 @@ func (m *LoggingGapsModule) writeOutput(ctx context.Context, logger internal.Log
 		m.WrapTable,
 		"project",
 		m.ProjectIDs,
-		m.ProjectIDs,
+		scopeNames,
 		m.Account,
 		output,
 	)

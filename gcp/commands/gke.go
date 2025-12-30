@@ -488,6 +488,7 @@ func (m *GKEModule) addNodePoolSecurityToLoot(np GKEService.NodePoolInfo) {
 func (m *GKEModule) writeOutput(ctx context.Context, logger internal.Logger) {
 	// Main clusters table with enhanced columns
 	header := []string{
+		"Project Name",
 		"Project ID",
 		"Name",
 		"Location",
@@ -525,6 +526,7 @@ func (m *GKEModule) writeOutput(ctx context.Context, logger internal.Logger) {
 		}
 
 		body = append(body, []string{
+			m.GetProjectName(cluster.ProjectID),
 			cluster.ProjectID,
 			cluster.Name,
 			cluster.Location,
@@ -544,6 +546,7 @@ func (m *GKEModule) writeOutput(ctx context.Context, logger internal.Logger) {
 	// Security issues table
 	issuesHeader := []string{
 		"Cluster",
+		"Project Name",
 		"Project ID",
 		"Location",
 		"Issue",
@@ -554,6 +557,7 @@ func (m *GKEModule) writeOutput(ctx context.Context, logger internal.Logger) {
 		for _, issue := range cluster.SecurityIssues {
 			issuesBody = append(issuesBody, []string{
 				cluster.Name,
+				m.GetProjectName(cluster.ProjectID),
 				cluster.ProjectID,
 				cluster.Location,
 				issue,
@@ -565,6 +569,7 @@ func (m *GKEModule) writeOutput(ctx context.Context, logger internal.Logger) {
 	nodePoolHeader := []string{
 		"Cluster",
 		"Node Pool",
+		"Project Name",
 		"Project ID",
 		"Machine Type",
 		"Node Count",
@@ -592,6 +597,7 @@ func (m *GKEModule) writeOutput(ctx context.Context, logger internal.Logger) {
 		nodePoolBody = append(nodePoolBody, []string{
 			np.ClusterName,
 			np.Name,
+			m.GetProjectName(np.ProjectID),
 			np.ProjectID,
 			np.MachineType,
 			fmt.Sprintf("%d", np.NodeCount),
@@ -606,6 +612,7 @@ func (m *GKEModule) writeOutput(ctx context.Context, logger internal.Logger) {
 	analysisHeader := []string{
 		"Risk",
 		"Cluster",
+		"Project Name",
 		"Project",
 		"Attack Surface",
 		"Privesc Paths",
@@ -627,6 +634,7 @@ func (m *GKEModule) writeOutput(ctx context.Context, logger internal.Logger) {
 		analysisBody = append(analysisBody, []string{
 			analysis.RiskLevel,
 			analysis.ClusterName,
+			m.GetProjectName(analysis.ProjectID),
 			analysis.ProjectID,
 			attackSummary,
 			privescSummary,
@@ -640,6 +648,7 @@ func (m *GKEModule) writeOutput(ctx context.Context, logger internal.Logger) {
 		"Service Account",
 		"Cloud Platform Scope",
 		"Risky Scopes",
+		"Project Name",
 		"Project",
 	}
 
@@ -664,6 +673,7 @@ func (m *GKEModule) writeOutput(ctx context.Context, logger internal.Logger) {
 				np.ServiceAccount,
 				cloudPlatform,
 				scopeCount,
+				m.GetProjectName(np.ProjectID),
 				np.ProjectID,
 			})
 		}
@@ -672,6 +682,7 @@ func (m *GKEModule) writeOutput(ctx context.Context, logger internal.Logger) {
 	// Cluster configuration table (addons and maintenance)
 	configHeader := []string{
 		"Cluster",
+		"Project Name",
 		"Project ID",
 		"Mode",
 		"Release Channel",
@@ -702,6 +713,7 @@ func (m *GKEModule) writeOutput(ctx context.Context, logger internal.Logger) {
 		}
 		configBody = append(configBody, []string{
 			cluster.Name,
+			m.GetProjectName(cluster.ProjectID),
 			cluster.ProjectID,
 			clusterMode,
 			releaseChannel,
@@ -774,6 +786,11 @@ func (m *GKEModule) writeOutput(ctx context.Context, logger internal.Logger) {
 		Loot:  lootFiles,
 	}
 
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
+
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
@@ -782,7 +799,7 @@ func (m *GKEModule) writeOutput(ctx context.Context, logger internal.Logger) {
 		m.WrapTable,
 		"project",
 		m.ProjectIDs,
-		m.ProjectIDs,
+		scopeNames,
 		m.Account,
 		output,
 	)

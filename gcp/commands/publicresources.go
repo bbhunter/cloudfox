@@ -228,6 +228,7 @@ func (m *PublicResourcesModule) writeOutput(ctx context.Context, logger internal
 		"Port",
 		"Access Level",
 		"Service Account",
+		"Project Name",
 		"Project",
 	}
 
@@ -257,6 +258,7 @@ func (m *PublicResourcesModule) writeOutput(ctx context.Context, logger internal
 			resource.Port,
 			resource.AccessLevel,
 			saDisplay,
+			m.GetProjectName(resource.ProjectID),
 			resource.ProjectID,
 		})
 	}
@@ -326,6 +328,11 @@ func (m *PublicResourcesModule) writeOutput(ctx context.Context, logger internal
 		Loot:  lootFiles,
 	}
 
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
+
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
@@ -334,7 +341,7 @@ func (m *PublicResourcesModule) writeOutput(ctx context.Context, logger internal
 		m.WrapTable,
 		"project",
 		m.ProjectIDs,
-		m.ProjectIDs,
+		scopeNames,
 		m.Account,
 		output,
 	)

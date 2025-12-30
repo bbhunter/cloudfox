@@ -20,8 +20,9 @@ type CommandContext struct {
 	Logger internal.Logger
 
 	// Project information
-	ProjectIDs []string
-	Account    string // Authenticated account email
+	ProjectIDs   []string
+	ProjectNames map[string]string // ProjectID -> DisplayName mapping
+	Account      string            // Authenticated account email
 
 	// Configuration flags
 	Verbosity       int
@@ -48,8 +49,9 @@ type CommandContext struct {
 //	}
 type BaseGCPModule struct {
 	// Project and identity
-	ProjectIDs []string
-	Account    string // Authenticated account email
+	ProjectIDs   []string
+	ProjectNames map[string]string // ProjectID -> DisplayName mapping
+	Account      string            // Authenticated account email
 
 	// Configuration
 	Verbosity       int
@@ -62,12 +64,23 @@ type BaseGCPModule struct {
 	CommandCounter internal.CommandCounter
 }
 
+// GetProjectName returns the display name for a project ID, falling back to the ID if not found
+func (b *BaseGCPModule) GetProjectName(projectID string) string {
+	if b.ProjectNames != nil {
+		if name, ok := b.ProjectNames[projectID]; ok {
+			return name
+		}
+	}
+	return projectID
+}
+
 // ------------------------------
 // NewBaseGCPModule - Helper to create BaseGCPModule from CommandContext
 // ------------------------------
 func NewBaseGCPModule(cmdCtx *CommandContext) BaseGCPModule {
 	return BaseGCPModule{
 		ProjectIDs:      cmdCtx.ProjectIDs,
+		ProjectNames:    cmdCtx.ProjectNames,
 		Account:         cmdCtx.Account,
 		Verbosity:       cmdCtx.Verbosity,
 		WrapTable:       cmdCtx.WrapTable,
@@ -200,6 +213,18 @@ func InitializeCommandContext(cmd *cobra.Command, moduleName string) (*CommandCo
 		return nil, fmt.Errorf("no project IDs provided")
 	}
 
+	// -------------------- Get project names from context --------------------
+	var projectNames map[string]string
+	if value, ok := ctx.Value("projectNames").(map[string]string); ok {
+		projectNames = value
+	} else {
+		// Initialize empty map if not provided - modules can still work without names
+		projectNames = make(map[string]string)
+		for _, id := range projectIDs {
+			projectNames[id] = id // fallback to using ID as name
+		}
+	}
+
 	// -------------------- Get account from context --------------------
 	var account string
 	if value, ok := ctx.Value("account").(string); ok {
@@ -218,6 +243,7 @@ func InitializeCommandContext(cmd *cobra.Command, moduleName string) (*CommandCo
 		Ctx:             ctx,
 		Logger:          logger,
 		ProjectIDs:      projectIDs,
+		ProjectNames:    projectNames,
 		Account:         account,
 		Verbosity:       verbosity,
 		WrapTable:       wrap,

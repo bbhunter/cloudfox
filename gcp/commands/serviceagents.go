@@ -225,6 +225,7 @@ func (m *ServiceAgentsModule) writeOutput(ctx context.Context, logger internal.L
 		"Email",
 		"Roles",
 		"Cross-Project",
+		"Project Name",
 		"Project",
 	}
 
@@ -255,6 +256,7 @@ func (m *ServiceAgentsModule) writeOutput(ctx context.Context, logger internal.L
 			emailDisplay,
 			rolesDisplay,
 			crossProject,
+			m.GetProjectName(agent.ProjectID),
 			agent.ProjectID,
 		})
 	}
@@ -307,6 +309,11 @@ func (m *ServiceAgentsModule) writeOutput(ctx context.Context, logger internal.L
 		Loot:  lootFiles,
 	}
 
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, projectID := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(projectID)
+	}
+
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
@@ -315,7 +322,7 @@ func (m *ServiceAgentsModule) writeOutput(ctx context.Context, logger internal.L
 		m.WrapTable,
 		"project",
 		m.ProjectIDs,
-		m.ProjectIDs,
+		scopeNames,
 		m.Account,
 		output,
 	)

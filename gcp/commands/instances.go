@@ -615,6 +615,7 @@ func parseSSHKeyLine(line string) SSHKeyParts {
 func (m *InstancesModule) writeOutput(ctx context.Context, logger internal.Logger) {
 	// Main table with security-relevant columns
 	header := []string{
+		"Project Name",
 		"Project ID",
 		"Name",
 		"Zone",
@@ -650,6 +651,7 @@ func (m *InstancesModule) writeOutput(ctx context.Context, logger internal.Logge
 		}
 
 		body = append(body, []string{
+			m.GetProjectName(instance.ProjectID),
 			instance.ProjectID,
 			instance.Name,
 			instance.Zone,
@@ -670,6 +672,7 @@ func (m *InstancesModule) writeOutput(ctx context.Context, logger internal.Logge
 	// Detailed service account table - shows full SA info with scopes
 	saHeader := []string{
 		"Instance",
+		"Project Name",
 		"Project ID",
 		"Zone",
 		"Service Account",
@@ -690,6 +693,7 @@ func (m *InstancesModule) writeOutput(ctx context.Context, logger internal.Logge
 
 			saBody = append(saBody, []string{
 				instance.Name,
+				m.GetProjectName(instance.ProjectID),
 				instance.ProjectID,
 				instance.Zone,
 				sa.Email,
@@ -702,6 +706,7 @@ func (m *InstancesModule) writeOutput(ctx context.Context, logger internal.Logge
 	// Security findings table - highlight risky configurations
 	findingsHeader := []string{
 		"Instance",
+		"Project Name",
 		"Project ID",
 		"Zone",
 		"Finding",
@@ -715,6 +720,7 @@ func (m *InstancesModule) writeOutput(ctx context.Context, logger internal.Logge
 		if instance.HasDefaultSA {
 			findingsBody = append(findingsBody, []string{
 				instance.Name,
+				m.GetProjectName(instance.ProjectID),
 				instance.ProjectID,
 				instance.Zone,
 				"Default Service Account",
@@ -725,6 +731,7 @@ func (m *InstancesModule) writeOutput(ctx context.Context, logger internal.Logge
 		if instance.HasCloudScopes {
 			findingsBody = append(findingsBody, []string{
 				instance.Name,
+				m.GetProjectName(instance.ProjectID),
 				instance.ProjectID,
 				instance.Zone,
 				"Broad OAuth Scopes",
@@ -735,6 +742,7 @@ func (m *InstancesModule) writeOutput(ctx context.Context, logger internal.Logge
 		if instance.ExternalIP != "" && !instance.OSLoginEnabled {
 			findingsBody = append(findingsBody, []string{
 				instance.Name,
+				m.GetProjectName(instance.ProjectID),
 				instance.ProjectID,
 				instance.Zone,
 				"External IP without OS Login",
@@ -745,6 +753,7 @@ func (m *InstancesModule) writeOutput(ctx context.Context, logger internal.Logge
 		if instance.SerialPortEnabled {
 			findingsBody = append(findingsBody, []string{
 				instance.Name,
+				m.GetProjectName(instance.ProjectID),
 				instance.ProjectID,
 				instance.Zone,
 				"Serial Port Enabled",
@@ -755,6 +764,7 @@ func (m *InstancesModule) writeOutput(ctx context.Context, logger internal.Logge
 		if instance.CanIPForward {
 			findingsBody = append(findingsBody, []string{
 				instance.Name,
+				m.GetProjectName(instance.ProjectID),
 				instance.ProjectID,
 				instance.Zone,
 				"IP Forwarding Enabled",
@@ -765,6 +775,7 @@ func (m *InstancesModule) writeOutput(ctx context.Context, logger internal.Logge
 		if !instance.ShieldedVM {
 			findingsBody = append(findingsBody, []string{
 				instance.Name,
+				m.GetProjectName(instance.ProjectID),
 				instance.ProjectID,
 				instance.Zone,
 				"Shielded VM Disabled",
@@ -775,6 +786,7 @@ func (m *InstancesModule) writeOutput(ctx context.Context, logger internal.Logge
 		if instance.HasStartupScript && instance.HasDefaultSA && instance.HasCloudScopes {
 			findingsBody = append(findingsBody, []string{
 				instance.Name,
+				m.GetProjectName(instance.ProjectID),
 				instance.ProjectID,
 				instance.Zone,
 				"Startup Script with Broad Access",
@@ -787,6 +799,7 @@ func (m *InstancesModule) writeOutput(ctx context.Context, logger internal.Logge
 	// Startup scripts table (pentest-focused)
 	startupHeader := []string{
 		"Instance",
+		"Project Name",
 		"Project ID",
 		"Zone",
 		"Script Type",
@@ -812,6 +825,7 @@ func (m *InstancesModule) writeOutput(ctx context.Context, logger internal.Logge
 
 			startupBody = append(startupBody, []string{
 				instance.Name,
+				m.GetProjectName(instance.ProjectID),
 				instance.ProjectID,
 				instance.Zone,
 				"Inline",
@@ -827,6 +841,7 @@ func (m *InstancesModule) writeOutput(ctx context.Context, logger internal.Logge
 
 			startupBody = append(startupBody, []string{
 				instance.Name,
+				m.GetProjectName(instance.ProjectID),
 				instance.ProjectID,
 				instance.Zone,
 				"URL",
@@ -839,6 +854,7 @@ func (m *InstancesModule) writeOutput(ctx context.Context, logger internal.Logge
 	// Security configuration table
 	securityConfigHeader := []string{
 		"Instance",
+		"Project Name",
 		"Project ID",
 		"Zone",
 		"ShieldedVM",
@@ -868,6 +884,7 @@ func (m *InstancesModule) writeOutput(ctx context.Context, logger internal.Logge
 		}
 		securityConfigBody = append(securityConfigBody, []string{
 			instance.Name,
+			m.GetProjectName(instance.ProjectID),
 			instance.ProjectID,
 			instance.Zone,
 			instanceBoolToCheck(instance.ShieldedVM),
@@ -883,6 +900,7 @@ func (m *InstancesModule) writeOutput(ctx context.Context, logger internal.Logge
 	// SSH keys table (pentest-focused)
 	sshKeysHeader := []string{
 		"Source",
+		"Project Name",
 		"Project ID",
 		"Zone",
 		"Username",
@@ -899,6 +917,7 @@ func (m *InstancesModule) writeOutput(ctx context.Context, logger internal.Logge
 				parts := parseSSHKeyLine(key)
 				sshKeysBody = append(sshKeysBody, []string{
 					"PROJECT",
+					m.GetProjectName(projectID),
 					projectID,
 					"-",
 					parts.Username,
@@ -916,6 +935,7 @@ func (m *InstancesModule) writeOutput(ctx context.Context, logger internal.Logge
 				parts := parseSSHKeyLine(key)
 				sshKeysBody = append(sshKeysBody, []string{
 					instance.Name,
+					m.GetProjectName(instance.ProjectID),
 					instance.ProjectID,
 					instance.Zone,
 					parts.Username,
@@ -992,15 +1012,19 @@ func (m *InstancesModule) writeOutput(ctx context.Context, logger internal.Logge
 	}
 
 	// Write output using HandleOutputSmart with scope support
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
 		m.OutputDirectory,
 		m.Verbosity,
 		m.WrapTable,
-		"project",           // scopeType
-		m.ProjectIDs,        // scopeIdentifiers
-		m.ProjectIDs,        // scopeNames (same as IDs for GCP projects)
+		"project",    // scopeType
+		m.ProjectIDs, // scopeIdentifiers
+		scopeNames,   // scopeNames
 		m.Account,
 		output,
 	)

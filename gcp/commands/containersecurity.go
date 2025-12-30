@@ -642,7 +642,8 @@ func (m *ContainerSecurityModule) writeOutput(ctx context.Context, logger intern
 	// Container Configs table
 	containersHeader := []string{
 		"Service",
-		"Project",
+		"Project Name",
+		"Project ID",
 		"Location",
 		"Image",
 		"Auth",
@@ -654,6 +655,7 @@ func (m *ContainerSecurityModule) writeOutput(ctx context.Context, logger intern
 	for _, c := range m.Containers {
 		containersBody = append(containersBody, []string{
 			c.Name,
+			m.GetProjectName(c.ProjectID),
 			c.ProjectID,
 			c.Location,
 			truncateString(c.Image, 40),
@@ -672,7 +674,8 @@ func (m *ContainerSecurityModule) writeOutput(ctx context.Context, logger intern
 	// Env Var Secrets table
 	secretsHeader := []string{
 		"Service",
-		"Project",
+		"Project Name",
+		"Project ID",
 		"Location",
 		"Env Var",
 		"Type",
@@ -683,6 +686,7 @@ func (m *ContainerSecurityModule) writeOutput(ctx context.Context, logger intern
 	for _, s := range m.EnvVarSecrets {
 		secretsBody = append(secretsBody, []string{
 			m.extractServiceName(s.ServiceName),
+			m.GetProjectName(s.ProjectID),
 			s.ProjectID,
 			s.Location,
 			s.EnvVarName,
@@ -694,7 +698,8 @@ func (m *ContainerSecurityModule) writeOutput(ctx context.Context, logger intern
 	// Security Issues table
 	issuesHeader := []string{
 		"Service",
-		"Project",
+		"Project Name",
+		"Project ID",
 		"Issue Type",
 		"Severity",
 		"Affected Area",
@@ -705,6 +710,7 @@ func (m *ContainerSecurityModule) writeOutput(ctx context.Context, logger intern
 	for _, i := range m.SecurityIssues {
 		issuesBody = append(issuesBody, []string{
 			i.ServiceName,
+			m.GetProjectName(i.ProjectID),
 			i.ProjectID,
 			i.IssueType,
 			i.Severity,
@@ -716,7 +722,8 @@ func (m *ContainerSecurityModule) writeOutput(ctx context.Context, logger intern
 	// Public Services table
 	publicHeader := []string{
 		"Service",
-		"Project",
+		"Project Name",
+		"Project ID",
 		"Location",
 		"URL",
 		"Auth",
@@ -727,6 +734,7 @@ func (m *ContainerSecurityModule) writeOutput(ctx context.Context, logger intern
 	for _, p := range m.PublicServices {
 		publicBody = append(publicBody, []string{
 			p.Name,
+			m.GetProjectName(p.ProjectID),
 			p.ProjectID,
 			p.Location,
 			truncateString(p.URL, 50),
@@ -793,6 +801,12 @@ func (m *ContainerSecurityModule) writeOutput(ctx context.Context, logger intern
 		Loot:  lootFiles,
 	}
 
+	// Build scope names using project names
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, projectID := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(projectID)
+	}
+
 	// Write output
 	err := internal.HandleOutputSmart(
 		"gcp",
@@ -801,7 +815,7 @@ func (m *ContainerSecurityModule) writeOutput(ctx context.Context, logger intern
 		m.Verbosity,
 		m.WrapTable,
 		"project",
-		m.ProjectIDs,
+		scopeNames,
 		m.ProjectIDs,
 		m.Account,
 		output,

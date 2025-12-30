@@ -448,7 +448,8 @@ func (m *PermissionsModule) writeOutput(ctx context.Context, logger internal.Log
 		"High Priv",
 		"Inherited",
 		"Conditional",
-		"Project",
+		"Project Name",
+		"Project ID",
 	}
 
 	var summaryBody [][]string
@@ -482,6 +483,7 @@ func (m *PermissionsModule) writeOutput(ctx context.Context, logger internal.Log
 			fmt.Sprintf("%d", highPrivCount),
 			fmt.Sprintf("%d", inheritedCount),
 			fmt.Sprintf("%d", conditionalCount),
+			m.GetProjectName(ep.ProjectID),
 			ep.ProjectID,
 		})
 	}
@@ -496,7 +498,8 @@ func (m *PermissionsModule) writeOutput(ctx context.Context, logger internal.Log
 		"Inherited",
 		"Source",
 		"Condition",
-		"Project",
+		"Project Name",
+		"Project ID",
 	}
 
 	var detailBody [][]string
@@ -523,6 +526,7 @@ func (m *PermissionsModule) writeOutput(ctx context.Context, logger internal.Log
 				inherited,
 				source,
 				condition,
+				m.GetProjectName(perm.ResourceID),
 				perm.ResourceID,
 			})
 		}
@@ -536,7 +540,8 @@ func (m *PermissionsModule) writeOutput(ctx context.Context, logger internal.Log
 		"Role",
 		"Inherited",
 		"Condition",
-		"Project",
+		"Project Name",
+		"Project ID",
 	}
 
 	var highPrivBody [][]string
@@ -559,6 +564,7 @@ func (m *PermissionsModule) writeOutput(ctx context.Context, logger internal.Log
 					perm.Role,
 					inherited,
 					condition,
+					m.GetProjectName(perm.ResourceID),
 					perm.ResourceID,
 				})
 			}
@@ -574,7 +580,8 @@ func (m *PermissionsModule) writeOutput(ctx context.Context, logger internal.Log
 		"Permission",
 		"Description",
 		"Role",
-		"Project",
+		"Project Name",
+		"Project ID",
 	}
 
 	var dangerousBody [][]string
@@ -590,6 +597,7 @@ func (m *PermissionsModule) writeOutput(ctx context.Context, logger internal.Log
 					dpInfo.Permission,
 					dpInfo.Description,
 					perm.Role,
+					m.GetProjectName(perm.ResourceID),
 					perm.ResourceID,
 				})
 				if dpInfo.RiskLevel == "CRITICAL" {
@@ -607,7 +615,8 @@ func (m *PermissionsModule) writeOutput(ctx context.Context, logger internal.Log
 		"Nested Groups",
 		"Enumerated",
 		"Roles",
-		"Project",
+		"Project Name",
+		"Project ID",
 	}
 
 	var groupBody [][]string
@@ -628,6 +637,7 @@ func (m *PermissionsModule) writeOutput(ctx context.Context, logger internal.Log
 			nestedGroups,
 			enumStatus,
 			fmt.Sprintf("%d", len(gi.Roles)),
+			m.GetProjectName(gi.ProjectID),
 			gi.ProjectID,
 		})
 	}
@@ -638,7 +648,8 @@ func (m *PermissionsModule) writeOutput(ctx context.Context, logger internal.Log
 		"Member Email",
 		"Member Type",
 		"Role in Group",
-		"Project",
+		"Project Name",
+		"Project ID",
 	}
 
 	var groupMembersBody [][]string
@@ -650,6 +661,7 @@ func (m *PermissionsModule) writeOutput(ctx context.Context, logger internal.Log
 					member.Email,
 					member.Type,
 					member.Role,
+					m.GetProjectName(gi.ProjectID),
 					gi.ProjectID,
 				})
 			}
@@ -725,6 +737,12 @@ func (m *PermissionsModule) writeOutput(ctx context.Context, logger internal.Log
 		Loot:  lootFiles,
 	}
 
+	// Build scopeNames using GetProjectName
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, projectID := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(projectID)
+	}
+
 	// Write output using HandleOutputSmart with scope support
 	err := internal.HandleOutputSmart(
 		"gcp",
@@ -734,7 +752,7 @@ func (m *PermissionsModule) writeOutput(ctx context.Context, logger internal.Log
 		m.WrapTable,
 		"project",           // scopeType
 		m.ProjectIDs,        // scopeIdentifiers
-		m.ProjectIDs,        // scopeNames (same as IDs for GCP projects)
+		scopeNames,          // scopeNames
 		m.Account,
 		output,
 	)

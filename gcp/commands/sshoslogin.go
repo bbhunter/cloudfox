@@ -249,6 +249,7 @@ func (m *SSHOsLoginModule) writeOutput(ctx context.Context, logger internal.Logg
 	// OS Login Config table
 	if len(m.OSLoginConfigs) > 0 {
 		configHeader := []string{
+			"Project Name",
 			"Project",
 			"OS Login",
 			"2FA Required",
@@ -259,6 +260,7 @@ func (m *SSHOsLoginModule) writeOutput(ctx context.Context, logger internal.Logg
 		var configBody [][]string
 		for _, config := range m.OSLoginConfigs {
 			configBody = append(configBody, []string{
+				m.GetProjectName(config.ProjectID),
 				config.ProjectID,
 				boolToYesNo(config.OSLoginEnabled),
 				boolToYesNo(config.OSLogin2FAEnabled),
@@ -284,6 +286,7 @@ func (m *SSHOsLoginModule) writeOutput(ctx context.Context, logger internal.Logg
 			"SSH Keys",
 			"Risk",
 			"Zone",
+			"Project Name",
 			"Project",
 		}
 
@@ -302,6 +305,7 @@ func (m *SSHOsLoginModule) writeOutput(ctx context.Context, logger internal.Logg
 				fmt.Sprintf("%d", access.SSHKeysCount),
 				access.RiskLevel,
 				access.Zone,
+				m.GetProjectName(access.ProjectID),
 				access.ProjectID,
 			})
 		}
@@ -320,6 +324,7 @@ func (m *SSHOsLoginModule) writeOutput(ctx context.Context, logger internal.Logg
 			"Key Type",
 			"Source",
 			"Instance",
+			"Project Name",
 			"Project",
 		}
 
@@ -335,6 +340,7 @@ func (m *SSHOsLoginModule) writeOutput(ctx context.Context, logger internal.Logg
 				key.KeyType,
 				key.Source,
 				instance,
+				m.GetProjectName(key.ProjectID),
 				key.ProjectID,
 			})
 		}
@@ -359,6 +365,11 @@ func (m *SSHOsLoginModule) writeOutput(ctx context.Context, logger internal.Logg
 		Loot:  lootFiles,
 	}
 
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, projectID := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(projectID)
+	}
+
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
@@ -367,7 +378,7 @@ func (m *SSHOsLoginModule) writeOutput(ctx context.Context, logger internal.Logg
 		m.WrapTable,
 		"project",
 		m.ProjectIDs,
-		m.ProjectIDs,
+		scopeNames,
 		m.Account,
 		output,
 	)

@@ -708,7 +708,8 @@ func (m *BackupInventoryModule) writeOutput(ctx context.Context, logger internal
 	// Protected Resources table
 	protectedHeader := []string{
 		"Resource",
-		"Project",
+		"Project Name",
+		"Project ID",
 		"Type",
 		"Backup Type",
 		"Last Backup",
@@ -726,6 +727,7 @@ func (m *BackupInventoryModule) writeOutput(ctx context.Context, logger internal
 
 		protectedBody = append(protectedBody, []string{
 			r.Name,
+			m.GetProjectName(r.ProjectID),
 			r.ProjectID,
 			r.ResourceType,
 			r.BackupType,
@@ -745,7 +747,8 @@ func (m *BackupInventoryModule) writeOutput(ctx context.Context, logger internal
 	// Unprotected Resources table
 	unprotectedHeader := []string{
 		"Resource",
-		"Project",
+		"Project Name",
+		"Project ID",
 		"Type",
 		"Location",
 		"Size (GB)",
@@ -757,6 +760,7 @@ func (m *BackupInventoryModule) writeOutput(ctx context.Context, logger internal
 	for _, r := range m.UnprotectedResources {
 		unprotectedBody = append(unprotectedBody, []string{
 			r.Name,
+			m.GetProjectName(r.ProjectID),
 			r.ProjectID,
 			r.ResourceType,
 			r.Location,
@@ -775,7 +779,8 @@ func (m *BackupInventoryModule) writeOutput(ctx context.Context, logger internal
 	// Backup Policies table
 	policiesHeader := []string{
 		"Policy",
-		"Project",
+		"Project Name",
+		"Project ID",
 		"Type",
 		"Schedule",
 		"Retention",
@@ -786,6 +791,7 @@ func (m *BackupInventoryModule) writeOutput(ctx context.Context, logger internal
 	for _, p := range m.BackupPolicies {
 		policiesBody = append(policiesBody, []string{
 			p.Name,
+			m.GetProjectName(p.ProjectID),
 			p.ProjectID,
 			p.ResourceType,
 			p.Schedule,
@@ -797,7 +803,8 @@ func (m *BackupInventoryModule) writeOutput(ctx context.Context, logger internal
 	// Snapshots table
 	snapshotsHeader := []string{
 		"Snapshot",
-		"Project",
+		"Project Name",
+		"Project ID",
 		"Source Disk",
 		"Size (GB)",
 		"Created",
@@ -808,6 +815,7 @@ func (m *BackupInventoryModule) writeOutput(ctx context.Context, logger internal
 	for _, s := range m.Snapshots {
 		snapshotsBody = append(snapshotsBody, []string{
 			s.Name,
+			m.GetProjectName(s.ProjectID),
 			s.ProjectID,
 			m.extractDiskName(s.SourceDisk),
 			fmt.Sprintf("%d", s.DiskSizeGB),
@@ -864,6 +872,12 @@ func (m *BackupInventoryModule) writeOutput(ctx context.Context, logger internal
 		Loot:  lootFiles,
 	}
 
+	// Build scope names with project names
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, projectID := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(projectID)
+	}
+
 	// Write output
 	err := internal.HandleOutputSmart(
 		"gcp",
@@ -873,7 +887,7 @@ func (m *BackupInventoryModule) writeOutput(ctx context.Context, logger internal
 		m.WrapTable,
 		"project",
 		m.ProjectIDs,
-		m.ProjectIDs,
+		scopeNames,
 		m.Account,
 		output,
 	)

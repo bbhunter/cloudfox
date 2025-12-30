@@ -99,7 +99,7 @@ func (m *FilestoreModule) addToLoot(instance filestoreservice.FilestoreInstanceI
 }
 
 func (m *FilestoreModule) writeOutput(ctx context.Context, logger internal.Logger) {
-	header := []string{"Name", "Location", "Tier", "Network", "IP", "Shares", "State", "Project"}
+	header := []string{"Name", "Location", "Tier", "Network", "IP", "Shares", "State", "Project Name", "Project"}
 
 	var body [][]string
 	for _, instance := range m.Instances {
@@ -115,6 +115,7 @@ func (m *FilestoreModule) writeOutput(ctx context.Context, logger internal.Logge
 			strings.Join(instance.IPAddresses, ", "),
 			strings.Join(shareNames, ", "),
 			instance.State,
+			m.GetProjectName(instance.ProjectID),
 			instance.ProjectID,
 		})
 	}
@@ -131,6 +132,11 @@ func (m *FilestoreModule) writeOutput(ctx context.Context, logger internal.Logge
 		Loot:  lootFiles,
 	}
 
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
+
 	internal.HandleOutputSmart("gcp", m.Format, m.OutputDirectory, m.Verbosity, m.WrapTable,
-		"project", m.ProjectIDs, m.ProjectIDs, m.Account, output)
+		"project", m.ProjectIDs, scopeNames, m.Account, output)
 }

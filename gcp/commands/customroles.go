@@ -257,6 +257,7 @@ func (m *CustomRolesModule) writeOutput(ctx context.Context, logger internal.Log
 		"Dangerous",
 		"Privesc",
 		"Stage",
+		"Project Name",
 		"Project",
 	}
 
@@ -277,6 +278,7 @@ func (m *CustomRolesModule) writeOutput(ctx context.Context, logger internal.Log
 			fmt.Sprintf("%d", dangerousCount),
 			fmt.Sprintf("%d", privescCount),
 			role.Stage,
+			m.GetProjectName(role.ProjectID),
 			role.ProjectID,
 		})
 	}
@@ -287,6 +289,7 @@ func (m *CustomRolesModule) writeOutput(ctx context.Context, logger internal.Log
 		"Role",
 		"Permission",
 		"Description",
+		"Project Name",
 		"Project",
 	}
 
@@ -306,6 +309,7 @@ func (m *CustomRolesModule) writeOutput(ctx context.Context, logger internal.Log
 					role.Name,
 					perm,
 					dp.Description,
+					m.GetProjectName(role.ProjectID),
 					role.ProjectID,
 				})
 			}
@@ -316,6 +320,7 @@ func (m *CustomRolesModule) writeOutput(ctx context.Context, logger internal.Log
 	privescHeader := []string{
 		"Role",
 		"Privesc Permissions",
+		"Project Name",
 		"Project",
 	}
 
@@ -329,6 +334,7 @@ func (m *CustomRolesModule) writeOutput(ctx context.Context, logger internal.Log
 			privescBody = append(privescBody, []string{
 				role.Name,
 				perms,
+				m.GetProjectName(role.ProjectID),
 				role.ProjectID,
 			})
 		}
@@ -372,6 +378,11 @@ func (m *CustomRolesModule) writeOutput(ctx context.Context, logger internal.Log
 		Loot:  lootFiles,
 	}
 
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
+
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
@@ -380,7 +391,7 @@ func (m *CustomRolesModule) writeOutput(ctx context.Context, logger internal.Log
 		m.WrapTable,
 		"project",
 		m.ProjectIDs,
-		m.ProjectIDs,
+		scopeNames,
 		m.Account,
 		output,
 	)

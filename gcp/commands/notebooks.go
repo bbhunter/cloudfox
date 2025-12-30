@@ -137,7 +137,7 @@ func (m *NotebooksModule) writeOutput(ctx context.Context, logger internal.Logge
 
 	// Instances table
 	if len(m.Instances) > 0 {
-		header := []string{"Name", "Location", "State", "Machine Type", "Service Account", "Public IP", "GPU", "Risk", "Project"}
+		header := []string{"Name", "Location", "State", "Machine Type", "Service Account", "Public IP", "GPU", "Risk", "Project Name", "Project"}
 		var body [][]string
 		for _, instance := range m.Instances {
 			publicIP := "No"
@@ -163,6 +163,7 @@ func (m *NotebooksModule) writeOutput(ctx context.Context, logger internal.Logge
 				publicIP,
 				gpu,
 				instance.RiskLevel,
+				m.GetProjectName(instance.ProjectID),
 				instance.ProjectID,
 			})
 		}
@@ -175,7 +176,7 @@ func (m *NotebooksModule) writeOutput(ctx context.Context, logger internal.Logge
 
 	// Runtimes table
 	if len(m.Runtimes) > 0 {
-		header := []string{"Name", "Location", "State", "Type", "Machine Type", "Risk", "Project"}
+		header := []string{"Name", "Location", "State", "Type", "Machine Type", "Risk", "Project Name", "Project"}
 		var body [][]string
 		for _, runtime := range m.Runtimes {
 			body = append(body, []string{
@@ -185,6 +186,7 @@ func (m *NotebooksModule) writeOutput(ctx context.Context, logger internal.Logge
 				runtime.RuntimeType,
 				runtime.MachineType,
 				runtime.RiskLevel,
+				m.GetProjectName(runtime.ProjectID),
 				runtime.ProjectID,
 			})
 		}
@@ -203,6 +205,7 @@ func (m *NotebooksModule) writeOutput(ctx context.Context, logger internal.Logge
 				instance.Name,
 				instance.RiskLevel,
 				strings.Join(instance.RiskReasons, "; "),
+				m.GetProjectName(instance.ProjectID),
 				instance.ProjectID,
 			})
 		}
@@ -211,7 +214,7 @@ func (m *NotebooksModule) writeOutput(ctx context.Context, logger internal.Logge
 	if len(highRiskBody) > 0 {
 		tables = append(tables, internal.TableFile{
 			Name:   "notebook-risks",
-			Header: []string{"Instance", "Risk Level", "Reasons", "Project"},
+			Header: []string{"Instance", "Risk Level", "Reasons", "Project Name", "Project"},
 			Body:   highRiskBody,
 		})
 	}
@@ -225,8 +228,13 @@ func (m *NotebooksModule) writeOutput(ctx context.Context, logger internal.Logge
 
 	output := NotebooksOutput{Table: tables, Loot: lootFiles}
 
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
+
 	err := internal.HandleOutputSmart("gcp", m.Format, m.OutputDirectory, m.Verbosity, m.WrapTable,
-		"project", m.ProjectIDs, m.ProjectIDs, m.Account, output)
+		"project", m.ProjectIDs, scopeNames, m.Account, output)
 	if err != nil {
 		logger.ErrorM(fmt.Sprintf("Error writing output: %v", err), globals.GCP_NOTEBOOKS_MODULE_NAME)
 	}

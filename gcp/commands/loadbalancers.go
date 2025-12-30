@@ -149,7 +149,7 @@ func (m *LoadBalancersModule) writeOutput(ctx context.Context, logger internal.L
 	var tables []internal.TableFile
 
 	// Load Balancers table
-	lbHeader := []string{"Name", "Type", "Scheme", "IP Address", "Port", "Region", "Risk", "Project"}
+	lbHeader := []string{"Name", "Type", "Scheme", "IP Address", "Port", "Region", "Risk", "Project Name", "Project"}
 	var lbBody [][]string
 	for _, lb := range m.LoadBalancers {
 		lbBody = append(lbBody, []string{
@@ -160,6 +160,7 @@ func (m *LoadBalancersModule) writeOutput(ctx context.Context, logger internal.L
 			lb.Port,
 			lb.Region,
 			lb.RiskLevel,
+			m.GetProjectName(lb.ProjectID),
 			lb.ProjectID,
 		})
 	}
@@ -171,7 +172,7 @@ func (m *LoadBalancersModule) writeOutput(ctx context.Context, logger internal.L
 
 	// SSL Policies table
 	if len(m.SSLPolicies) > 0 {
-		sslHeader := []string{"Name", "Min TLS", "Profile", "Risk", "Project"}
+		sslHeader := []string{"Name", "Min TLS", "Profile", "Risk", "Project Name", "Project"}
 		var sslBody [][]string
 		for _, policy := range m.SSLPolicies {
 			sslBody = append(sslBody, []string{
@@ -179,6 +180,7 @@ func (m *LoadBalancersModule) writeOutput(ctx context.Context, logger internal.L
 				policy.MinTLSVersion,
 				policy.Profile,
 				policy.RiskLevel,
+				m.GetProjectName(policy.ProjectID),
 				policy.ProjectID,
 			})
 		}
@@ -191,7 +193,7 @@ func (m *LoadBalancersModule) writeOutput(ctx context.Context, logger internal.L
 
 	// Backend Services table
 	if len(m.BackendServices) > 0 {
-		beHeader := []string{"Name", "Protocol", "Security Policy", "CDN", "Health Check", "Risk", "Project"}
+		beHeader := []string{"Name", "Protocol", "Security Policy", "CDN", "Health Check", "Risk", "Project Name", "Project"}
 		var beBody [][]string
 		for _, be := range m.BackendServices {
 			cdn := "No"
@@ -209,6 +211,7 @@ func (m *LoadBalancersModule) writeOutput(ctx context.Context, logger internal.L
 				cdn,
 				be.HealthCheck,
 				be.RiskLevel,
+				m.GetProjectName(be.ProjectID),
 				be.ProjectID,
 			})
 		}
@@ -228,6 +231,7 @@ func (m *LoadBalancersModule) writeOutput(ctx context.Context, logger internal.L
 				lb.Name,
 				lb.RiskLevel,
 				strings.Join(lb.RiskReasons, "; "),
+				m.GetProjectName(lb.ProjectID),
 				lb.ProjectID,
 			})
 		}
@@ -239,6 +243,7 @@ func (m *LoadBalancersModule) writeOutput(ctx context.Context, logger internal.L
 				policy.Name,
 				policy.RiskLevel,
 				strings.Join(policy.RiskReasons, "; "),
+				m.GetProjectName(policy.ProjectID),
 				policy.ProjectID,
 			})
 		}
@@ -247,7 +252,7 @@ func (m *LoadBalancersModule) writeOutput(ctx context.Context, logger internal.L
 	if len(highRiskBody) > 0 {
 		tables = append(tables, internal.TableFile{
 			Name:   "lb-risks",
-			Header: []string{"Type", "Name", "Risk Level", "Reasons", "Project"},
+			Header: []string{"Type", "Name", "Risk Level", "Reasons", "Project Name", "Project"},
 			Body:   highRiskBody,
 		})
 	}
@@ -261,8 +266,13 @@ func (m *LoadBalancersModule) writeOutput(ctx context.Context, logger internal.L
 
 	output := LoadBalancersOutput{Table: tables, Loot: lootFiles}
 
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
+
 	err := internal.HandleOutputSmart("gcp", m.Format, m.OutputDirectory, m.Verbosity, m.WrapTable,
-		"project", m.ProjectIDs, m.ProjectIDs, m.Account, output)
+		"project", m.ProjectIDs, scopeNames, m.Account, output)
 	if err != nil {
 		logger.ErrorM(fmt.Sprintf("Error writing output: %v", err), globals.GCP_LOADBALANCERS_MODULE_NAME)
 	}

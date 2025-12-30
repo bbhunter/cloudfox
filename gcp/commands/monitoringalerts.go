@@ -728,7 +728,8 @@ func (m *MonitoringAlertsModule) writeOutput(ctx context.Context, logger interna
 	// Alert Policies table
 	policiesHeader := []string{
 		"Policy",
-		"Project",
+		"Project Name",
+		"Project ID",
 		"Enabled",
 		"Conditions",
 		"Notifications",
@@ -744,6 +745,7 @@ func (m *MonitoringAlertsModule) writeOutput(ctx context.Context, logger interna
 
 		policiesBody = append(policiesBody, []string{
 			truncateString(p.DisplayName, 40),
+			m.GetProjectName(p.ProjectID),
 			p.ProjectID,
 			enabled,
 			fmt.Sprintf("%d", p.ConditionCount),
@@ -766,7 +768,8 @@ func (m *MonitoringAlertsModule) writeOutput(ctx context.Context, logger interna
 	// Notification Channels table
 	channelsHeader := []string{
 		"Channel",
-		"Project",
+		"Project Name",
+		"Project ID",
 		"Type",
 		"Enabled",
 		"Verified",
@@ -785,6 +788,7 @@ func (m *MonitoringAlertsModule) writeOutput(ctx context.Context, logger interna
 
 		channelsBody = append(channelsBody, []string{
 			truncateString(c.DisplayName, 40),
+			m.GetProjectName(c.ProjectID),
 			c.ProjectID,
 			c.Type,
 			enabled,
@@ -827,7 +831,8 @@ func (m *MonitoringAlertsModule) writeOutput(ctx context.Context, logger interna
 	// Uptime Checks table
 	uptimeHeader := []string{
 		"Check",
-		"Project",
+		"Project Name",
+		"Project ID",
 		"Host",
 		"Protocol",
 		"Port",
@@ -838,6 +843,7 @@ func (m *MonitoringAlertsModule) writeOutput(ctx context.Context, logger interna
 	for _, u := range m.UptimeChecks {
 		uptimeBody = append(uptimeBody, []string{
 			truncateString(u.DisplayName, 30),
+			m.GetProjectName(u.ProjectID),
 			u.ProjectID,
 			truncateString(u.MonitoredHost, 30),
 			u.Protocol,
@@ -892,6 +898,12 @@ func (m *MonitoringAlertsModule) writeOutput(ctx context.Context, logger interna
 		Loot:  lootFiles,
 	}
 
+	// Build scope names using project names
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, projectID := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(projectID)
+	}
+
 	// Write output
 	err := internal.HandleOutputSmart(
 		"gcp",
@@ -900,7 +912,7 @@ func (m *MonitoringAlertsModule) writeOutput(ctx context.Context, logger interna
 		m.Verbosity,
 		m.WrapTable,
 		"project",
-		m.ProjectIDs,
+		scopeNames,
 		m.ProjectIDs,
 		m.Account,
 		output,

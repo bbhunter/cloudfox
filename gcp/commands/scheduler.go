@@ -257,6 +257,7 @@ func (m *SchedulerModule) addJobToLoot(job SchedulerService.JobInfo) {
 func (m *SchedulerModule) writeOutput(ctx context.Context, logger internal.Logger) {
 	// Jobs table
 	header := []string{
+		"Project Name",
 		"Project ID",
 		"Job Name",
 		"Location",
@@ -289,6 +290,7 @@ func (m *SchedulerModule) writeOutput(ctx context.Context, logger internal.Logge
 		}
 
 		body = append(body, []string{
+			m.GetProjectName(job.ProjectID),
 			job.ProjectID,
 			job.Name,
 			job.Location,
@@ -323,6 +325,11 @@ func (m *SchedulerModule) writeOutput(ctx context.Context, logger internal.Logge
 		Loot:  lootFiles,
 	}
 
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
+
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
@@ -331,7 +338,7 @@ func (m *SchedulerModule) writeOutput(ctx context.Context, logger internal.Logge
 		m.WrapTable,
 		"project",
 		m.ProjectIDs,
-		m.ProjectIDs,
+		scopeNames,
 		m.Account,
 		output,
 	)

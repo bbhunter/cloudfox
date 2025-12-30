@@ -6,6 +6,7 @@ import (
 
 	"github.com/BishopFox/cloudfox/gcp/commands"
 	oauthservice "github.com/BishopFox/cloudfox/gcp/services/oauthService"
+	orgsservice "github.com/BishopFox/cloudfox/gcp/services/organizationsService"
 	"github.com/BishopFox/cloudfox/internal"
 	"github.com/spf13/cobra"
 )
@@ -16,6 +17,10 @@ var (
 	GCPProjectID          string
 	GCPProjectIDsFilePath string
 	GCPProjectIDs         []string
+	GCPAllProjects        bool
+
+	// Project name mapping (ProjectID -> DisplayName)
+	GCPProjectNames map[string]string
 
 	// Output formatting options
 	GCPOutputFormat    string
@@ -36,18 +41,45 @@ var (
 		Long:    `See "Available Commands" for GCP Modules below`,
 		Short:   "See \"Available Commands\" for GCP Modules below",
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
-			if GCPProjectID != "" {
+			// Initialize project names map
+			GCPProjectNames = make(map[string]string)
+
+			// Handle project discovery based on flags
+			if GCPAllProjects {
+				// Discover all accessible projects
+				GCPLogger.InfoM("Discovering all accessible projects...", "gcp")
+				orgsSvc := orgsservice.New()
+				projects, err := orgsSvc.SearchProjects("")
+				if err != nil {
+					GCPLogger.FatalM(fmt.Sprintf("Failed to discover projects: %v. Try using -p or -l flags instead.", err), "gcp")
+				}
+				for _, proj := range projects {
+					if proj.State == "ACTIVE" {
+						GCPProjectIDs = append(GCPProjectIDs, proj.ProjectID)
+						GCPProjectNames[proj.ProjectID] = proj.DisplayName
+					}
+				}
+				if len(GCPProjectIDs) == 0 {
+					GCPLogger.FatalM("No accessible projects found. Check your permissions.", "gcp")
+				}
+				GCPLogger.InfoM(fmt.Sprintf("Discovered %d project(s)", len(GCPProjectIDs)), "gcp")
+			} else if GCPProjectID != "" {
 				GCPProjectIDs = append(GCPProjectIDs, GCPProjectID)
+				// Resolve project name for single project
+				resolveProjectNames(GCPProjectIDs)
 			} else if GCPProjectIDsFilePath != "" {
 				GCPProjectIDs = internal.LoadFileLinesIntoArray(GCPProjectIDsFilePath)
+				// Resolve project names for all projects in list
+				resolveProjectNames(GCPProjectIDs)
 			} else {
-				GCPLogger.InfoM("project or project-list flags not given, commands requiring a project ID will fail", "gcp")
+				GCPLogger.InfoM("project, project-list, or all-projects flag not given, commands requiring a project ID will fail", "gcp")
 			}
-			// Create a context with this value to share it with subcommands at runtime
-			ctx := context.WithValue(context.Background(), "projectIDs", GCPProjectIDs)
 
-			// Set the context for this command which all subcommands can access via [SUBCMD].Parent().Context()
-			// cmd.SetContext(ctx)
+			// Create a context with project IDs and names
+			ctx := context.WithValue(context.Background(), "projectIDs", GCPProjectIDs)
+			ctx = context.WithValue(ctx, "projectNames", GCPProjectNames)
+
+			// Authenticate and get account info
 			os := oauthservice.NewOAuthService()
 			principal, err := os.WhoAmI()
 			if err != nil {
@@ -58,6 +90,40 @@ var (
 		},
 	}
 )
+
+// resolveProjectNames fetches display names for given project IDs
+func resolveProjectNames(projectIDs []string) {
+	if len(projectIDs) == 0 {
+		return
+	}
+
+	orgsSvc := orgsservice.New()
+	// Fetch all accessible projects and build lookup map
+	projects, err := orgsSvc.SearchProjects("")
+	if err != nil {
+		// Non-fatal: we can continue without display names
+		GCPLogger.InfoM("Could not resolve project names, using project IDs only", "gcp")
+		for _, id := range projectIDs {
+			GCPProjectNames[id] = id // fallback to using ID as name
+		}
+		return
+	}
+
+	// Build lookup from fetched projects
+	projectLookup := make(map[string]string)
+	for _, proj := range projects {
+		projectLookup[proj.ProjectID] = proj.DisplayName
+	}
+
+	// Map our project IDs to names
+	for _, id := range projectIDs {
+		if name, ok := projectLookup[id]; ok {
+			GCPProjectNames[id] = name
+		} else {
+			GCPProjectNames[id] = id // fallback to using ID as name
+		}
+	}
+}
 
 // New RunAllGCPCommands function to execute all child commands
 var GCPAllChecksCommand = &cobra.Command{
@@ -86,7 +152,7 @@ func init() {
 	// GCPCommands.PersistentFlags().StringVarP(&GCPOrganization, "organization", "o", "", "Organization name or number, repetable")
 	GCPCommands.PersistentFlags().StringVarP(&GCPProjectID, "project", "p", "", "GCP project ID")
 	GCPCommands.PersistentFlags().StringVarP(&GCPProjectIDsFilePath, "project-list", "l", "", "Path to a file containing a list of project IDs separated by newlines")
-	// GCPCommands.PersistentFlags().BoolVarP(&GCPAllProjects, "all-projects", "a", false, "Use all project IDs available to activated gloud account or given gcloud account")
+	GCPCommands.PersistentFlags().BoolVarP(&GCPAllProjects, "all-projects", "a", false, "Automatically discover and use all accessible projects")
 	// GCPCommands.PersistentFlags().BoolVarP(&GCPConfirm, "yes", "y", false, "Non-interactive mode (like apt/yum)")
 	// GCPCommands.PersistentFlags().StringVarP(&GCPOutputFormat, "output", "", "brief", "[\"brief\" | \"wide\" ]")
 	GCPCommands.PersistentFlags().IntVarP(&Verbosity, "verbosity", "v", 2, "1 = Print control messages only\n2 = Print control messages, module output\n3 = Print control messages, module output, and loot file output\n")

@@ -318,7 +318,7 @@ func (m *CertManagerModule) writeOutput(ctx context.Context, logger internal.Log
 	var tables []internal.TableFile
 
 	// Combined certificates table
-	header := []string{"Risk", "Name", "Type", "Domains", "Expires", "Days Left", "Project"}
+	header := []string{"Risk", "Name", "Type", "Domains", "Expires", "Days Left", "Project Name", "Project ID"}
 	var body [][]string
 
 	for _, cert := range m.Certificates {
@@ -339,6 +339,7 @@ func (m *CertManagerModule) writeOutput(ctx context.Context, logger internal.Log
 			domains,
 			cert.ExpireTime,
 			daysLeft,
+			m.GetProjectName(cert.ProjectID),
 			cert.ProjectID,
 		})
 	}
@@ -361,6 +362,7 @@ func (m *CertManagerModule) writeOutput(ctx context.Context, logger internal.Log
 			domains,
 			cert.ExpireTime,
 			daysLeft,
+			m.GetProjectName(cert.ProjectID),
 			cert.ProjectID,
 		})
 	}
@@ -375,7 +377,7 @@ func (m *CertManagerModule) writeOutput(ctx context.Context, logger internal.Log
 
 	// Certificate maps table
 	if len(m.CertMaps) > 0 {
-		mapHeader := []string{"Risk", "Name", "Location", "Entries", "Certificates", "Project"}
+		mapHeader := []string{"Risk", "Name", "Location", "Entries", "Certificates", "Project Name", "Project ID"}
 		var mapBody [][]string
 
 		for _, certMap := range m.CertMaps {
@@ -390,6 +392,7 @@ func (m *CertManagerModule) writeOutput(ctx context.Context, logger internal.Log
 				certMap.Location,
 				fmt.Sprintf("%d", certMap.EntryCount),
 				certs,
+				m.GetProjectName(certMap.ProjectID),
 				certMap.ProjectID,
 			})
 		}
@@ -414,6 +417,12 @@ func (m *CertManagerModule) writeOutput(ctx context.Context, logger internal.Log
 		Loot:  lootFiles,
 	}
 
+	// Build scopeNames using GetProjectName
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, projectID := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(projectID)
+	}
+
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
@@ -422,7 +431,7 @@ func (m *CertManagerModule) writeOutput(ctx context.Context, logger internal.Log
 		m.WrapTable,
 		"project",
 		m.ProjectIDs,
-		m.ProjectIDs,
+		scopeNames,
 		m.Account,
 		output,
 	)

@@ -250,6 +250,7 @@ func (m *BucketEnumModule) writeOutput(ctx context.Context, logger internal.Logg
 		"Object Name",
 		"Size",
 		"Description",
+		"Project Name",
 		"Project",
 	}
 
@@ -268,6 +269,7 @@ func (m *BucketEnumModule) writeOutput(ctx context.Context, logger internal.Logg
 			objName,
 			formatFileSize(file.Size),
 			file.Description,
+			m.GetProjectName(file.ProjectID),
 			file.ProjectID,
 		})
 	}
@@ -303,6 +305,7 @@ func (m *BucketEnumModule) writeOutput(ctx context.Context, logger internal.Logg
 	bucketHeader := []string{
 		"Bucket",
 		"Sensitive Files",
+		"Project Name",
 		"Project",
 	}
 
@@ -312,10 +315,12 @@ func (m *BucketEnumModule) writeOutput(ctx context.Context, logger internal.Logg
 		bucketProjects[file.BucketName] = file.ProjectID
 	}
 	for bucket, count := range bucketCounts {
+		projectID := bucketProjects[bucket]
 		bucketBody = append(bucketBody, []string{
 			bucket,
 			fmt.Sprintf("%d", count),
-			bucketProjects[bucket],
+			m.GetProjectName(projectID),
+			projectID,
 		})
 	}
 
@@ -354,6 +359,11 @@ func (m *BucketEnumModule) writeOutput(ctx context.Context, logger internal.Logg
 
 	output := BucketEnumOutput{Table: tables, Loot: lootFiles}
 
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
+
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
@@ -361,7 +371,7 @@ func (m *BucketEnumModule) writeOutput(ctx context.Context, logger internal.Logg
 		m.Verbosity,
 		m.WrapTable,
 		"project",
-		m.ProjectIDs,
+		scopeNames,
 		m.ProjectIDs,
 		m.Account,
 		output,

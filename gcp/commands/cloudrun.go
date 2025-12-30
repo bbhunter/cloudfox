@@ -278,6 +278,7 @@ func (m *CloudRunModule) addJobToLoot(job CloudRunService.JobInfo) {
 func (m *CloudRunModule) writeOutput(ctx context.Context, logger internal.Logger) {
 	// Services table
 	servicesHeader := []string{
+		"Project Name",
 		"Project ID",
 		"Name",
 		"Region",
@@ -325,6 +326,7 @@ func (m *CloudRunModule) writeOutput(ctx context.Context, logger internal.Logger
 		saDisplay := truncateSA(svc.ServiceAccount)
 
 		servicesBody = append(servicesBody, []string{
+			m.GetProjectName(svc.ProjectID),
 			svc.ProjectID,
 			svc.Name,
 			svc.Region,
@@ -341,6 +343,7 @@ func (m *CloudRunModule) writeOutput(ctx context.Context, logger internal.Logger
 
 	// Jobs table
 	jobsHeader := []string{
+		"Project Name",
 		"Project ID",
 		"Name",
 		"Region",
@@ -374,6 +377,7 @@ func (m *CloudRunModule) writeOutput(ctx context.Context, logger internal.Logger
 		}
 
 		jobsBody = append(jobsBody, []string{
+			m.GetProjectName(job.ProjectID),
 			job.ProjectID,
 			job.Name,
 			job.Region,
@@ -418,6 +422,11 @@ func (m *CloudRunModule) writeOutput(ctx context.Context, logger internal.Logger
 		Loot:  lootFiles,
 	}
 
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
+
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
@@ -426,7 +435,7 @@ func (m *CloudRunModule) writeOutput(ctx context.Context, logger internal.Logger
 		m.WrapTable,
 		"project",
 		m.ProjectIDs,
-		m.ProjectIDs,
+		scopeNames,
 		m.Account,
 		output,
 	)

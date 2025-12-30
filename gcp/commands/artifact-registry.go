@@ -405,6 +405,7 @@ func artifactBoolToCheck(b bool) string {
 func (m *ArtifactRegistryModule) writeOutput(ctx context.Context, logger internal.Logger) {
 	// Main repository table with security-relevant columns
 	repoHeader := []string{
+		"Project Name",
 		"Project ID",
 		"Name",
 		"Format",
@@ -437,6 +438,7 @@ func (m *ArtifactRegistryModule) writeOutput(ctx context.Context, logger interna
 		mode = strings.TrimSuffix(mode, "_REPOSITORY")
 
 		repoBody = append(repoBody, []string{
+			m.GetProjectName(repo.ProjectID),
 			repo.ProjectID,
 			repoName,
 			repo.Format,
@@ -451,6 +453,7 @@ func (m *ArtifactRegistryModule) writeOutput(ctx context.Context, logger interna
 
 	// Artifact table with enhanced fields
 	artifactHeader := []string{
+		"Project Name",
 		"Project ID",
 		"Name",
 		"Repository",
@@ -480,6 +483,7 @@ func (m *ArtifactRegistryModule) writeOutput(ctx context.Context, logger interna
 		}
 
 		artifactBody = append(artifactBody, []string{
+			m.GetProjectName(artifact.ProjectID),
 			artifact.ProjectID,
 			artifact.Name,
 			artifact.Repository,
@@ -494,6 +498,7 @@ func (m *ArtifactRegistryModule) writeOutput(ctx context.Context, logger interna
 	// IAM bindings table - one row per member
 	iamHeader := []string{
 		"Repository",
+		"Project Name",
 		"Project ID",
 		"Location",
 		"Role",
@@ -519,6 +524,7 @@ func (m *ArtifactRegistryModule) writeOutput(ctx context.Context, logger interna
 				memberType := ArtifactRegistryService.GetMemberType(member)
 				iamBody = append(iamBody, []string{
 					repoName,
+					m.GetProjectName(repo.ProjectID),
 					repo.ProjectID,
 					repo.Location,
 					binding.Role,
@@ -532,6 +538,7 @@ func (m *ArtifactRegistryModule) writeOutput(ctx context.Context, logger interna
 	// Public repositories table
 	publicHeader := []string{
 		"Repository",
+		"Project Name",
 		"Project ID",
 		"Location",
 		"Format",
@@ -550,6 +557,7 @@ func (m *ArtifactRegistryModule) writeOutput(ctx context.Context, logger interna
 
 			publicBody = append(publicBody, []string{
 				repoName,
+				m.GetProjectName(repo.ProjectID),
 				repo.ProjectID,
 				repo.Location,
 				repo.Format,
@@ -609,15 +617,19 @@ func (m *ArtifactRegistryModule) writeOutput(ctx context.Context, logger interna
 	}
 
 	// Write output using HandleOutputSmart with scope support
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
 		m.OutputDirectory,
 		m.Verbosity,
 		m.WrapTable,
-		"project",           // scopeType
-		m.ProjectIDs,        // scopeIdentifiers
-		m.ProjectIDs,        // scopeNames (same as IDs for GCP projects)
+		"project",    // scopeType
+		m.ProjectIDs, // scopeIdentifiers
+		scopeNames,   // scopeNames
 		m.Account,
 		output,
 	)

@@ -629,7 +629,8 @@ func (m *NetworkExposureModule) writeOutput(ctx context.Context, logger internal
 	resourcesHeader := []string{
 		"Type",
 		"Name",
-		"Project",
+		"Project Name",
+		"Project ID",
 		"IP/FQDN",
 		"Ports",
 		"TLS",
@@ -649,6 +650,7 @@ func (m *NetworkExposureModule) writeOutput(ctx context.Context, logger internal
 		resourcesBody = append(resourcesBody, []string{
 			r.ResourceType,
 			r.ResourceName,
+			m.GetProjectName(r.ProjectID),
 			r.ProjectID,
 			truncateString(endpoint, 40),
 			strings.Join(r.ExposedPorts, ","),
@@ -660,7 +662,8 @@ func (m *NetworkExposureModule) writeOutput(ctx context.Context, logger internal
 	// Firewall exposures table
 	firewallHeader := []string{
 		"Rule",
-		"Project",
+		"Project Name",
+		"Project ID",
 		"Ports",
 		"Protocol",
 		"Target Tags",
@@ -671,6 +674,7 @@ func (m *NetworkExposureModule) writeOutput(ctx context.Context, logger internal
 	for _, f := range m.FirewallExposures {
 		firewallBody = append(firewallBody, []string{
 			f.RuleName,
+			m.GetProjectName(f.ProjectID),
 			f.ProjectID,
 			strings.Join(f.Ports, ","),
 			f.Protocol,
@@ -737,6 +741,12 @@ func (m *NetworkExposureModule) writeOutput(ctx context.Context, logger internal
 		Loot:  lootFiles,
 	}
 
+	// Build scopeNames using GetProjectName
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, projectID := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(projectID)
+	}
+
 	// Write output
 	err := internal.HandleOutputSmart(
 		"gcp",
@@ -746,7 +756,7 @@ func (m *NetworkExposureModule) writeOutput(ctx context.Context, logger internal
 		m.WrapTable,
 		"project",
 		m.ProjectIDs,
-		m.ProjectIDs,
+		scopeNames,
 		m.Account,
 		output,
 	)

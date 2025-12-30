@@ -283,6 +283,7 @@ func (m *KMSModule) addKeyToLoot(key KMSService.CryptoKeyInfo) {
 func (m *KMSModule) writeOutput(ctx context.Context, logger internal.Logger) {
 	// Crypto keys table
 	keysHeader := []string{
+		"Project Name",
 		"Project ID",
 		"Key Name",
 		"Key Ring",
@@ -316,6 +317,7 @@ func (m *KMSModule) writeOutput(ctx context.Context, logger internal.Logger) {
 		}
 
 		keysBody = append(keysBody, []string{
+			m.GetProjectName(key.ProjectID),
 			key.ProjectID,
 			key.Name,
 			key.KeyRing,
@@ -331,6 +333,7 @@ func (m *KMSModule) writeOutput(ctx context.Context, logger internal.Logger) {
 
 	// Key rings table (summary)
 	keyRingsHeader := []string{
+		"Project Name",
 		"Project ID",
 		"Key Ring",
 		"Location",
@@ -340,6 +343,7 @@ func (m *KMSModule) writeOutput(ctx context.Context, logger internal.Logger) {
 	var keyRingsBody [][]string
 	for _, kr := range m.KeyRings {
 		keyRingsBody = append(keyRingsBody, []string{
+			m.GetProjectName(kr.ProjectID),
 			kr.ProjectID,
 			kr.Name,
 			kr.Location,
@@ -379,6 +383,11 @@ func (m *KMSModule) writeOutput(ctx context.Context, logger internal.Logger) {
 		Loot:  lootFiles,
 	}
 
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
+
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
@@ -387,7 +396,7 @@ func (m *KMSModule) writeOutput(ctx context.Context, logger internal.Logger) {
 		m.WrapTable,
 		"project",
 		m.ProjectIDs,
-		m.ProjectIDs,
+		scopeNames,
 		m.Account,
 		output,
 	)

@@ -271,6 +271,7 @@ func (m *DNSModule) addRecordToLoot(record DNSService.RecordInfo, zone DNSServic
 func (m *DNSModule) writeOutput(ctx context.Context, logger internal.Logger) {
 	// Zones table
 	zonesHeader := []string{
+		"Project Name",
 		"Project ID",
 		"Zone Name",
 		"DNS Name",
@@ -306,6 +307,7 @@ func (m *DNSModule) writeOutput(ctx context.Context, logger internal.Logger) {
 		}
 
 		zonesBody = append(zonesBody, []string{
+			m.GetProjectName(zone.ProjectID),
 			zone.ProjectID,
 			zone.Name,
 			zone.DNSName,
@@ -379,6 +381,11 @@ func (m *DNSModule) writeOutput(ctx context.Context, logger internal.Logger) {
 		Loot:  lootFiles,
 	}
 
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
+
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
@@ -387,7 +394,7 @@ func (m *DNSModule) writeOutput(ctx context.Context, logger internal.Logger) {
 		m.WrapTable,
 		"project",
 		m.ProjectIDs,
-		m.ProjectIDs,
+		scopeNames,
 		m.Account,
 		output,
 	)

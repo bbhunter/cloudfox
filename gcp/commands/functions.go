@@ -476,6 +476,7 @@ func (m *FunctionsModule) addSecurityAnalysisToLoot(analysis FunctionsService.Fu
 func (m *FunctionsModule) writeOutput(ctx context.Context, logger internal.Logger) {
 	// Main functions table
 	header := []string{
+		"Project Name",
 		"Project ID",
 		"Name",
 		"Region",
@@ -520,6 +521,7 @@ func (m *FunctionsModule) writeOutput(ctx context.Context, logger internal.Logge
 		}
 
 		body = append(body, []string{
+			m.GetProjectName(fn.ProjectID),
 			fn.ProjectID,
 			fn.Name,
 			fn.Region,
@@ -537,6 +539,7 @@ func (m *FunctionsModule) writeOutput(ctx context.Context, logger internal.Logge
 	// HTTP endpoints table
 	httpHeader := []string{
 		"Function",
+		"Project Name",
 		"Project ID",
 		"URL",
 		"Ingress",
@@ -553,6 +556,7 @@ func (m *FunctionsModule) writeOutput(ctx context.Context, logger internal.Logge
 			}
 			httpBody = append(httpBody, []string{
 				fn.Name,
+				m.GetProjectName(fn.ProjectID),
 				fn.ProjectID,
 				fn.TriggerURL,
 				fn.IngressSettings,
@@ -565,6 +569,7 @@ func (m *FunctionsModule) writeOutput(ctx context.Context, logger internal.Logge
 	// Public functions table
 	publicHeader := []string{
 		"Function",
+		"Project Name",
 		"Project ID",
 		"Region",
 		"URL",
@@ -577,6 +582,7 @@ func (m *FunctionsModule) writeOutput(ctx context.Context, logger internal.Logge
 		if fn.IsPublic {
 			publicBody = append(publicBody, []string{
 				fn.Name,
+				m.GetProjectName(fn.ProjectID),
 				fn.ProjectID,
 				fn.Region,
 				fn.TriggerURL,
@@ -590,6 +596,7 @@ func (m *FunctionsModule) writeOutput(ctx context.Context, logger internal.Logge
 	securityHeader := []string{
 		"Risk",
 		"Function",
+		"Project Name",
 		"Project",
 		"Region",
 		"Public",
@@ -620,6 +627,7 @@ func (m *FunctionsModule) writeOutput(ctx context.Context, logger internal.Logge
 		securityBody = append(securityBody, []string{
 			analysis.RiskLevel,
 			analysis.FunctionName,
+			m.GetProjectName(analysis.ProjectID),
 			analysis.ProjectID,
 			analysis.Region,
 			publicStatus,
@@ -631,6 +639,7 @@ func (m *FunctionsModule) writeOutput(ctx context.Context, logger internal.Logge
 	// Source code locations table
 	sourceHeader := []string{
 		"Function",
+		"Project Name",
 		"Project",
 		"Source Type",
 		"Source Location",
@@ -641,6 +650,7 @@ func (m *FunctionsModule) writeOutput(ctx context.Context, logger internal.Logge
 		if fn.SourceLocation != "" {
 			sourceBody = append(sourceBody, []string{
 				fn.Name,
+				m.GetProjectName(fn.ProjectID),
 				fn.ProjectID,
 				fn.SourceType,
 				fn.SourceLocation,
@@ -707,6 +717,11 @@ func (m *FunctionsModule) writeOutput(ctx context.Context, logger internal.Logge
 		Loot:  lootFiles,
 	}
 
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
+
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
@@ -715,7 +730,7 @@ func (m *FunctionsModule) writeOutput(ctx context.Context, logger internal.Logge
 		m.WrapTable,
 		"project",
 		m.ProjectIDs,
-		m.ProjectIDs,
+		scopeNames,
 		m.Account,
 		output,
 	)

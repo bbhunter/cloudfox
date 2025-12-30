@@ -229,6 +229,7 @@ func (m *DomainWideDelegationModule) writeOutput(ctx context.Context, logger int
 		"DWD Enabled",
 		"OAuth2 Client ID",
 		"Keys",
+		"Project Name",
 		"Project",
 	}
 
@@ -266,6 +267,7 @@ func (m *DomainWideDelegationModule) writeOutput(ctx context.Context, logger int
 			dwdStatus,
 			clientID,
 			keysDisplay,
+			m.GetProjectName(account.ProjectID),
 			account.ProjectID,
 		})
 	}
@@ -291,6 +293,11 @@ func (m *DomainWideDelegationModule) writeOutput(ctx context.Context, logger int
 		Loot:  lootFiles,
 	}
 
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, projectID := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(projectID)
+	}
+
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
@@ -299,7 +306,7 @@ func (m *DomainWideDelegationModule) writeOutput(ctx context.Context, logger int
 		m.WrapTable,
 		"project",
 		m.ProjectIDs,
-		m.ProjectIDs,
+		scopeNames,
 		m.Account,
 		output,
 	)

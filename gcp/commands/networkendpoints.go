@@ -291,7 +291,7 @@ func (m *NetworkEndpointsModule) writeOutput(ctx context.Context, logger interna
 
 	// PSC Endpoints table
 	if len(m.PSCEndpoints) > 0 {
-		header := []string{"Risk", "Name", "Region", "Network", "IP", "Target Type", "Target", "Project"}
+		header := []string{"Risk", "Name", "Region", "Network", "IP", "Target Type", "Target", "Project Name", "Project"}
 		var body [][]string
 
 		for _, endpoint := range m.PSCEndpoints {
@@ -308,6 +308,7 @@ func (m *NetworkEndpointsModule) writeOutput(ctx context.Context, logger interna
 				endpoint.IPAddress,
 				endpoint.TargetType,
 				target,
+				m.GetProjectName(endpoint.ProjectID),
 				endpoint.ProjectID,
 			})
 		}
@@ -321,7 +322,7 @@ func (m *NetworkEndpointsModule) writeOutput(ctx context.Context, logger interna
 
 	// Private Connections table
 	if len(m.PrivateConnections) > 0 {
-		header := []string{"Risk", "Name", "Network", "Service", "Reserved Ranges", "Accessible Services", "Project"}
+		header := []string{"Risk", "Name", "Network", "Service", "Reserved Ranges", "Accessible Services", "Project Name", "Project"}
 		var body [][]string
 
 		for _, conn := range m.PrivateConnections {
@@ -342,6 +343,7 @@ func (m *NetworkEndpointsModule) writeOutput(ctx context.Context, logger interna
 				conn.Service,
 				ranges,
 				services,
+				m.GetProjectName(conn.ProjectID),
 				conn.ProjectID,
 			})
 		}
@@ -355,7 +357,7 @@ func (m *NetworkEndpointsModule) writeOutput(ctx context.Context, logger interna
 
 	// Service Attachments table
 	if len(m.ServiceAttachments) > 0 {
-		header := []string{"Risk", "Name", "Region", "Target Service", "Accept Policy", "Connected", "Project"}
+		header := []string{"Risk", "Name", "Region", "Target Service", "Accept Policy", "Connected", "Project Name", "Project"}
 		var body [][]string
 
 		for _, attachment := range m.ServiceAttachments {
@@ -366,6 +368,7 @@ func (m *NetworkEndpointsModule) writeOutput(ctx context.Context, logger interna
 				attachment.TargetService,
 				attachment.ConnectionPreference,
 				fmt.Sprintf("%d", attachment.ConnectedEndpoints),
+				m.GetProjectName(attachment.ProjectID),
 				attachment.ProjectID,
 			})
 		}
@@ -390,6 +393,11 @@ func (m *NetworkEndpointsModule) writeOutput(ctx context.Context, logger interna
 		Loot:  lootFiles,
 	}
 
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, projectID := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(projectID)
+	}
+
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
@@ -398,7 +406,7 @@ func (m *NetworkEndpointsModule) writeOutput(ctx context.Context, logger interna
 		m.WrapTable,
 		"project",
 		m.ProjectIDs,
-		m.ProjectIDs,
+		scopeNames,
 		m.Account,
 		output,
 	)

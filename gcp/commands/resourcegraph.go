@@ -582,7 +582,8 @@ func (m *ResourceGraphModule) writeOutput(ctx context.Context, logger internal.L
 	assetsHeader := []string{
 		"Name",
 		"Type",
-		"Project",
+		"Project Name",
+		"Project ID",
 		"Location",
 		"Updated",
 	}
@@ -605,6 +606,7 @@ func (m *ResourceGraphModule) writeOutput(ctx context.Context, logger internal.L
 		assetsBody = append(assetsBody, []string{
 			truncateString(name, 40),
 			truncateString(a.AssetType, 40),
+			m.GetProjectName(a.ProjectID),
 			a.ProjectID,
 			a.Location,
 			truncateString(a.UpdateTime, 20),
@@ -641,7 +643,8 @@ func (m *ResourceGraphModule) writeOutput(ctx context.Context, logger internal.L
 	crossHeader := []string{
 		"Resource",
 		"Type",
-		"Owner Project",
+		"Owner Project Name",
+		"Owner Project ID",
 		"Accessed From",
 		"Risk",
 	}
@@ -651,6 +654,7 @@ func (m *ResourceGraphModule) writeOutput(ctx context.Context, logger internal.L
 		crossBody = append(crossBody, []string{
 			truncateString(m.extractResourceName(c.ResourceName), 35),
 			truncateString(c.ResourceType, 30),
+			m.GetProjectName(c.OwnerProject),
 			c.OwnerProject,
 			strings.Join(c.AccessedFrom, ","),
 			c.RiskLevel,
@@ -703,6 +707,12 @@ func (m *ResourceGraphModule) writeOutput(ctx context.Context, logger internal.L
 		Loot:  lootFiles,
 	}
 
+	// Build scope names using project names
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, projectID := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(projectID)
+	}
+
 	// Write output
 	err := internal.HandleOutputSmart(
 		"gcp",
@@ -711,7 +721,7 @@ func (m *ResourceGraphModule) writeOutput(ctx context.Context, logger internal.L
 		m.Verbosity,
 		m.WrapTable,
 		"project",
-		m.ProjectIDs,
+		scopeNames,
 		m.ProjectIDs,
 		m.Account,
 		output,

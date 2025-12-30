@@ -1692,7 +1692,8 @@ func (m *ComplianceDashboardModule) writeOutput(ctx context.Context, logger inte
 		"Severity",
 		"Resource",
 		"Type",
-		"Project",
+		"Project Name",
+		"Project ID",
 		"Risk Score",
 	}
 
@@ -1703,6 +1704,7 @@ func (m *ComplianceDashboardModule) writeOutput(ctx context.Context, logger inte
 			f.Severity,
 			truncateString(f.ResourceName, 50),
 			f.ResourceType,
+			m.GetProjectName(f.ProjectID),
 			f.ProjectID,
 			fmt.Sprintf("%d", f.RiskScore),
 		})
@@ -1795,6 +1797,12 @@ func (m *ComplianceDashboardModule) writeOutput(ctx context.Context, logger inte
 		Loot:  lootFiles,
 	}
 
+	// Build scope names with project names
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, projectID := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(projectID)
+	}
+
 	// Write output
 	err := internal.HandleOutputSmart(
 		"gcp",
@@ -1804,7 +1812,7 @@ func (m *ComplianceDashboardModule) writeOutput(ctx context.Context, logger inte
 		m.WrapTable,
 		"project",
 		m.ProjectIDs,
-		m.ProjectIDs,
+		scopeNames,
 		m.Account,
 		output,
 	)

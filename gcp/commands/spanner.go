@@ -103,7 +103,7 @@ func (m *SpannerModule) addToLoot(instance spannerservice.SpannerInstanceInfo) {
 }
 
 func (m *SpannerModule) writeOutput(ctx context.Context, logger internal.Logger) {
-	header := []string{"Name", "Display Name", "Config", "Nodes", "Databases", "State", "Project"}
+	header := []string{"Name", "Display Name", "Config", "Nodes", "Databases", "State", "Project Name", "Project"}
 
 	var body [][]string
 	for _, instance := range m.Instances {
@@ -114,6 +114,7 @@ func (m *SpannerModule) writeOutput(ctx context.Context, logger internal.Logger)
 			fmt.Sprintf("%d", instance.NodeCount),
 			strings.Join(instance.Databases, ", "),
 			instance.State,
+			m.GetProjectName(instance.ProjectID),
 			instance.ProjectID,
 		})
 	}
@@ -130,6 +131,11 @@ func (m *SpannerModule) writeOutput(ctx context.Context, logger internal.Logger)
 		Loot:  lootFiles,
 	}
 
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
+
 	internal.HandleOutputSmart("gcp", m.Format, m.OutputDirectory, m.Verbosity, m.WrapTable,
-		"project", m.ProjectIDs, m.ProjectIDs, m.Account, output)
+		"project", m.ProjectIDs, scopeNames, m.Account, output)
 }

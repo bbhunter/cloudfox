@@ -829,7 +829,8 @@ func (m *CostSecurityModule) writeOutput(ctx context.Context, logger internal.Lo
 	// Cryptomining Indicators table
 	cryptoHeader := []string{
 		"Resource",
-		"Project",
+		"Project Name",
+		"Project ID",
 		"Location",
 		"Indicator",
 		"Confidence",
@@ -840,6 +841,7 @@ func (m *CostSecurityModule) writeOutput(ctx context.Context, logger internal.Lo
 	for _, c := range m.Cryptomining {
 		cryptoBody = append(cryptoBody, []string{
 			c.Name,
+			m.GetProjectName(c.ProjectID),
 			c.ProjectID,
 			c.Location,
 			c.Indicator,
@@ -851,7 +853,8 @@ func (m *CostSecurityModule) writeOutput(ctx context.Context, logger internal.Lo
 	// Orphaned Resources table
 	orphanedHeader := []string{
 		"Resource",
-		"Project",
+		"Project Name",
+		"Project ID",
 		"Type",
 		"Location",
 		"Size (GB)",
@@ -863,6 +866,7 @@ func (m *CostSecurityModule) writeOutput(ctx context.Context, logger internal.Lo
 	for _, o := range m.Orphaned {
 		orphanedBody = append(orphanedBody, []string{
 			o.Name,
+			m.GetProjectName(o.ProjectID),
 			o.ProjectID,
 			o.ResourceType,
 			o.Location,
@@ -875,7 +879,8 @@ func (m *CostSecurityModule) writeOutput(ctx context.Context, logger internal.Lo
 	// Cost Anomalies table
 	anomaliesHeader := []string{
 		"Resource",
-		"Project",
+		"Project Name",
+		"Project ID",
 		"Type",
 		"Anomaly",
 		"Severity",
@@ -886,6 +891,7 @@ func (m *CostSecurityModule) writeOutput(ctx context.Context, logger internal.Lo
 	for _, a := range m.CostAnomalies {
 		anomaliesBody = append(anomaliesBody, []string{
 			a.Name,
+			m.GetProjectName(a.ProjectID),
 			a.ProjectID,
 			a.ResourceType,
 			a.AnomalyType,
@@ -905,7 +911,8 @@ func (m *CostSecurityModule) writeOutput(ctx context.Context, logger internal.Lo
 	// Expensive Resources table
 	expensiveHeader := []string{
 		"Resource",
-		"Project",
+		"Project Name",
+		"Project ID",
 		"Machine Type",
 		"vCPUs",
 		"Memory GB",
@@ -917,6 +924,7 @@ func (m *CostSecurityModule) writeOutput(ctx context.Context, logger internal.Lo
 	for _, e := range m.Expensive {
 		expensiveBody = append(expensiveBody, []string{
 			e.Name,
+			m.GetProjectName(e.ProjectID),
 			e.ProjectID,
 			e.MachineType,
 			fmt.Sprintf("%d", e.VCPUs),
@@ -974,6 +982,12 @@ func (m *CostSecurityModule) writeOutput(ctx context.Context, logger internal.Lo
 		Loot:  lootFiles,
 	}
 
+	// Build scope names with project names
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, projectID := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(projectID)
+	}
+
 	// Write output
 	err := internal.HandleOutputSmart(
 		"gcp",
@@ -983,7 +997,7 @@ func (m *CostSecurityModule) writeOutput(ctx context.Context, logger internal.Lo
 		m.WrapTable,
 		"project",
 		m.ProjectIDs,
-		m.ProjectIDs,
+		scopeNames,
 		m.Account,
 		output,
 	)

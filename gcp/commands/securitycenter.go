@@ -542,7 +542,8 @@ func (m *SecurityCenterModule) writeOutput(ctx context.Context, logger internal.
 		"Severity",
 		"Category",
 		"Resource",
-		"Project",
+		"Project Name",
+		"Project ID",
 		"Risk Score",
 		"Created",
 	}
@@ -553,6 +554,7 @@ func (m *SecurityCenterModule) writeOutput(ctx context.Context, logger internal.
 			f.Severity,
 			f.Category,
 			sccTruncateString(f.ResourceName, 60),
+			m.GetProjectName(f.ProjectID),
 			f.ProjectID,
 			fmt.Sprintf("%d", f.RiskScore),
 			f.CreateTime,
@@ -563,7 +565,8 @@ func (m *SecurityCenterModule) writeOutput(ctx context.Context, logger internal.
 	criticalHeader := []string{
 		"Category",
 		"Resource",
-		"Project",
+		"Project Name",
+		"Project ID",
 		"Description",
 		"Recommendation",
 	}
@@ -574,6 +577,7 @@ func (m *SecurityCenterModule) writeOutput(ctx context.Context, logger internal.
 			criticalBody = append(criticalBody, []string{
 				f.Category,
 				sccTruncateString(f.ResourceName, 50),
+				m.GetProjectName(f.ProjectID),
 				f.ProjectID,
 				sccTruncateString(f.Description, 60),
 				sccTruncateString(f.Recommendation, 50),
@@ -585,7 +589,8 @@ func (m *SecurityCenterModule) writeOutput(ctx context.Context, logger internal.
 	assetsHeader := []string{
 		"Resource",
 		"Type",
-		"Project",
+		"Project Name",
+		"Project ID",
 		"Finding Count",
 		"Max Severity",
 	}
@@ -595,15 +600,16 @@ func (m *SecurityCenterModule) writeOutput(ctx context.Context, logger internal.
 		assetsBody = append(assetsBody, []string{
 			sccTruncateString(asset.ResourceName, 60),
 			asset.ResourceType,
+			m.GetProjectName(asset.ProjectID),
 			asset.ProjectID,
 			fmt.Sprintf("%d", asset.FindingCount),
 			asset.Severity,
 		})
 	}
 
-	// Sort assets by finding count
+	// Sort assets by finding count (index 4 now, not 3, since we added Project Name column)
 	sort.Slice(assetsBody, func(i, j int) bool {
-		return assetsBody[i][3] > assetsBody[j][3]
+		return assetsBody[i][4] > assetsBody[j][4]
 	})
 
 	// Summary by category
@@ -680,6 +686,12 @@ func (m *SecurityCenterModule) writeOutput(ctx context.Context, logger internal.
 		Loot:  lootFiles,
 	}
 
+	// Build scopeNames using GetProjectName
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, projectID := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(projectID)
+	}
+
 	// Write output
 	err := internal.HandleOutputSmart(
 		"gcp",
@@ -689,7 +701,7 @@ func (m *SecurityCenterModule) writeOutput(ctx context.Context, logger internal.
 		m.WrapTable,
 		"project",
 		m.ProjectIDs,
-		m.ProjectIDs,
+		scopeNames,
 		m.Account,
 		output,
 	)

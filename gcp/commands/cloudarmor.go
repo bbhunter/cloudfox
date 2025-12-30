@@ -294,7 +294,7 @@ func (m *CloudArmorModule) writeOutput(ctx context.Context, logger internal.Logg
 
 	// Security policies table
 	if len(m.Policies) > 0 {
-		header := []string{"Risk", "Policy", "Type", "Rules", "Adaptive", "Resources", "Weaknesses", "Project"}
+		header := []string{"Risk", "Policy", "Type", "Rules", "Adaptive", "Resources", "Weaknesses", "Project Name", "Project"}
 		var body [][]string
 
 		for _, policy := range m.Policies {
@@ -321,6 +321,7 @@ func (m *CloudArmorModule) writeOutput(ctx context.Context, logger internal.Logg
 				adaptive,
 				resources,
 				weaknessCount,
+				m.GetProjectName(policy.ProjectID),
 				policy.ProjectID,
 			})
 		}
@@ -347,13 +348,14 @@ func (m *CloudArmorModule) writeOutput(ctx context.Context, logger internal.Logg
 	}
 
 	if len(unprotectedList) > 0 {
-		header := []string{"Risk", "Load Balancer", "Project", "Issue"}
+		header := []string{"Risk", "Load Balancer", "Project Name", "Project", "Issue"}
 		var body [][]string
 
 		for _, item := range unprotectedList {
 			body = append(body, []string{
 				"MEDIUM",
 				item.LBName,
+				m.GetProjectName(item.ProjectID),
 				item.ProjectID,
 				"No Cloud Armor policy attached",
 			})
@@ -379,6 +381,11 @@ func (m *CloudArmorModule) writeOutput(ctx context.Context, logger internal.Logg
 		Loot:  lootFiles,
 	}
 
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, projectID := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(projectID)
+	}
+
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
@@ -387,7 +394,7 @@ func (m *CloudArmorModule) writeOutput(ctx context.Context, logger internal.Logg
 		m.WrapTable,
 		"project",
 		m.ProjectIDs,
-		m.ProjectIDs,
+		scopeNames,
 		m.Account,
 		output,
 	)

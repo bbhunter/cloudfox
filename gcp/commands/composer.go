@@ -137,7 +137,7 @@ func (m *ComposerModule) addToLoot(env composerservice.EnvironmentInfo) {
 func (m *ComposerModule) writeOutput(ctx context.Context, logger internal.Logger) {
 	header := []string{
 		"Name", "State", "Location", "Service Account",
-		"Private", "Airflow URI", "Risk", "Project",
+		"Private", "Airflow URI", "Risk", "Project Name", "Project",
 	}
 
 	var body [][]string
@@ -167,6 +167,7 @@ func (m *ComposerModule) writeOutput(ctx context.Context, logger internal.Logger
 			private,
 			airflowURI,
 			env.RiskLevel,
+			m.GetProjectName(env.ProjectID),
 			env.ProjectID,
 		})
 	}
@@ -188,6 +189,7 @@ func (m *ComposerModule) writeOutput(ctx context.Context, logger internal.Logger
 				env.Name,
 				env.RiskLevel,
 				strings.Join(env.RiskReasons, "; "),
+				m.GetProjectName(env.ProjectID),
 				env.ProjectID,
 			})
 		}
@@ -196,15 +198,20 @@ func (m *ComposerModule) writeOutput(ctx context.Context, logger internal.Logger
 	if len(highRiskBody) > 0 {
 		tables = append(tables, internal.TableFile{
 			Name:   "composer-risks",
-			Header: []string{"Environment", "Risk Level", "Reasons", "Project"},
+			Header: []string{"Environment", "Risk Level", "Reasons", "Project Name", "Project"},
 			Body:   highRiskBody,
 		})
 	}
 
 	output := ComposerOutput{Table: tables, Loot: lootFiles}
 
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
+
 	err := internal.HandleOutputSmart("gcp", m.Format, m.OutputDirectory, m.Verbosity, m.WrapTable,
-		"project", m.ProjectIDs, m.ProjectIDs, m.Account, output)
+		"project", m.ProjectIDs, scopeNames, m.Account, output)
 	if err != nil {
 		logger.ErrorM(fmt.Sprintf("Error writing output: %v", err), globals.GCP_COMPOSER_MODULE_NAME)
 	}

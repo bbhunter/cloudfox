@@ -440,6 +440,7 @@ func getSecretMemberType(member string) string {
 func (m *SecretsModule) writeOutput(ctx context.Context, logger internal.Logger) {
 	// Main table with security-relevant columns
 	header := []string{
+		"Project Name",
 		"Project ID",
 		"Name",
 		"Encryption",
@@ -471,6 +472,7 @@ func (m *SecretsModule) writeOutput(ctx context.Context, logger internal.Logger)
 		}
 
 		body = append(body, []string{
+			m.GetProjectName(secret.ProjectID),
 			secret.ProjectID,
 			secretName,
 			secret.EncryptionType,
@@ -485,6 +487,7 @@ func (m *SecretsModule) writeOutput(ctx context.Context, logger internal.Logger)
 	// Detailed IAM table - one row per member
 	iamHeader := []string{
 		"Secret",
+		"Project Name",
 		"Project ID",
 		"Role",
 		"Member Type",
@@ -499,6 +502,7 @@ func (m *SecretsModule) writeOutput(ctx context.Context, logger internal.Logger)
 				memberType := getSecretMemberType(member)
 				iamBody = append(iamBody, []string{
 					secretName,
+					m.GetProjectName(secret.ProjectID),
 					secret.ProjectID,
 					binding.Role,
 					memberType,
@@ -511,6 +515,7 @@ func (m *SecretsModule) writeOutput(ctx context.Context, logger internal.Logger)
 	// Security configuration table
 	securityHeader := []string{
 		"Secret",
+		"Project Name",
 		"Project ID",
 		"Rotation",
 		"Next Rotation",
@@ -547,6 +552,7 @@ func (m *SecretsModule) writeOutput(ctx context.Context, logger internal.Logger)
 		}
 		securityBody = append(securityBody, []string{
 			secretName,
+			m.GetProjectName(secret.ProjectID),
 			secret.ProjectID,
 			secret.Rotation,
 			nextRotation,
@@ -596,15 +602,19 @@ func (m *SecretsModule) writeOutput(ctx context.Context, logger internal.Logger)
 	}
 
 	// Write output using HandleOutputSmart with scope support
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
 		m.OutputDirectory,
 		m.Verbosity,
 		m.WrapTable,
-		"project",           // scopeType
-		m.ProjectIDs,        // scopeIdentifiers
-		m.ProjectIDs,        // scopeNames (same as IDs for GCP projects)
+		"project",    // scopeType
+		m.ProjectIDs, // scopeIdentifiers
+		scopeNames,   // scopeNames
 		m.Account,
 		output,
 	)

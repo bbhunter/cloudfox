@@ -370,6 +370,7 @@ func (m *LoggingModule) addSinkToLoot(sink LoggingService.SinkInfo) {
 func (m *LoggingModule) writeOutput(ctx context.Context, logger internal.Logger) {
 	// Sinks table
 	sinksHeader := []string{
+		"Project Name",
 		"Project ID",
 		"Sink Name",
 		"Destination Type",
@@ -403,6 +404,7 @@ func (m *LoggingModule) writeOutput(ctx context.Context, logger internal.Logger)
 		}
 
 		sinksBody = append(sinksBody, []string{
+			m.GetProjectName(sink.ProjectID),
 			sink.ProjectID,
 			sink.Name,
 			sink.DestinationType,
@@ -415,6 +417,7 @@ func (m *LoggingModule) writeOutput(ctx context.Context, logger internal.Logger)
 
 	// Metrics table
 	metricsHeader := []string{
+		"Project Name",
 		"Project ID",
 		"Metric Name",
 		"Description",
@@ -440,6 +443,7 @@ func (m *LoggingModule) writeOutput(ctx context.Context, logger internal.Logger)
 		}
 
 		metricsBody = append(metricsBody, []string{
+			m.GetProjectName(metric.ProjectID),
 			metric.ProjectID,
 			metric.Name,
 			description,
@@ -480,6 +484,11 @@ func (m *LoggingModule) writeOutput(ctx context.Context, logger internal.Logger)
 		Loot:  lootFiles,
 	}
 
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
+
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
@@ -488,7 +497,7 @@ func (m *LoggingModule) writeOutput(ctx context.Context, logger internal.Logger)
 		m.WrapTable,
 		"project",
 		m.ProjectIDs,
-		m.ProjectIDs,
+		scopeNames,
 		m.Account,
 		output,
 	)

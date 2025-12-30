@@ -280,6 +280,7 @@ func (m *APIKeysModule) writeOutput(ctx context.Context, logger internal.Logger)
 	keysHeader := []string{
 		"Key ID",
 		"Display Name",
+		"Project Name",
 		"Project",
 		"Restriction Type",
 		"API Targets",
@@ -319,6 +320,7 @@ func (m *APIKeysModule) writeOutput(ctx context.Context, logger internal.Logger)
 		keysBody = append(keysBody, []string{
 			keyID,
 			key.DisplayName,
+			m.GetProjectName(key.ProjectID),
 			key.ProjectID,
 			restrictionType,
 			apiTargets,
@@ -332,6 +334,7 @@ func (m *APIKeysModule) writeOutput(ctx context.Context, logger internal.Logger)
 	unrestrictedHeader := []string{
 		"Key ID",
 		"Display Name",
+		"Project Name",
 		"Project",
 		"Created",
 		"Has Key String",
@@ -353,6 +356,7 @@ func (m *APIKeysModule) writeOutput(ctx context.Context, logger internal.Logger)
 			unrestrictedBody = append(unrestrictedBody, []string{
 				keyID,
 				key.DisplayName,
+				m.GetProjectName(key.ProjectID),
 				key.ProjectID,
 				created,
 				hasKeyString,
@@ -363,6 +367,7 @@ func (m *APIKeysModule) writeOutput(ctx context.Context, logger internal.Logger)
 	// Restrictions detail table
 	restrictionsHeader := []string{
 		"Key ID",
+		"Project Name",
 		"Project",
 		"Type",
 		"Allowed Values",
@@ -377,6 +382,7 @@ func (m *APIKeysModule) writeOutput(ctx context.Context, logger internal.Logger)
 			if len(key.AllowedAPIs) > 0 {
 				restrictionsBody = append(restrictionsBody, []string{
 					keyID,
+					m.GetProjectName(key.ProjectID),
 					key.ProjectID,
 					"API",
 					strings.Join(key.AllowedAPIs, ", "),
@@ -387,6 +393,7 @@ func (m *APIKeysModule) writeOutput(ctx context.Context, logger internal.Logger)
 			if len(key.AllowedReferers) > 0 {
 				restrictionsBody = append(restrictionsBody, []string{
 					keyID,
+					m.GetProjectName(key.ProjectID),
 					key.ProjectID,
 					"Referer",
 					strings.Join(key.AllowedReferers, ", "),
@@ -397,6 +404,7 @@ func (m *APIKeysModule) writeOutput(ctx context.Context, logger internal.Logger)
 			if len(key.AllowedIPs) > 0 {
 				restrictionsBody = append(restrictionsBody, []string{
 					keyID,
+					m.GetProjectName(key.ProjectID),
 					key.ProjectID,
 					"IP",
 					strings.Join(key.AllowedIPs, ", "),
@@ -407,6 +415,7 @@ func (m *APIKeysModule) writeOutput(ctx context.Context, logger internal.Logger)
 			if len(key.AllowedAndroidApps) > 0 {
 				restrictionsBody = append(restrictionsBody, []string{
 					keyID,
+					m.GetProjectName(key.ProjectID),
 					key.ProjectID,
 					"Android",
 					strings.Join(key.AllowedAndroidApps, ", "),
@@ -417,6 +426,7 @@ func (m *APIKeysModule) writeOutput(ctx context.Context, logger internal.Logger)
 			if len(key.AllowedIOSApps) > 0 {
 				restrictionsBody = append(restrictionsBody, []string{
 					keyID,
+					m.GetProjectName(key.ProjectID),
 					key.ProjectID,
 					"iOS",
 					strings.Join(key.AllowedIOSApps, ", "),
@@ -428,6 +438,7 @@ func (m *APIKeysModule) writeOutput(ctx context.Context, logger internal.Logger)
 	// High-risk keys table
 	highRiskHeader := []string{
 		"Key ID",
+		"Project Name",
 		"Project",
 		"Risk Level",
 		"Risk Reasons",
@@ -439,6 +450,7 @@ func (m *APIKeysModule) writeOutput(ctx context.Context, logger internal.Logger)
 			keyID := extractKeyID(key.Name)
 			highRiskBody = append(highRiskBody, []string{
 				keyID,
+				m.GetProjectName(key.ProjectID),
 				key.ProjectID,
 				key.RiskLevel,
 				strings.Join(key.RiskReasons, "; "),
@@ -498,6 +510,10 @@ func (m *APIKeysModule) writeOutput(ctx context.Context, logger internal.Logger)
 	}
 
 	// Write output using HandleOutputSmart with scope support
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
@@ -506,7 +522,7 @@ func (m *APIKeysModule) writeOutput(ctx context.Context, logger internal.Logger)
 		m.WrapTable,
 		"project",           // scopeType
 		m.ProjectIDs,        // scopeIdentifiers
-		m.ProjectIDs,        // scopeNames (same as IDs for GCP projects)
+		scopeNames,          // scopeNames
 		m.Account,
 		output,
 	)

@@ -141,7 +141,7 @@ func (m *DataprocModule) writeOutput(ctx context.Context, logger internal.Logger
 	var tables []internal.TableFile
 
 	// Clusters table
-	header := []string{"Name", "Region", "State", "Master", "Workers", "Service Account", "Public IPs", "Kerberos", "Risk", "Project"}
+	header := []string{"Name", "Region", "State", "Master", "Workers", "Service Account", "Public IPs", "Kerberos", "Risk", "Project Name", "Project"}
 	var body [][]string
 	for _, cluster := range m.Clusters {
 		publicIPs := "No"
@@ -171,6 +171,7 @@ func (m *DataprocModule) writeOutput(ctx context.Context, logger internal.Logger
 			publicIPs,
 			kerberos,
 			cluster.RiskLevel,
+			m.GetProjectName(cluster.ProjectID),
 			cluster.ProjectID,
 		})
 	}
@@ -188,6 +189,7 @@ func (m *DataprocModule) writeOutput(ctx context.Context, logger internal.Logger
 				cluster.Name,
 				cluster.RiskLevel,
 				strings.Join(cluster.RiskReasons, "; "),
+				m.GetProjectName(cluster.ProjectID),
 				cluster.ProjectID,
 			})
 		}
@@ -196,7 +198,7 @@ func (m *DataprocModule) writeOutput(ctx context.Context, logger internal.Logger
 	if len(highRiskBody) > 0 {
 		tables = append(tables, internal.TableFile{
 			Name:   "dataproc-risks",
-			Header: []string{"Cluster", "Risk Level", "Reasons", "Project"},
+			Header: []string{"Cluster", "Risk Level", "Reasons", "Project Name", "Project"},
 			Body:   highRiskBody,
 		})
 	}
@@ -210,8 +212,13 @@ func (m *DataprocModule) writeOutput(ctx context.Context, logger internal.Logger
 
 	output := DataprocOutput{Table: tables, Loot: lootFiles}
 
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
+
 	err := internal.HandleOutputSmart("gcp", m.Format, m.OutputDirectory, m.Verbosity, m.WrapTable,
-		"project", m.ProjectIDs, m.ProjectIDs, m.Account, output)
+		"project", m.ProjectIDs, scopeNames, m.Account, output)
 	if err != nil {
 		logger.ErrorM(fmt.Sprintf("Error writing output: %v", err), globals.GCP_DATAPROC_MODULE_NAME)
 	}

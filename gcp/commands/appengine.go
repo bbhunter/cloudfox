@@ -596,7 +596,8 @@ func (m *AppEngineModule) writeOutput(ctx context.Context, logger internal.Logge
 	// App Engine Apps table
 	appsHeader := []string{
 		"App ID",
-		"Project",
+		"Project Name",
+		"Project ID",
 		"Location",
 		"Status",
 		"Hostname",
@@ -607,6 +608,7 @@ func (m *AppEngineModule) writeOutput(ctx context.Context, logger internal.Logge
 	for _, app := range m.Apps {
 		appsBody = append(appsBody, []string{
 			app.ID,
+			m.GetProjectName(app.ProjectID),
 			app.ProjectID,
 			app.LocationID,
 			app.ServingStatus,
@@ -618,7 +620,8 @@ func (m *AppEngineModule) writeOutput(ctx context.Context, logger internal.Logge
 	// App Engine Services table
 	servicesHeader := []string{
 		"Service",
-		"Project",
+		"Project Name",
+		"Project ID",
 		"Versions",
 	}
 
@@ -633,6 +636,7 @@ func (m *AppEngineModule) writeOutput(ctx context.Context, logger internal.Logge
 
 		servicesBody = append(servicesBody, []string{
 			svc.ID,
+			m.GetProjectName(svc.ProjectID),
 			svc.ProjectID,
 			fmt.Sprintf("%d", versionsCount),
 		})
@@ -702,7 +706,8 @@ func (m *AppEngineModule) writeOutput(ctx context.Context, logger internal.Logge
 		"Priority",
 		"Action",
 		"Source Range",
-		"Project",
+		"Project Name",
+		"Project ID",
 		"Description",
 	}
 
@@ -712,6 +717,7 @@ func (m *AppEngineModule) writeOutput(ctx context.Context, logger internal.Logge
 			fmt.Sprintf("%d", rule.Priority),
 			rule.Action,
 			rule.SourceRange,
+			m.GetProjectName(rule.ProjectID),
 			rule.ProjectID,
 			truncateString(rule.Description, 30),
 		})
@@ -773,6 +779,12 @@ func (m *AppEngineModule) writeOutput(ctx context.Context, logger internal.Logge
 		Loot:  lootFiles,
 	}
 
+	// Build scope names using project names
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, projectID := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(projectID)
+	}
+
 	// Write output
 	err := internal.HandleOutputSmart(
 		"gcp",
@@ -781,7 +793,7 @@ func (m *AppEngineModule) writeOutput(ctx context.Context, logger internal.Logge
 		m.Verbosity,
 		m.WrapTable,
 		"project",
-		m.ProjectIDs,
+		scopeNames,
 		m.ProjectIDs,
 		m.Account,
 		output,

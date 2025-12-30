@@ -409,7 +409,9 @@ func (m *CrossProjectModule) writeOutput(ctx context.Context, logger internal.Lo
 	// Cross-project bindings table
 	bindingsHeader := []string{
 		"Risk",
+		"Source Project Name",
 		"Source Project",
+		"Target Project Name",
 		"Target Project",
 		"Principal",
 		"Type",
@@ -432,7 +434,9 @@ func (m *CrossProjectModule) writeOutput(ctx context.Context, logger internal.Lo
 
 		bindingsBody = append(bindingsBody, []string{
 			binding.RiskLevel,
+			m.GetProjectName(binding.SourceProject),
 			binding.SourceProject,
+			m.GetProjectName(binding.TargetProject),
 			binding.TargetProject,
 			principal,
 			binding.PrincipalType,
@@ -444,6 +448,7 @@ func (m *CrossProjectModule) writeOutput(ctx context.Context, logger internal.Lo
 	// Cross-project service accounts table
 	sasHeader := []string{
 		"Service Account",
+		"Home Project Name",
 		"Home Project",
 		"# Target Projects",
 		"Target Access",
@@ -467,6 +472,7 @@ func (m *CrossProjectModule) writeOutput(ctx context.Context, logger internal.Lo
 
 		sasBody = append(sasBody, []string{
 			sa.Email,
+			m.GetProjectName(sa.ProjectID),
 			sa.ProjectID,
 			fmt.Sprintf("%d", len(projectSet)),
 			accessSummary,
@@ -476,7 +482,9 @@ func (m *CrossProjectModule) writeOutput(ctx context.Context, logger internal.Lo
 	// Lateral movement paths table
 	pathsHeader := []string{
 		"Privilege",
+		"Source Project Name",
 		"Source Project",
+		"Target Project Name",
 		"Target Project",
 		"Principal",
 		"Method",
@@ -498,7 +506,9 @@ func (m *CrossProjectModule) writeOutput(ctx context.Context, logger internal.Lo
 
 		pathsBody = append(pathsBody, []string{
 			path.PrivilegeLevel,
+			m.GetProjectName(path.SourceProject),
 			path.SourceProject,
+			m.GetProjectName(path.TargetProject),
 			path.TargetProject,
 			principal,
 			path.AccessMethod,
@@ -546,6 +556,11 @@ func (m *CrossProjectModule) writeOutput(ctx context.Context, logger internal.Lo
 		Loot:  lootFiles,
 	}
 
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
+
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
@@ -554,7 +569,7 @@ func (m *CrossProjectModule) writeOutput(ctx context.Context, logger internal.Lo
 		m.WrapTable,
 		"project",
 		m.ProjectIDs,
-		m.ProjectIDs,
+		scopeNames,
 		m.Account,
 		output,
 	)

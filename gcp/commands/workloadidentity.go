@@ -625,6 +625,7 @@ func (m *WorkloadIdentityModule) writeOutput(ctx context.Context, logger interna
 	clustersHeader := []string{
 		"Cluster",
 		"Location",
+		"Project Name",
 		"Project",
 		"WI Enabled",
 		"Workload Pool",
@@ -645,6 +646,7 @@ func (m *WorkloadIdentityModule) writeOutput(ctx context.Context, logger interna
 		clustersBody = append(clustersBody, []string{
 			cwi.ClusterName,
 			cwi.Location,
+			m.GetProjectName(cwi.ProjectID),
 			cwi.ProjectID,
 			wiEnabled,
 			workloadPool,
@@ -659,6 +661,7 @@ func (m *WorkloadIdentityModule) writeOutput(ctx context.Context, logger interna
 		"GCP Service Account",
 		"High Privilege",
 		"Cluster",
+		"Project Name",
 		"Project",
 	}
 
@@ -675,6 +678,7 @@ func (m *WorkloadIdentityModule) writeOutput(ctx context.Context, logger interna
 			binding.GCPServiceAccount,
 			highPriv,
 			binding.ClusterName,
+			m.GetProjectName(binding.ProjectID),
 			binding.ProjectID,
 		})
 	}
@@ -743,6 +747,7 @@ func (m *WorkloadIdentityModule) writeOutput(ctx context.Context, logger interna
 	if len(m.Pools) > 0 {
 		poolsHeader := []string{
 			"Pool ID",
+			"Project Name",
 			"Project",
 			"Display Name",
 			"State",
@@ -757,6 +762,7 @@ func (m *WorkloadIdentityModule) writeOutput(ctx context.Context, logger interna
 			}
 			poolsBody = append(poolsBody, []string{
 				pool.PoolID,
+				m.GetProjectName(pool.ProjectID),
 				pool.ProjectID,
 				pool.DisplayName,
 				pool.State,
@@ -780,6 +786,7 @@ func (m *WorkloadIdentityModule) writeOutput(ctx context.Context, logger interna
 			"Type",
 			"Issuer/Account",
 			"Attribute Condition",
+			"Project Name",
 			"Project",
 		}
 
@@ -809,6 +816,7 @@ func (m *WorkloadIdentityModule) writeOutput(ctx context.Context, logger interna
 				p.ProviderType,
 				issuerOrAccount,
 				attrCond,
+				m.GetProjectName(p.ProjectID),
 				p.ProjectID,
 			})
 		}
@@ -827,6 +835,7 @@ func (m *WorkloadIdentityModule) writeOutput(ctx context.Context, logger interna
 			"Pool",
 			"GCP Service Account",
 			"External Subject",
+			"Project Name",
 			"Project",
 		}
 
@@ -842,6 +851,7 @@ func (m *WorkloadIdentityModule) writeOutput(ctx context.Context, logger interna
 				fb.PoolID,
 				fb.GCPServiceAccount,
 				externalSubject,
+				m.GetProjectName(fb.ProjectID),
 				fb.ProjectID,
 			})
 		}
@@ -859,6 +869,10 @@ func (m *WorkloadIdentityModule) writeOutput(ctx context.Context, logger interna
 	}
 
 	// Write output using HandleOutputSmart with scope support
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
@@ -867,7 +881,7 @@ func (m *WorkloadIdentityModule) writeOutput(ctx context.Context, logger interna
 		m.WrapTable,
 		"project",           // scopeType
 		m.ProjectIDs,        // scopeIdentifiers
-		m.ProjectIDs,        // scopeNames (same as IDs for GCP projects)
+		scopeNames,          // scopeNames
 		m.Account,
 		output,
 	)

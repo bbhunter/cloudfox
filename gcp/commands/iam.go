@@ -426,6 +426,7 @@ func (m *IAMModule) writeOutput(ctx context.Context, logger internal.Logger) {
 		"Inherited",
 		"Condition",
 		"Source",
+		"Project Name",
 		"Project",
 	}
 
@@ -476,6 +477,7 @@ func (m *IAMModule) writeOutput(ctx context.Context, logger internal.Logger) {
 				inherited,
 				condition,
 				source,
+				m.GetProjectName(binding.ResourceID),
 				binding.ResourceID,
 			})
 		}
@@ -488,6 +490,7 @@ func (m *IAMModule) writeOutput(ctx context.Context, logger internal.Logger) {
 		"Disabled",
 		"Has Keys",
 		"Key Count",
+		"Project Name",
 		"Project",
 	}
 
@@ -510,6 +513,7 @@ func (m *IAMModule) writeOutput(ctx context.Context, logger internal.Logger) {
 			disabled,
 			hasKeys,
 			fmt.Sprintf("%d", sa.KeyCount),
+			m.GetProjectName(sa.ProjectID),
 			sa.ProjectID,
 		})
 	}
@@ -521,6 +525,7 @@ func (m *IAMModule) writeOutput(ctx context.Context, logger internal.Logger) {
 		"Stage",
 		"Permissions",
 		"Deleted",
+		"Project Name",
 		"Project",
 	}
 
@@ -537,6 +542,7 @@ func (m *IAMModule) writeOutput(ctx context.Context, logger internal.Logger) {
 			role.Stage,
 			fmt.Sprintf("%d", role.PermissionCount),
 			deleted,
+			m.GetProjectName(role.ProjectID),
 			role.ProjectID,
 		})
 	}
@@ -546,6 +552,7 @@ func (m *IAMModule) writeOutput(ctx context.Context, logger internal.Logger) {
 		"Group Email",
 		"Role Count",
 		"High Privilege",
+		"Project Name",
 		"Project",
 	}
 
@@ -563,6 +570,7 @@ func (m *IAMModule) writeOutput(ctx context.Context, logger internal.Logger) {
 			group.Email,
 			fmt.Sprintf("%d", len(group.Roles)),
 			hasHighPriv,
+			m.GetProjectName(group.ProjectID),
 			group.ProjectID,
 		})
 	}
@@ -573,6 +581,7 @@ func (m *IAMModule) writeOutput(ctx context.Context, logger internal.Logger) {
 		"Type",
 		"High Priv Roles",
 		"Custom Roles",
+		"Project Name",
 		"Project",
 	}
 
@@ -596,6 +605,7 @@ func (m *IAMModule) writeOutput(ctx context.Context, logger internal.Logger) {
 				principal.Type,
 				strings.Join(highPrivRoles, ", "),
 				customRolesStr,
+				m.GetProjectName(principal.ResourceID),
 				principal.ResourceID,
 			})
 		}
@@ -662,6 +672,7 @@ func (m *IAMModule) writeOutput(ctx context.Context, logger internal.Logger) {
 		"Role",
 		"Condition Title",
 		"Condition Expression",
+		"Project Name",
 		"Project",
 	}
 
@@ -675,6 +686,7 @@ func (m *IAMModule) writeOutput(ctx context.Context, logger internal.Logger) {
 					binding.Role,
 					binding.ConditionInfo.Title,
 					truncateString(binding.ConditionInfo.Expression, 80),
+					m.GetProjectName(binding.ResourceID),
 					binding.ResourceID,
 				})
 			}
@@ -707,15 +719,19 @@ func (m *IAMModule) writeOutput(ctx context.Context, logger internal.Logger) {
 	}
 
 	// Write output using HandleOutputSmart with scope support
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
 		m.OutputDirectory,
 		m.Verbosity,
 		m.WrapTable,
-		"project",           // scopeType
-		m.ProjectIDs,        // scopeIdentifiers
-		m.ProjectIDs,        // scopeNames (same as IDs for GCP projects)
+		"project",    // scopeType
+		m.ProjectIDs, // scopeIdentifiers
+		scopeNames,   // scopeNames
 		m.Account,
 		output,
 	)
