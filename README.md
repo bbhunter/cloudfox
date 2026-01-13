@@ -52,9 +52,9 @@ For the full documentation please refer to our [wiki](https://github.com/BishopF
 
 | Provider| CloudFox Commands |
 | - | - |
-| AWS | 34 | 
-| Azure | 4 | 
-| GCP | 8 |
+| AWS | 34 |
+| Azure | 4 |
+| GCP | 57 |
 | Kubernetes | Support Planned | 
 
 
@@ -159,22 +159,109 @@ Additional policy notes (as of 09/2022):
 
 
 # GCP Commands
-| Provider | Command Name | Description 
+
+## Identity & Access Management
+| Provider | Command Name | Description |
 | - | - | - |
-| GCP | [whoami](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#whoami) | Display the email address of the GCP authenticated user | 
-| GCP | [all-checks](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#all-checks) | Runs all available GCP commands | 
-| GCP | [artifact-registry](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#artifact-registry) | Display GCP artifact registry information | 
-| GCP | [bigquery](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#bigquery) | Display Bigquery datasets and tables information | 
-| GCP | [buckets](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#buckets) | Display GCP buckets information | 
-| GCP | [iam](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#iam) | Display GCP IAM information | 
-| GCP | [instances](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#instances) | Display GCP Compute Engine instances information |
-| GCP | [secrets](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#secrets) | Display GCP secrets information |
+| GCP | whoami | Display identity context for the authenticated GCP user/service account |
+| GCP | iam | Enumerate GCP IAM principals across organizations, folders, and projects |
+| GCP | permissions | Enumerate ALL permissions for each IAM entity with full inheritance explosion |
+| GCP | serviceaccounts | Enumerate GCP service accounts with security analysis |
+| GCP | service-agents | Enumerate Google-managed service agents |
+| GCP | keys | Enumerate all GCP keys (SA keys, HMAC keys, API keys) |
+| GCP | resource-iam | Enumerate IAM policies on GCP resources (buckets, datasets, secrets, etc.) |
+| GCP | domain-wide-delegation | Find service accounts with Domain-Wide Delegation to Google Workspace |
+| GCP | privesc | Identify privilege escalation paths in GCP projects |
+
+## Compute & Containers
+| Provider | Command Name | Description |
+| - | - | - |
+| GCP | instances | Enumerate GCP Compute Engine instances with security configuration |
+| GCP | gke | Enumerate GKE clusters with security analysis |
+| GCP | cloudrun | Enumerate Cloud Run services and jobs with security analysis |
+| GCP | functions | Enumerate GCP Cloud Functions with security analysis |
+| GCP | app-engine | Enumerate App Engine applications and security configurations |
+| GCP | composer | Enumerate Cloud Composer environments |
+| GCP | dataproc | Enumerate Dataproc clusters |
+| GCP | dataflow | Enumerate Dataflow jobs and pipelines |
+| GCP | notebooks | Enumerate Vertex AI Workbench notebooks |
+| GCP | workload-identity | Enumerate GKE Workload Identity and Workload Identity Federation |
+
+## Storage & Databases
+| Provider | Command Name | Description |
+| - | - | - |
+| GCP | buckets | Enumerate GCP Cloud Storage buckets with security configuration |
+| GCP | bucket-enum | Enumerate GCS buckets for sensitive files (credentials, secrets, configs) |
+| GCP | bigquery | Enumerate GCP BigQuery datasets and tables with security analysis |
+| GCP | cloudsql | Enumerate Cloud SQL instances with security analysis |
+| GCP | spanner | Enumerate Cloud Spanner instances and databases |
+| GCP | bigtable | Enumerate Cloud Bigtable instances and tables |
+| GCP | filestore | Enumerate Filestore NFS instances |
+| GCP | memorystore | Enumerate Memorystore (Redis) instances |
+
+## Networking
+| Provider | Command Name | Description |
+| - | - | - |
+| GCP | vpc-networks | Enumerate VPC Networks |
+| GCP | firewall | Enumerate VPC networks and firewall rules with security analysis |
+| GCP | loadbalancers | Enumerate Load Balancers |
+| GCP | dns | Enumerate Cloud DNS zones and records with security analysis |
+| GCP | endpoints | Enumerate all network endpoints (external and internal) with IPs, ports, and hostnames |
+| GCP | private-service-connect | Enumerate Private Service Connect endpoints and service attachments |
+| GCP | network-topology | Visualize VPC network topology, peering relationships, and trust boundaries |
+
+## Security & Compliance
+| Provider | Command Name | Description |
+| - | - | - |
+| GCP | vpc-sc | Enumerate VPC Service Controls |
+| GCP | access-levels | Enumerate Access Context Manager access levels |
+| GCP | cloud-armor | Enumerate Cloud Armor security policies and find weaknesses |
+| GCP | iap | Enumerate Identity-Aware Proxy configurations |
+| GCP | beyondcorp | Enumerate BeyondCorp Enterprise configurations |
+| GCP | kms | Enumerate Cloud KMS key rings and crypto keys with security analysis |
+| GCP | secrets | Enumerate GCP Secret Manager secrets with security configuration |
+| GCP | cert-manager | Enumerate SSL/TLS certificates and find expiring or misconfigured certs |
+| GCP | org-policies | Enumerate organization policies and identify security weaknesses |
+
+## CI/CD & Source Control
+| Provider | Command Name | Description |
+| - | - | - |
+| GCP | artifact-registry | Enumerate GCP Artifact Registry and Container Registry with security configuration |
+| GCP | cloudbuild | Enumerate Cloud Build triggers and builds |
+| GCP | source-repos | Enumerate Cloud Source Repositories |
+| GCP | scheduler | Enumerate Cloud Scheduler jobs with security analysis |
+
+## Messaging & Events
+| Provider | Command Name | Description |
+| - | - | - |
+| GCP | pubsub | Enumerate Pub/Sub topics and subscriptions with security analysis |
+
+## Logging & Monitoring
+| Provider | Command Name | Description |
+| - | - | - |
+| GCP | logging | Enumerate Cloud Logging sinks and metrics with security analysis |
+| GCP | logging-gaps | Find resources with missing or incomplete logging |
+
+## Organization & Projects
+| Provider | Command Name | Description |
+| - | - | - |
+| GCP | organizations | Enumerate GCP organization hierarchy |
+| GCP | asset-inventory | Enumerate Cloud Asset Inventory with optional dependency analysis |
+| GCP | backup-inventory | Enumerate backup policies, protected resources, and identify backup gaps |
+| GCP | cross-project | Analyze cross-project access patterns for lateral movement |
+
+## Attack Path Analysis
+| Provider | Command Name | Description |
+| - | - | - |
+| GCP | lateral-movement | Map lateral movement paths, credential theft vectors, and pivot opportunities |
+| GCP | data-exfiltration | Identify data exfiltration paths and high-risk data exposure |
 
 
 
 # Authors
 * [Carlos Vendramini](https://github.com/carlosvendramini-bf)
 * [Seth Art (@sethsec](https://twitter.com/sethsec))
+* Joseph Barcia
 
 # Contributing
 [Wiki - How to Contribute](https://github.com/BishopFox/cloudfox/wiki#how-to-contribute)
