@@ -253,7 +253,7 @@ Additional policy notes (as of 09/2022):
 | Provider | Command Name | Description |
 | - | - | - |
 | GCP | lateral-movement | Map lateral movement paths, credential theft vectors, and pivot opportunities |
-| GCP | data-exfiltration | Identify data exfiltration paths with VPC-SC and Org Policy protection status |
+| GCP | data-exfiltration | Identify data exfiltration paths, potential vectors, and missing security hardening |
 | GCP | public-access | Find resources with allUsers/allAuthenticatedUsers access across 16 GCP services |
 | GCP | cross-project | Analyze cross-project IAM bindings, logging sinks, and Pub/Sub exports for lateral movement |
 

