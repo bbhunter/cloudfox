@@ -19,9 +19,10 @@ import (
 // Common GCP API Error Types
 // ------------------------------
 var (
-	ErrAPINotEnabled    = errors.New("API not enabled")
-	ErrPermissionDenied = errors.New("permission denied")
-	ErrNotFound         = errors.New("resource not found")
+	ErrAPINotEnabled      = errors.New("API not enabled")
+	ErrPermissionDenied   = errors.New("permission denied")
+	ErrNotFound           = errors.New("resource not found")
+	ErrVPCServiceControls = errors.New("blocked by VPC Service Controls")
 )
 
 // ParseGCPError converts GCP API errors into cleaner, standardized error types
@@ -79,6 +80,12 @@ func ParseGCPError(err error, apiName string) error {
 			if strings.Contains(errStr, "SERVICE_DISABLED") {
 				return fmt.Errorf("%w: %s", ErrAPINotEnabled, apiName)
 			}
+			// Check for VPC Service Controls
+			if strings.Contains(errStr, "VPC_SERVICE_CONTROLS") ||
+				strings.Contains(errStr, "SECURITY_POLICY_VIOLATED") ||
+				strings.Contains(errStr, "organization's policy") {
+				return ErrVPCServiceControls
+			}
 			// Permission denied
 			if strings.Contains(errStr, "PERMISSION_DENIED") ||
 				strings.Contains(errStr, "does not have") ||
@@ -128,21 +135,29 @@ func HandleGCPError(err error, logger internal.Logger, moduleName string, resour
 		return true // No error, continue
 	}
 
+	// Parse the raw GCP error into a standardized error type
+	parsedErr := ParseGCPError(err, "")
+
 	switch {
-	case errors.Is(err, ErrAPINotEnabled):
+	case errors.Is(parsedErr, ErrAPINotEnabled):
 		logger.ErrorM(fmt.Sprintf("%s - API not enabled", resourceDesc), moduleName)
 		return false // Can't continue without API enabled
 
-	case errors.Is(err, ErrPermissionDenied):
+	case errors.Is(parsedErr, ErrVPCServiceControls):
+		logger.ErrorM(fmt.Sprintf("%s - blocked by VPC Service Controls", resourceDesc), moduleName)
+		return true // Can continue with other resources
+
+	case errors.Is(parsedErr, ErrPermissionDenied):
 		logger.ErrorM(fmt.Sprintf("%s - permission denied", resourceDesc), moduleName)
 		return true // Can continue with other resources
 
-	case errors.Is(err, ErrNotFound):
+	case errors.Is(parsedErr, ErrNotFound):
 		// Not found is often expected, don't log as error
 		return true
 
 	default:
-		logger.ErrorM(fmt.Sprintf("%s: %v", resourceDesc, err), moduleName)
+		// For unknown errors, log a concise message without the full error details
+		logger.ErrorM(fmt.Sprintf("%s - error occurred", resourceDesc), moduleName)
 		return true // Continue with other resources
 	}
 }
