@@ -46,13 +46,9 @@ type EnvironmentInfo struct {
 	ServiceAccount    string   `json:"serviceAccount"`
 
 	// Security config
-	PrivateEnvironment bool     `json:"privateEnvironment"`
-	WebServerAllowedIPs []string `json:"webServerAllowedIps"`
-	EnablePrivateEndpoint bool  `json:"enablePrivateEndpoint"`
-
-	// Security analysis
-	RiskLevel         string   `json:"riskLevel"`
-	RiskReasons       []string `json:"riskReasons"`
+	PrivateEnvironment    bool     `json:"privateEnvironment"`
+	WebServerAllowedIPs   []string `json:"webServerAllowedIps"`
+	EnablePrivateEndpoint bool     `json:"enablePrivateEndpoint"`
 }
 
 // ListEnvironments retrieves all Composer environments in a project
@@ -92,13 +88,12 @@ func (s *ComposerService) ListEnvironments(projectID string) ([]EnvironmentInfo,
 // parseEnvironment converts a Composer environment to EnvironmentInfo
 func (s *ComposerService) parseEnvironment(env *composer.Environment, projectID string) EnvironmentInfo {
 	info := EnvironmentInfo{
-		Name:        extractName(env.Name),
-		ProjectID:   projectID,
-		Location:    extractLocation(env.Name),
-		State:       env.State,
-		CreateTime:  env.CreateTime,
-		UpdateTime:  env.UpdateTime,
-		RiskReasons: []string{},
+		Name:       extractName(env.Name),
+		ProjectID:  projectID,
+		Location:   extractLocation(env.Name),
+		State:      env.State,
+		CreateTime: env.CreateTime,
+		UpdateTime: env.UpdateTime,
 	}
 
 	if env.Config != nil {
@@ -143,57 +138,7 @@ func (s *ComposerService) parseEnvironment(env *composer.Environment, projectID 
 		}
 	}
 
-	// Security analysis
-	info.RiskLevel, info.RiskReasons = s.analyzeEnvironmentRisk(info)
-
 	return info
-}
-
-// analyzeEnvironmentRisk determines the risk level of a Composer environment
-func (s *ComposerService) analyzeEnvironmentRisk(env EnvironmentInfo) (string, []string) {
-	var reasons []string
-	score := 0
-
-	// Public Airflow UI
-	if !env.PrivateEnvironment {
-		reasons = append(reasons, "Not using private environment")
-		score += 2
-	}
-
-	// Public endpoint
-	if !env.EnablePrivateEndpoint && env.AirflowURI != "" {
-		reasons = append(reasons, "Airflow web server has public endpoint")
-		score += 2
-	}
-
-	// No IP restrictions or 0.0.0.0/0
-	if len(env.WebServerAllowedIPs) == 0 {
-		reasons = append(reasons, "No web server IP restrictions")
-		score += 1
-	} else {
-		for _, ip := range env.WebServerAllowedIPs {
-			if ip == "0.0.0.0/0" {
-				reasons = append(reasons, "Web server allows all IPs (0.0.0.0/0)")
-				score += 2
-				break
-			}
-		}
-	}
-
-	// Default service account
-	if env.ServiceAccount == "" || strings.Contains(env.ServiceAccount, "compute@developer.gserviceaccount.com") {
-		reasons = append(reasons, "Uses default Compute Engine service account")
-		score += 2
-	}
-
-	if score >= 4 {
-		return "HIGH", reasons
-	} else if score >= 2 {
-		return "MEDIUM", reasons
-	} else if score >= 1 {
-		return "LOW", reasons
-	}
-	return "INFO", reasons
 }
 
 func extractName(fullName string) string {

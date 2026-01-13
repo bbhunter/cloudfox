@@ -42,20 +42,16 @@ type ServicePerimeterInfo struct {
 	UpdateTime         string   `json:"updateTime"`
 
 	// Status configuration
-	Resources           []string `json:"resources"`           // Projects in the perimeter
-	RestrictedServices  []string `json:"restrictedServices"`  // Services protected
-	AccessLevels        []string `json:"accessLevels"`        // Access levels allowed
+	Resources             []string `json:"resources"`             // Projects in the perimeter
+	RestrictedServices    []string `json:"restrictedServices"`    // Services protected
+	AccessLevels          []string `json:"accessLevels"`          // Access levels allowed
 	VPCAccessibleServices []string `json:"vpcAccessibleServices"`
 
 	// Ingress/Egress policies
-	IngressPolicyCount  int      `json:"ingressPolicyCount"`
-	EgressPolicyCount   int      `json:"egressPolicyCount"`
-	HasIngressRules     bool     `json:"hasIngressRules"`
-	HasEgressRules      bool     `json:"hasEgressRules"`
-
-	// Security analysis
-	RiskLevel           string   `json:"riskLevel"`
-	RiskReasons         []string `json:"riskReasons"`
+	IngressPolicyCount int  `json:"ingressPolicyCount"`
+	EgressPolicyCount  int  `json:"egressPolicyCount"`
+	HasIngressRules    bool `json:"hasIngressRules"`
+	HasEgressRules     bool `json:"hasEgressRules"`
 }
 
 // AccessLevelInfo represents an access level
@@ -71,10 +67,6 @@ type AccessLevelInfo struct {
 	IPSubnetworks []string `json:"ipSubnetworks"`
 	Regions       []string `json:"regions"`
 	Members       []string `json:"members"`
-
-	// Security analysis
-	RiskLevel    string   `json:"riskLevel"`
-	RiskReasons  []string `json:"riskReasons"`
 }
 
 // ListAccessPolicies retrieves all access policies for an organization
@@ -189,7 +181,6 @@ func (s *VPCSCService) parsePerimeter(perimeter *accesscontextmanager.ServicePer
 		PolicyName:    policyName,
 		PerimeterType: perimeter.PerimeterType,
 		Description:   perimeter.Description,
-		RiskReasons:   []string{},
 	}
 
 	// Parse status configuration
@@ -213,8 +204,6 @@ func (s *VPCSCService) parsePerimeter(perimeter *accesscontextmanager.ServicePer
 		}
 	}
 
-	info.RiskLevel, info.RiskReasons = s.analyzePerimeterRisk(info)
-
 	return info
 }
 
@@ -224,7 +213,6 @@ func (s *VPCSCService) parseAccessLevel(level *accesscontextmanager.AccessLevel,
 		Title:       level.Title,
 		PolicyName:  policyName,
 		Description: level.Description,
-		RiskReasons: []string{},
 	}
 
 	if level.Basic != nil && len(level.Basic.Conditions) > 0 {
@@ -235,90 +223,7 @@ func (s *VPCSCService) parseAccessLevel(level *accesscontextmanager.AccessLevel,
 		}
 	}
 
-	info.RiskLevel, info.RiskReasons = s.analyzeAccessLevelRisk(info)
-
 	return info
-}
-
-func (s *VPCSCService) analyzePerimeterRisk(perimeter ServicePerimeterInfo) (string, []string) {
-	var reasons []string
-	score := 0
-
-	// No restricted services
-	if len(perimeter.RestrictedServices) == 0 {
-		reasons = append(reasons, "No services are restricted by perimeter")
-		score += 2
-	}
-
-	// Permissive ingress rules
-	if perimeter.HasIngressRules {
-		reasons = append(reasons, fmt.Sprintf("Has %d ingress policies (review for overly permissive rules)", perimeter.IngressPolicyCount))
-		score += 1
-	}
-
-	// Permissive egress rules
-	if perimeter.HasEgressRules {
-		reasons = append(reasons, fmt.Sprintf("Has %d egress policies (review for data exfiltration risk)", perimeter.EgressPolicyCount))
-		score += 1
-	}
-
-	// No resources protected
-	if len(perimeter.Resources) == 0 {
-		reasons = append(reasons, "No resources are protected by perimeter")
-		score += 2
-	}
-
-	// Bridge perimeter (less restrictive by design)
-	if perimeter.PerimeterType == "PERIMETER_TYPE_BRIDGE" {
-		reasons = append(reasons, "Bridge perimeter - allows cross-perimeter access")
-		score += 1
-	}
-
-	if score >= 3 {
-		return "HIGH", reasons
-	} else if score >= 2 {
-		return "MEDIUM", reasons
-	} else if score >= 1 {
-		return "LOW", reasons
-	}
-	return "INFO", reasons
-}
-
-func (s *VPCSCService) analyzeAccessLevelRisk(level AccessLevelInfo) (string, []string) {
-	var reasons []string
-	score := 0
-
-	// Check for overly broad IP ranges
-	for _, ip := range level.IPSubnetworks {
-		if ip == "0.0.0.0/0" || ip == "::/0" {
-			reasons = append(reasons, "Access level allows all IP addresses")
-			score += 3
-			break
-		}
-	}
-
-	// No IP restrictions
-	if len(level.IPSubnetworks) == 0 && len(level.Regions) == 0 && len(level.Members) == 0 {
-		reasons = append(reasons, "Access level has no restrictions defined")
-		score += 2
-	}
-
-	// allUsers or allAuthenticatedUsers
-	for _, member := range level.Members {
-		if member == "allUsers" || member == "allAuthenticatedUsers" {
-			reasons = append(reasons, fmt.Sprintf("Access level includes %s", member))
-			score += 3
-		}
-	}
-
-	if score >= 3 {
-		return "HIGH", reasons
-	} else if score >= 2 {
-		return "MEDIUM", reasons
-	} else if score >= 1 {
-		return "LOW", reasons
-	}
-	return "INFO", reasons
 }
 
 func extractPolicyName(fullName string) string {

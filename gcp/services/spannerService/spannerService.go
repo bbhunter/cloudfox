@@ -17,24 +17,52 @@ func New() *SpannerService {
 	return &SpannerService{}
 }
 
-type SpannerInstanceInfo struct {
-	Name        string   `json:"name"`
-	ProjectID   string   `json:"projectId"`
-	DisplayName string   `json:"displayName"`
-	Config      string   `json:"config"`
-	NodeCount   int64    `json:"nodeCount"`
-	State       string   `json:"state"`
-	Databases   []string `json:"databases"`
+// IAMBinding represents a single IAM binding (one role + one member)
+type IAMBinding struct {
+	Role   string `json:"role"`
+	Member string `json:"member"`
 }
 
-func (s *SpannerService) ListInstances(projectID string) ([]SpannerInstanceInfo, error) {
+type SpannerInstanceInfo struct {
+	Name        string       `json:"name"`
+	FullName    string       `json:"fullName"`
+	ProjectID   string       `json:"projectId"`
+	DisplayName string       `json:"displayName"`
+	Config      string       `json:"config"`
+	NodeCount   int64        `json:"nodeCount"`
+	State       string       `json:"state"`
+	IAMBindings []IAMBinding `json:"iamBindings"`
+}
+
+type SpannerDatabaseInfo struct {
+	Name           string       `json:"name"`
+	FullName       string       `json:"fullName"`
+	ProjectID      string       `json:"projectId"`
+	InstanceName   string       `json:"instanceName"`
+	State          string       `json:"state"`
+	EncryptionType string       `json:"encryptionType"`
+	KmsKeyName     string       `json:"kmsKeyName"`
+	IAMBindings    []IAMBinding `json:"iamBindings"`
+}
+
+type SpannerResult struct {
+	Instances []SpannerInstanceInfo
+	Databases []SpannerDatabaseInfo
+}
+
+// ListInstancesAndDatabases retrieves all Spanner instances and databases with IAM bindings
+func (s *SpannerService) ListInstancesAndDatabases(projectID string) (*SpannerResult, error) {
 	ctx := context.Background()
 	service, err := spanner.NewService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "spanner.googleapis.com")
 	}
 
-	var instances []SpannerInstanceInfo
+	result := &SpannerResult{
+		Instances: []SpannerInstanceInfo{},
+		Databases: []SpannerDatabaseInfo{},
+	}
+
 	parent := fmt.Sprintf("projects/%s", projectID)
 
 	req := service.Projects.Instances.List(parent)
@@ -42,37 +70,106 @@ func (s *SpannerService) ListInstances(projectID string) ([]SpannerInstanceInfo,
 		for _, instance := range page.Instances {
 			info := SpannerInstanceInfo{
 				Name:        extractName(instance.Name),
+				FullName:    instance.Name,
 				ProjectID:   projectID,
 				DisplayName: instance.DisplayName,
-				Config:      instance.Config,
+				Config:      extractName(instance.Config),
 				NodeCount:   instance.NodeCount,
 				State:       instance.State,
 			}
 
-			// Get databases for this instance
-			dbs, _ := s.listDatabases(service, ctx, instance.Name)
-			info.Databases = dbs
+			// Get IAM bindings for this instance
+			info.IAMBindings = s.getInstanceIAMBindings(service, ctx, instance.Name)
 
-			instances = append(instances, info)
+			result.Instances = append(result.Instances, info)
+
+			// Get databases for this instance
+			databases := s.listDatabases(service, ctx, instance.Name, projectID)
+			result.Databases = append(result.Databases, databases...)
 		}
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, gcpinternal.ParseGCPError(err, "spanner.googleapis.com")
 	}
-	return instances, nil
+
+	return result, nil
 }
 
-func (s *SpannerService) listDatabases(service *spanner.Service, ctx context.Context, instanceName string) ([]string, error) {
-	var databases []string
+// getInstanceIAMBindings retrieves IAM bindings for an instance
+func (s *SpannerService) getInstanceIAMBindings(service *spanner.Service, ctx context.Context, instanceName string) []IAMBinding {
+	var bindings []IAMBinding
+
+	policy, err := service.Projects.Instances.GetIamPolicy(instanceName, &spanner.GetIamPolicyRequest{}).Context(ctx).Do()
+	if err != nil {
+		return bindings
+	}
+
+	for _, binding := range policy.Bindings {
+		for _, member := range binding.Members {
+			bindings = append(bindings, IAMBinding{
+				Role:   binding.Role,
+				Member: member,
+			})
+		}
+	}
+
+	return bindings
+}
+
+// listDatabases retrieves all databases for an instance with their IAM bindings
+func (s *SpannerService) listDatabases(service *spanner.Service, ctx context.Context, instanceName string, projectID string) []SpannerDatabaseInfo {
+	var databases []SpannerDatabaseInfo
+
 	req := service.Projects.Instances.Databases.List(instanceName)
-	err := req.Pages(ctx, func(page *spanner.ListDatabasesResponse) error {
+	_ = req.Pages(ctx, func(page *spanner.ListDatabasesResponse) error {
 		for _, db := range page.Databases {
-			databases = append(databases, extractName(db.Name))
+			dbInfo := SpannerDatabaseInfo{
+				Name:         extractName(db.Name),
+				FullName:     db.Name,
+				ProjectID:    projectID,
+				InstanceName: extractName(instanceName),
+				State:        db.State,
+			}
+
+			// Determine encryption type
+			if db.EncryptionConfig != nil && db.EncryptionConfig.KmsKeyName != "" {
+				dbInfo.EncryptionType = "CMEK"
+				dbInfo.KmsKeyName = db.EncryptionConfig.KmsKeyName
+			} else {
+				dbInfo.EncryptionType = "Google-managed"
+			}
+
+			// Get IAM bindings for this database
+			dbInfo.IAMBindings = s.getDatabaseIAMBindings(service, ctx, db.Name)
+
+			databases = append(databases, dbInfo)
 		}
 		return nil
 	})
-	return databases, err
+
+	return databases
+}
+
+// getDatabaseIAMBindings retrieves IAM bindings for a database
+func (s *SpannerService) getDatabaseIAMBindings(service *spanner.Service, ctx context.Context, databaseName string) []IAMBinding {
+	var bindings []IAMBinding
+
+	policy, err := service.Projects.Instances.Databases.GetIamPolicy(databaseName, &spanner.GetIamPolicyRequest{}).Context(ctx).Do()
+	if err != nil {
+		return bindings
+	}
+
+	for _, binding := range policy.Bindings {
+		for _, member := range binding.Members {
+			bindings = append(bindings, IAMBinding{
+				Role:   binding.Role,
+				Member: member,
+			})
+		}
+	}
+
+	return bindings
 }
 
 func extractName(fullName string) string {

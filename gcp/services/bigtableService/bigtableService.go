@@ -18,13 +18,29 @@ func New() *BigtableService {
 }
 
 type BigtableInstanceInfo struct {
-	Name        string   `json:"name"`
-	ProjectID   string   `json:"projectId"`
-	DisplayName string   `json:"displayName"`
-	Type        string   `json:"type"`
-	State       string   `json:"state"`
-	Tables      []string `json:"tables"`
-	Clusters    []ClusterInfo `json:"clusters"`
+	Name         string        `json:"name"`
+	FullName     string        `json:"fullName"`
+	ProjectID    string        `json:"projectId"`
+	DisplayName  string        `json:"displayName"`
+	Type         string        `json:"type"`
+	State        string        `json:"state"`
+	Clusters     []ClusterInfo `json:"clusters"`
+	IAMBindings  []IAMBinding  `json:"iamBindings"`
+	PublicAccess bool          `json:"publicAccess"`
+}
+
+type BigtableTableInfo struct {
+	Name         string       `json:"name"`
+	FullName     string       `json:"fullName"`
+	InstanceName string       `json:"instanceName"`
+	ProjectID    string       `json:"projectId"`
+	IAMBindings  []IAMBinding `json:"iamBindings"`
+	PublicAccess bool         `json:"publicAccess"`
+}
+
+type IAMBinding struct {
+	Role    string   `json:"role"`
+	Members []string `json:"members"`
 }
 
 type ClusterInfo struct {
@@ -34,14 +50,23 @@ type ClusterInfo struct {
 	State      string `json:"state"`
 }
 
-func (s *BigtableService) ListInstances(projectID string) ([]BigtableInstanceInfo, error) {
+type BigtableResult struct {
+	Instances []BigtableInstanceInfo
+	Tables    []BigtableTableInfo
+}
+
+func (s *BigtableService) ListInstances(projectID string) (*BigtableResult, error) {
 	ctx := context.Background()
 	service, err := bigtableadmin.NewService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "bigtableadmin.googleapis.com")
 	}
 
-	var instances []BigtableInstanceInfo
+	result := &BigtableResult{
+		Instances: []BigtableInstanceInfo{},
+		Tables:    []BigtableTableInfo{},
+	}
+
 	parent := fmt.Sprintf("projects/%s", projectID)
 
 	resp, err := service.Projects.Instances.List(parent).Context(ctx).Do()
@@ -52,6 +77,7 @@ func (s *BigtableService) ListInstances(projectID string) ([]BigtableInstanceInf
 	for _, instance := range resp.Instances {
 		info := BigtableInstanceInfo{
 			Name:        extractName(instance.Name),
+			FullName:    instance.Name,
 			ProjectID:   projectID,
 			DisplayName: instance.DisplayName,
 			Type:        instance.Type,
@@ -71,18 +97,49 @@ func (s *BigtableService) ListInstances(projectID string) ([]BigtableInstanceInf
 			}
 		}
 
-		// Get tables
+		// Get tables and their IAM policies
 		tablesResp, _ := service.Projects.Instances.Tables.List(instance.Name).Context(ctx).Do()
 		if tablesResp != nil {
 			for _, table := range tablesResp.Tables {
-				info.Tables = append(info.Tables, extractName(table.Name))
+				tableInfo := BigtableTableInfo{
+					Name:         extractName(table.Name),
+					FullName:     table.Name,
+					InstanceName: info.Name,
+					ProjectID:    projectID,
+				}
+
+				// Get IAM policy for table
+				tableIamResp, err := service.Projects.Instances.Tables.GetIamPolicy(table.Name, &bigtableadmin.GetIamPolicyRequest{}).Context(ctx).Do()
+				if err == nil && tableIamResp != nil {
+					for _, binding := range tableIamResp.Bindings {
+						tableInfo.IAMBindings = append(tableInfo.IAMBindings, IAMBinding{
+							Role:    binding.Role,
+							Members: binding.Members,
+						})
+					}
+					tableInfo.PublicAccess = checkPublicAccess(tableIamResp.Bindings)
+				}
+
+				result.Tables = append(result.Tables, tableInfo)
 			}
 		}
 
-		instances = append(instances, info)
+		// Get IAM policy for instance
+		iamResp, err := service.Projects.Instances.GetIamPolicy(instance.Name, &bigtableadmin.GetIamPolicyRequest{}).Context(ctx).Do()
+		if err == nil && iamResp != nil {
+			for _, binding := range iamResp.Bindings {
+				info.IAMBindings = append(info.IAMBindings, IAMBinding{
+					Role:    binding.Role,
+					Members: binding.Members,
+				})
+			}
+			info.PublicAccess = checkPublicAccess(iamResp.Bindings)
+		}
+
+		result.Instances = append(result.Instances, info)
 	}
 
-	return instances, nil
+	return result, nil
 }
 
 func extractName(fullName string) string {
@@ -91,4 +148,16 @@ func extractName(fullName string) string {
 		return parts[len(parts)-1]
 	}
 	return fullName
+}
+
+// checkPublicAccess checks if any IAM binding grants access to allUsers or allAuthenticatedUsers
+func checkPublicAccess(bindings []*bigtableadmin.Binding) bool {
+	for _, binding := range bindings {
+		for _, member := range binding.Members {
+			if member == "allUsers" || member == "allAuthenticatedUsers" {
+				return true
+			}
+		}
+	}
+	return false
 }

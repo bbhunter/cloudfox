@@ -23,51 +23,47 @@ func NewWithSession(session *gcpinternal.SafeSession) *NotebooksService {
 
 // NotebookInstanceInfo represents a Vertex AI Workbench or legacy notebook instance
 type NotebookInstanceInfo struct {
-	Name             string   `json:"name"`
-	ProjectID        string   `json:"projectId"`
-	Location         string   `json:"location"`
-	State            string   `json:"state"`
-	MachineType      string   `json:"machineType"`
-	ServiceAccount   string   `json:"serviceAccount"`
-	Network          string   `json:"network"`
-	Subnet           string   `json:"subnet"`
-	NoPublicIP       bool     `json:"noPublicIp"`
-	NoProxyAccess    bool     `json:"noProxyAccess"`
-	CreateTime       string   `json:"createTime"`
-	UpdateTime       string   `json:"updateTime"`
+	Name             string `json:"name"`
+	ProjectID        string `json:"projectId"`
+	Location         string `json:"location"`
+	State            string `json:"state"`
+	MachineType      string `json:"machineType"`
+	ServiceAccount   string `json:"serviceAccount"`
+	Network          string `json:"network"`
+	Subnet           string `json:"subnet"`
+	NoPublicIP       bool   `json:"noPublicIp"`
+	NoProxyAccess    bool   `json:"noProxyAccess"`
+	ProxyUri         string `json:"proxyUri"`
+	Creator          string `json:"creator"`
+	CreateTime       string `json:"createTime"`
+	UpdateTime       string `json:"updateTime"`
 
 	// Disk config
-	BootDiskType     string   `json:"bootDiskType"`
-	BootDiskSizeGB   int64    `json:"bootDiskSizeGb"`
-	DataDiskType     string   `json:"dataDiskType"`
-	DataDiskSizeGB   int64    `json:"dataDiskSizeGb"`
+	BootDiskType   string `json:"bootDiskType"`
+	BootDiskSizeGB int64  `json:"bootDiskSizeGb"`
+	DataDiskType   string `json:"dataDiskType"`
+	DataDiskSizeGB int64  `json:"dataDiskSizeGb"`
 
 	// GPU config
-	AcceleratorType  string   `json:"acceleratorType"`
-	AcceleratorCount int64    `json:"acceleratorCount"`
+	AcceleratorType  string `json:"acceleratorType"`
+	AcceleratorCount int64  `json:"acceleratorCount"`
 
-	// Security config
-	InstallGpuDriver bool     `json:"installGpuDriver"`
-	CustomContainer  bool     `json:"customContainer"`
-
-	// Security analysis
-	RiskLevel        string   `json:"riskLevel"`
-	RiskReasons      []string `json:"riskReasons"`
+	// Other config
+	InstallGpuDriver bool `json:"installGpuDriver"`
+	CustomContainer  bool `json:"customContainer"`
 }
 
 // RuntimeInfo represents a managed notebook runtime
 type RuntimeInfo struct {
-	Name            string   `json:"name"`
-	ProjectID       string   `json:"projectId"`
-	Location        string   `json:"location"`
-	State           string   `json:"state"`
-	RuntimeType     string   `json:"runtimeType"`
-	MachineType     string   `json:"machineType"`
-	ServiceAccount  string   `json:"serviceAccount"`
-	Network         string   `json:"network"`
-	Subnet          string   `json:"subnet"`
-	RiskLevel       string   `json:"riskLevel"`
-	RiskReasons     []string `json:"riskReasons"`
+	Name           string `json:"name"`
+	ProjectID      string `json:"projectId"`
+	Location       string `json:"location"`
+	State          string `json:"state"`
+	RuntimeType    string `json:"runtimeType"`
+	MachineType    string `json:"machineType"`
+	ServiceAccount string `json:"serviceAccount"`
+	Network        string `json:"network"`
+	Subnet         string `json:"subnet"`
 }
 
 // ListInstances retrieves all notebook instances
@@ -148,7 +144,6 @@ func (s *NotebooksService) parseInstance(instance *notebooks.Instance, projectID
 		MachineType: extractName(instance.MachineType),
 		CreateTime:  instance.CreateTime,
 		UpdateTime:  instance.UpdateTime,
-		RiskReasons: []string{},
 	}
 
 	// Service account
@@ -159,6 +154,10 @@ func (s *NotebooksService) parseInstance(instance *notebooks.Instance, projectID
 	info.Subnet = extractName(instance.Subnet)
 	info.NoPublicIP = instance.NoPublicIp
 	info.NoProxyAccess = instance.NoProxyAccess
+
+	// Proxy URI and Creator
+	info.ProxyUri = instance.ProxyUri
+	info.Creator = instance.Creator
 
 	// Boot disk
 	info.BootDiskType = instance.BootDiskType
@@ -180,18 +179,15 @@ func (s *NotebooksService) parseInstance(instance *notebooks.Instance, projectID
 		info.CustomContainer = true
 	}
 
-	info.RiskLevel, info.RiskReasons = s.analyzeInstanceRisk(info)
-
 	return info
 }
 
 func (s *NotebooksService) parseRuntime(runtime *notebooks.Runtime, projectID string) RuntimeInfo {
 	info := RuntimeInfo{
-		Name:        extractName(runtime.Name),
-		ProjectID:   projectID,
-		Location:    extractLocation(runtime.Name),
-		State:       runtime.State,
-		RiskReasons: []string{},
+		Name:      extractName(runtime.Name),
+		ProjectID: projectID,
+		Location:  extractLocation(runtime.Name),
+		State:     runtime.State,
 	}
 
 	if runtime.VirtualMachine != nil {
@@ -208,71 +204,7 @@ func (s *NotebooksService) parseRuntime(runtime *notebooks.Runtime, projectID st
 		info.ServiceAccount = runtime.AccessConfig.RuntimeOwner
 	}
 
-	info.RiskLevel, info.RiskReasons = s.analyzeRuntimeRisk(info)
-
 	return info
-}
-
-func (s *NotebooksService) analyzeInstanceRisk(instance NotebookInstanceInfo) (string, []string) {
-	var reasons []string
-	score := 0
-
-	// Public IP
-	if !instance.NoPublicIP {
-		reasons = append(reasons, "Has public IP address")
-		score += 2
-	}
-
-	// Proxy access enabled (allows web access)
-	if !instance.NoProxyAccess {
-		reasons = append(reasons, "Proxy access enabled (web access)")
-		score += 1
-	}
-
-	// Default service account
-	if instance.ServiceAccount == "" || strings.Contains(instance.ServiceAccount, "compute@developer.gserviceaccount.com") {
-		reasons = append(reasons, "Uses default Compute Engine service account")
-		score += 2
-	}
-
-	// Custom container (potential supply chain risk)
-	if instance.CustomContainer {
-		reasons = append(reasons, "Uses custom container image")
-		score += 1
-	}
-
-	// GPU (high-value target, expensive)
-	if instance.AcceleratorCount > 0 {
-		reasons = append(reasons, fmt.Sprintf("Has GPU attached (%s x%d)", instance.AcceleratorType, instance.AcceleratorCount))
-		score += 1
-	}
-
-	if score >= 4 {
-		return "HIGH", reasons
-	} else if score >= 2 {
-		return "MEDIUM", reasons
-	} else if score >= 1 {
-		return "LOW", reasons
-	}
-	return "INFO", reasons
-}
-
-func (s *NotebooksService) analyzeRuntimeRisk(runtime RuntimeInfo) (string, []string) {
-	var reasons []string
-	score := 0
-
-	// Check for default SA patterns
-	if runtime.ServiceAccount == "" {
-		reasons = append(reasons, "No explicit service account configured")
-		score += 1
-	}
-
-	if score >= 2 {
-		return "MEDIUM", reasons
-	} else if score >= 1 {
-		return "LOW", reasons
-	}
-	return "INFO", reasons
 }
 
 func extractName(fullName string) string {

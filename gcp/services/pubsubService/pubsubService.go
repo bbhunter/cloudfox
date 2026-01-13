@@ -15,57 +15,59 @@ func New() *PubSubService {
 	return &PubSubService{}
 }
 
+// IAMBinding represents a single IAM role/member binding
+type IAMBinding struct {
+	Role   string `json:"role"`
+	Member string `json:"member"`
+}
+
 // TopicInfo holds Pub/Sub topic details with security-relevant information
 type TopicInfo struct {
-	Name                    string
-	ProjectID               string
-	KmsKeyName              string  // Encryption key if set
+	Name                     string
+	ProjectID                string
+	KmsKeyName               string // Encryption key if set
 	MessageRetentionDuration string
-	SchemaSettings          string
-	Labels                  map[string]string
+	SchemaSettings           string
+	Labels                   map[string]string
 
-	// IAM
-	PublisherMembers        []string
-	SubscriberMembers       []string
-	IsPublicPublish         bool  // allUsers/allAuthenticatedUsers can publish
-	IsPublicSubscribe       bool  // allUsers/allAuthenticatedUsers can subscribe
+	// IAM bindings
+	IAMBindings []IAMBinding
 
 	// Subscriptions count
-	SubscriptionCount       int
+	SubscriptionCount int
 }
 
 // SubscriptionInfo holds Pub/Sub subscription details
 type SubscriptionInfo struct {
-	Name                    string
-	ProjectID               string
-	Topic                   string
-	TopicProject            string  // Topic may be in different project
+	Name         string
+	ProjectID    string
+	Topic        string
+	TopicProject string // Topic may be in different project
 
 	// Configuration
-	AckDeadlineSeconds      int64
-	MessageRetention        string
-	RetainAckedMessages     bool
-	ExpirationPolicy        string  // TTL
-	Filter                  string
+	AckDeadlineSeconds  int64
+	MessageRetention    string
+	RetainAckedMessages bool
+	ExpirationPolicy    string // TTL
+	Filter              string
 
 	// Push configuration
-	PushEndpoint            string  // Empty if pull subscription
-	PushOIDCAudience        string
-	PushServiceAccount      string
+	PushEndpoint       string // Empty if pull subscription
+	PushOIDCAudience   string
+	PushServiceAccount string
 
 	// Dead letter
-	DeadLetterTopic         string
-	MaxDeliveryAttempts     int64
+	DeadLetterTopic     string
+	MaxDeliveryAttempts int64
 
 	// BigQuery export
-	BigQueryTable           string
+	BigQueryTable string
 
 	// Cloud Storage export
-	CloudStorageBucket      string
+	CloudStorageBucket string
 
-	// IAM
-	ConsumerMembers         []string
-	IsPublicConsume         bool
+	// IAM bindings
+	IAMBindings []IAMBinding
 }
 
 // Topics retrieves all Pub/Sub topics in a project
@@ -92,8 +94,7 @@ func (ps *PubSubService) Topics(projectID string) ([]TopicInfo, error) {
 			// Try to get IAM policy
 			iamPolicy, iamErr := ps.getTopicIAMPolicy(service, topic.Name)
 			if iamErr == nil && iamPolicy != nil {
-				info.PublisherMembers, info.SubscriberMembers,
-					info.IsPublicPublish, info.IsPublicSubscribe = parseTopicBindings(iamPolicy)
+				info.IAMBindings = parseIAMBindings(iamPolicy)
 			}
 
 			topics = append(topics, info)
@@ -128,7 +129,7 @@ func (ps *PubSubService) Subscriptions(projectID string) ([]SubscriptionInfo, er
 			// Try to get IAM policy
 			iamPolicy, iamErr := ps.getSubscriptionIAMPolicy(service, sub.Name)
 			if iamErr == nil && iamPolicy != nil {
-				info.ConsumerMembers, info.IsPublicConsume = parseSubscriptionBindings(iamPolicy)
+				info.IAMBindings = parseIAMBindings(iamPolicy)
 			}
 
 			subscriptions = append(subscriptions, info)
@@ -265,43 +266,21 @@ func (ps *PubSubService) getSubscriptionIAMPolicy(service *pubsub.Service, subsc
 	return policy, nil
 }
 
-// parseTopicBindings extracts who can publish/subscribe and checks for public access
-func parseTopicBindings(policy *pubsub.Policy) (publishers []string, subscribers []string, publicPublish bool, publicSubscribe bool) {
+// parseIAMBindings extracts all IAM bindings from a policy
+func parseIAMBindings(policy *pubsub.Policy) []IAMBinding {
+	var bindings []IAMBinding
 	for _, binding := range policy.Bindings {
-		switch binding.Role {
-		case "roles/pubsub.publisher":
-			publishers = append(publishers, binding.Members...)
-			for _, member := range binding.Members {
-				if member == "allUsers" || member == "allAuthenticatedUsers" {
-					publicPublish = true
-				}
-			}
-		case "roles/pubsub.subscriber":
-			subscribers = append(subscribers, binding.Members...)
-			for _, member := range binding.Members {
-				if member == "allUsers" || member == "allAuthenticatedUsers" {
-					publicSubscribe = true
-				}
-			}
+		if binding == nil {
+			continue
+		}
+		for _, member := range binding.Members {
+			bindings = append(bindings, IAMBinding{
+				Role:   binding.Role,
+				Member: member,
+			})
 		}
 	}
-	return
-}
-
-// parseSubscriptionBindings extracts who can consume messages
-func parseSubscriptionBindings(policy *pubsub.Policy) (consumers []string, isPublic bool) {
-	for _, binding := range policy.Bindings {
-		if binding.Role == "roles/pubsub.subscriber" ||
-			binding.Role == "roles/pubsub.viewer" {
-			consumers = append(consumers, binding.Members...)
-			for _, member := range binding.Members {
-				if member == "allUsers" || member == "allAuthenticatedUsers" {
-					isPublic = true
-				}
-			}
-		}
-	}
-	return
+	return bindings
 }
 
 // extractName extracts just the resource name from the full resource name

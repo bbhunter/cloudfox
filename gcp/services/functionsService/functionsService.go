@@ -58,8 +58,8 @@ type FunctionInfo struct {
 	SecretVolumeCount    int
 
 	// IAM (if retrieved)
-	InvokerMembers       []string  // Who can invoke this function
-	IsPublic             bool      // allUsers or allAuthenticatedUsers can invoke
+	IAMBindings          []IAMBinding // All IAM bindings for this function
+	IsPublic             bool         // allUsers or allAuthenticatedUsers can invoke
 
 	// Pentest-specific fields
 	EnvVarNames          []string  // Names of env vars (may hint at secrets)
@@ -67,24 +67,12 @@ type FunctionInfo struct {
 	SecretVolumeNames    []string  // Names of secret volumes
 	SourceLocation       string    // GCS or repo source location
 	SourceType           string    // GCS, Repository
-	RiskLevel            string    // CRITICAL, HIGH, MEDIUM, LOW
-	RiskReasons          []string  // Why it's risky
-
-	// Cold start analysis
-	ColdStartRisk        string  // HIGH, MEDIUM, LOW based on min instances
 }
 
-// FunctionSecurityAnalysis contains detailed security analysis for a function
-type FunctionSecurityAnalysis struct {
-	FunctionName     string   `json:"functionName"`
-	ProjectID        string   `json:"projectId"`
-	Region           string   `json:"region"`
-	ServiceAccount   string   `json:"serviceAccount"`
-	IsPublic         bool     `json:"isPublic"`
-	TriggerURL       string   `json:"triggerURL"`
-	RiskLevel        string   `json:"riskLevel"`
-	RiskReasons      []string `json:"riskReasons"`
-	ExploitCommands  []string `json:"exploitCommands"`
+// IAMBinding represents a single IAM role binding
+type IAMBinding struct {
+	Role   string
+	Member string
 }
 
 // Functions retrieves all Cloud Functions in a project across all regions
@@ -109,7 +97,7 @@ func (fs *FunctionsService) Functions(projectID string) ([]FunctionInfo, error) 
 			// Try to get IAM policy
 			iamPolicy, iamErr := fs.getFunctionIAMPolicy(service, fn.Name)
 			if iamErr == nil && iamPolicy != nil {
-				info.InvokerMembers, info.IsPublic = parseInvokerBindings(iamPolicy)
+				info.IAMBindings, info.IsPublic = parseIAMBindings(iamPolicy)
 			}
 
 			functions = append(functions, info)
@@ -127,10 +115,9 @@ func (fs *FunctionsService) Functions(projectID string) ([]FunctionInfo, error) 
 // parseFunctionInfo extracts relevant information from a Cloud Function
 func parseFunctionInfo(fn *cloudfunctions.Function, projectID string) FunctionInfo {
 	info := FunctionInfo{
-		Name:        extractFunctionName(fn.Name),
-		ProjectID:   projectID,
-		State:       fn.State,
-		RiskReasons: []string{},
+		Name:      extractFunctionName(fn.Name),
+		ProjectID: projectID,
+		State:     fn.State,
 	}
 
 	// Extract region from function name
@@ -190,15 +177,6 @@ func parseFunctionInfo(fn *cloudfunctions.Function, projectID string) FunctionIn
 		info.MaxInstanceCount = fn.ServiceConfig.MaxInstanceCount
 		info.MinInstanceCount = fn.ServiceConfig.MinInstanceCount
 		info.MaxInstanceRequestConcurrency = fn.ServiceConfig.MaxInstanceRequestConcurrency
-
-		// Cold start risk analysis
-		if info.MinInstanceCount > 0 {
-			info.ColdStartRisk = "LOW"
-		} else if info.MaxInstanceCount > 100 {
-			info.ColdStartRisk = "MEDIUM"
-		} else {
-			info.ColdStartRisk = "HIGH"
-		}
 
 		// Extract environment variable names (pentest-relevant - may hint at secrets)
 		if fn.ServiceConfig.EnvironmentVariables != nil {
@@ -262,27 +240,28 @@ func (fs *FunctionsService) getFunctionIAMPolicy(service *cloudfunctions.Service
 	return policy, nil
 }
 
-// parseInvokerBindings extracts who can invoke the function and checks for public access
-func parseInvokerBindings(policy *cloudfunctions.Policy) ([]string, bool) {
-	var invokers []string
+// parseIAMBindings extracts all IAM bindings and checks for public access
+func parseIAMBindings(policy *cloudfunctions.Policy) ([]IAMBinding, bool) {
+	var bindings []IAMBinding
 	isPublic := false
 
 	for _, binding := range policy.Bindings {
-		// Check for invoker roles
-		if binding.Role == "roles/cloudfunctions.invoker" ||
-		   binding.Role == "roles/run.invoker" {
-			invokers = append(invokers, binding.Members...)
+		for _, member := range binding.Members {
+			bindings = append(bindings, IAMBinding{
+				Role:   binding.Role,
+				Member: member,
+			})
 
-			// Check for public access
-			for _, member := range binding.Members {
-				if member == "allUsers" || member == "allAuthenticatedUsers" {
-					isPublic = true
-				}
+			// Check for public access on invoker roles
+			if (binding.Role == "roles/cloudfunctions.invoker" ||
+				binding.Role == "roles/run.invoker") &&
+				(member == "allUsers" || member == "allAuthenticatedUsers") {
+				isPublic = true
 			}
 		}
 	}
 
-	return invokers, isPublic
+	return bindings, isPublic
 }
 
 // extractFunctionName extracts just the function name from the full resource name
@@ -292,132 +271,6 @@ func extractFunctionName(fullName string) string {
 		return parts[len(parts)-1]
 	}
 	return fullName
-}
-
-// AnalyzeFunctionSecurity performs security analysis on a function
-func (fs *FunctionsService) AnalyzeFunctionSecurity(fn FunctionInfo) FunctionSecurityAnalysis {
-	analysis := FunctionSecurityAnalysis{
-		FunctionName:    fn.Name,
-		ProjectID:       fn.ProjectID,
-		Region:          fn.Region,
-		ServiceAccount:  fn.ServiceAccount,
-		IsPublic:        fn.IsPublic,
-		TriggerURL:      fn.TriggerURL,
-		RiskReasons:     []string{},
-		ExploitCommands: []string{},
-	}
-
-	score := 0
-
-	// Check for public access (CRITICAL)
-	if fn.IsPublic {
-		analysis.RiskReasons = append(analysis.RiskReasons,
-			"Function is publicly accessible (allUsers/allAuthenticatedUsers)")
-		if fn.TriggerURL != "" {
-			analysis.ExploitCommands = append(analysis.ExploitCommands,
-				fmt.Sprintf("# PUBLIC function - direct access:\ncurl -s '%s'", fn.TriggerURL))
-		}
-		score += 3
-	}
-
-	// Check ingress settings
-	if fn.IngressSettings == "ALLOW_ALL" || fn.IngressSettings == "ALL_TRAFFIC" {
-		analysis.RiskReasons = append(analysis.RiskReasons,
-			"Function allows all ingress traffic")
-		score += 1
-	}
-
-	// Check for default service account (often over-privileged)
-	if strings.Contains(fn.ServiceAccount, "-compute@developer.gserviceaccount.com") ||
-		strings.Contains(fn.ServiceAccount, "@appspot.gserviceaccount.com") {
-		analysis.RiskReasons = append(analysis.RiskReasons,
-			"Uses default service account (often has excessive permissions)")
-		analysis.ExploitCommands = append(analysis.ExploitCommands,
-			fmt.Sprintf("# Check default SA permissions:\ngcloud projects get-iam-policy %s --flatten='bindings[].members' --filter='bindings.members:%s'",
-				fn.ProjectID, fn.ServiceAccount))
-		score += 2
-	}
-
-	// Check for secrets (potential for exfiltration if function is compromised)
-	if fn.SecretEnvVarCount > 0 || fn.SecretVolumeCount > 0 {
-		analysis.RiskReasons = append(analysis.RiskReasons,
-			fmt.Sprintf("Function has access to %d secret env vars and %d secret volumes",
-				fn.SecretEnvVarCount, fn.SecretVolumeCount))
-		score += 1
-	}
-
-	// Check for sensitive env var names
-	sensitiveVars := []string{}
-	for _, varName := range fn.EnvVarNames {
-		if containsSensitiveKeyword(varName) {
-			sensitiveVars = append(sensitiveVars, varName)
-		}
-	}
-	if len(sensitiveVars) > 0 {
-		analysis.RiskReasons = append(analysis.RiskReasons,
-			fmt.Sprintf("Environment variables with sensitive names: %s", strings.Join(sensitiveVars, ", ")))
-		score += 1
-	}
-
-	// Check VPC connector (lateral movement potential)
-	if fn.VPCConnector != "" {
-		analysis.RiskReasons = append(analysis.RiskReasons,
-			fmt.Sprintf("Function has VPC connector: %s (lateral movement potential)", fn.VPCConnector))
-		score += 1
-	}
-
-	// Source code access
-	if fn.SourceLocation != "" && fn.SourceType == "GCS" {
-		analysis.ExploitCommands = append(analysis.ExploitCommands,
-			fmt.Sprintf("# Download function source code:\ngsutil cp %s ./function-source.zip && unzip function-source.zip",
-				fn.SourceLocation))
-	}
-
-	// Add general enumeration commands
-	analysis.ExploitCommands = append(analysis.ExploitCommands,
-		fmt.Sprintf("# Get function details:\ngcloud functions describe %s --region=%s --project=%s --gen2",
-			fn.Name, fn.Region, fn.ProjectID))
-
-	if fn.TriggerType == "HTTP" && fn.TriggerURL != "" {
-		analysis.ExploitCommands = append(analysis.ExploitCommands,
-			fmt.Sprintf("# Invoke function with auth:\ncurl -s -X POST '%s' -H 'Authorization: Bearer $(gcloud auth print-identity-token)' -H 'Content-Type: application/json' -d '{}'",
-				fn.TriggerURL))
-	}
-
-	// Determine risk level
-	if score >= 4 {
-		analysis.RiskLevel = "CRITICAL"
-	} else if score >= 3 {
-		analysis.RiskLevel = "HIGH"
-	} else if score >= 2 {
-		analysis.RiskLevel = "MEDIUM"
-	} else if score >= 1 {
-		analysis.RiskLevel = "LOW"
-	} else {
-		analysis.RiskLevel = "INFO"
-	}
-
-	return analysis
-}
-
-// containsSensitiveKeyword checks if a variable name might contain secrets
-func containsSensitiveKeyword(name string) bool {
-	sensitiveKeywords := []string{
-		"SECRET", "PASSWORD", "PASSWD", "PWD",
-		"TOKEN", "KEY", "CREDENTIAL", "CRED",
-		"AUTH", "API_KEY", "APIKEY", "PRIVATE",
-		"DATABASE", "DB_PASS", "MONGO", "MYSQL",
-		"POSTGRES", "REDIS", "WEBHOOK", "SLACK",
-		"SENDGRID", "STRIPE", "AWS", "AZURE",
-	}
-
-	upperName := strings.ToUpper(name)
-	for _, keyword := range sensitiveKeywords {
-		if strings.Contains(upperName, keyword) {
-			return true
-		}
-	}
-	return false
 }
 
 // parseMemoryMB parses a memory string like "256M" or "1G" to MB

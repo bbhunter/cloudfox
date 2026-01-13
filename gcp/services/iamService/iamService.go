@@ -8,12 +8,14 @@ import (
 
 	iampb "cloud.google.com/go/iam/apiv1/iampb"
 	resourcemanager "cloud.google.com/go/resourcemanager/apiv3"
+	resourcemanagerpb "cloud.google.com/go/resourcemanager/apiv3/resourcemanagerpb"
 	"github.com/BishopFox/cloudfox/globals"
 	"github.com/BishopFox/cloudfox/internal"
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	cloudidentity "google.golang.org/api/cloudidentity/v1"
 	crmv1 "google.golang.org/api/cloudresourcemanager/v1"
 	iam "google.golang.org/api/iam/v1"
+	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 )
 
@@ -568,8 +570,26 @@ func (s *IAMService) PoliciesWithInheritance(projectID string) ([]PolicyBinding,
 	return allBindings, nil
 }
 
+// policyCache caches successful policy lookups per resource
+var policyCache = make(map[string][]PolicyBinding)
+
+// policyFailureCache tracks resources we've already failed to get policies for
+var policyFailureCache = make(map[string]bool)
+
 // getPoliciesForResource fetches policies for a specific resource using the appropriate client
 func (s *IAMService) getPoliciesForResource(ctx context.Context, resourceID string, resourceType string) ([]PolicyBinding, error) {
+	cacheKey := resourceType + "/" + resourceID
+
+	// Check success cache first
+	if bindings, ok := policyCache[cacheKey]; ok {
+		return bindings, nil
+	}
+
+	// Check failure cache - return permission denied without logging again
+	if policyFailureCache[cacheKey] {
+		return nil, gcpinternal.ErrPermissionDenied
+	}
+
 	var resourceName string
 
 	switch resourceType {
@@ -591,7 +611,9 @@ func (s *IAMService) getPoliciesForResource(ctx context.Context, resourceID stri
 		if err != nil {
 			return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 		}
-		return convertPolicyToBindings(policy, resourceID, resourceType, resourceName), nil
+		bindings := convertPolicyToBindings(policy, resourceID, resourceType, resourceName)
+		policyCache[cacheKey] = bindings
+		return bindings, nil
 
 	case "folder":
 		var client *resourcemanager.FoldersClient
@@ -602,6 +624,7 @@ func (s *IAMService) getPoliciesForResource(ctx context.Context, resourceID stri
 			client, err = resourcemanager.NewFoldersClient(ctx)
 		}
 		if err != nil {
+			policyFailureCache[cacheKey] = true
 			return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 		}
 		defer client.Close()
@@ -609,9 +632,12 @@ func (s *IAMService) getPoliciesForResource(ctx context.Context, resourceID stri
 		resourceName = "folders/" + resourceID
 		policy, err := client.GetIamPolicy(ctx, &iampb.GetIamPolicyRequest{Resource: resourceName})
 		if err != nil {
+			policyFailureCache[cacheKey] = true
 			return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 		}
-		return convertPolicyToBindings(policy, resourceID, resourceType, resourceName), nil
+		bindings := convertPolicyToBindings(policy, resourceID, resourceType, resourceName)
+		policyCache[cacheKey] = bindings
+		return bindings, nil
 
 	case "organization":
 		var client *resourcemanager.OrganizationsClient
@@ -622,6 +648,7 @@ func (s *IAMService) getPoliciesForResource(ctx context.Context, resourceID stri
 			client, err = resourcemanager.NewOrganizationsClient(ctx)
 		}
 		if err != nil {
+			policyFailureCache[cacheKey] = true
 			return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 		}
 		defer client.Close()
@@ -629,9 +656,12 @@ func (s *IAMService) getPoliciesForResource(ctx context.Context, resourceID stri
 		resourceName = "organizations/" + resourceID
 		policy, err := client.GetIamPolicy(ctx, &iampb.GetIamPolicyRequest{Resource: resourceName})
 		if err != nil {
+			policyFailureCache[cacheKey] = true
 			return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 		}
-		return convertPolicyToBindings(policy, resourceID, resourceType, resourceName), nil
+		bindings := convertPolicyToBindings(policy, resourceID, resourceType, resourceName)
+		policyCache[cacheKey] = bindings
+		return bindings, nil
 
 	default:
 		return nil, fmt.Errorf("unsupported resource type: %s", resourceType)
@@ -813,11 +843,19 @@ type EntityPermissions struct {
 // RolePermissions caches role to permissions mapping
 var rolePermissionsCache = make(map[string][]string)
 
+// rolePermissionsFailureCache tracks roles we've already failed to look up (to avoid duplicate error logs)
+var rolePermissionsFailureCache = make(map[string]bool)
+
 // GetRolePermissions retrieves the permissions for a given role
 func (s *IAMService) GetRolePermissions(ctx context.Context, roleName string) ([]string, error) {
 	// Check cache first
 	if perms, ok := rolePermissionsCache[roleName]; ok {
 		return perms, nil
+	}
+
+	// Check if we've already failed to look up this role
+	if rolePermissionsFailureCache[roleName] {
+		return nil, gcpinternal.ErrPermissionDenied
 	}
 
 	var iamService *iam.Service
@@ -852,6 +890,8 @@ func (s *IAMService) GetRolePermissions(ctx context.Context, roleName string) ([
 		// Organization-level custom role
 		role, err := iamService.Organizations.Roles.Get(roleName).Context(ctx).Do()
 		if err != nil {
+			// Cache the failure to avoid repeated error logs
+			rolePermissionsFailureCache[roleName] = true
 			return nil, gcpinternal.ParseGCPError(err, "iam.googleapis.com")
 		}
 		permissions = role.IncludedPermissions
@@ -1438,4 +1478,388 @@ func calculateSAImpersonationRisk(info *SAImpersonationInfo) (string, []string) 
 		return "LOW", reasons
 	}
 	return "INFO", reasons
+}
+
+// ============================================================================
+// Organization and Folder IAM Enumeration
+// ============================================================================
+
+// ScopeBinding represents an IAM binding with full scope information
+type ScopeBinding struct {
+	ScopeType   string        `json:"scopeType"`   // organization, folder, project
+	ScopeID     string        `json:"scopeId"`     // The ID of the scope
+	ScopeName   string        `json:"scopeName"`   // Display name of the scope
+	Member      string        `json:"member"`      // Full member identifier
+	MemberType  string        `json:"memberType"`  // User, ServiceAccount, Group, etc.
+	MemberEmail string        `json:"memberEmail"` // Clean email
+	Role        string        `json:"role"`
+	IsCustom    bool          `json:"isCustom"`
+	HasCondition bool         `json:"hasCondition"`
+	ConditionInfo *IAMCondition `json:"conditionInfo"`
+}
+
+// OrgFolderIAMData holds IAM bindings from organizations and folders
+type OrgFolderIAMData struct {
+	Organizations []ScopeBinding `json:"organizations"`
+	Folders       []ScopeBinding `json:"folders"`
+	OrgNames      map[string]string `json:"orgNames"`    // orgID -> displayName
+	FolderNames   map[string]string `json:"folderNames"` // folderID -> displayName
+}
+
+// GetOrganizationIAM gets IAM bindings for all accessible organizations
+func (s *IAMService) GetOrganizationIAM(ctx context.Context) ([]ScopeBinding, map[string]string, error) {
+	var bindings []ScopeBinding
+	orgNames := make(map[string]string)
+
+	// First, search for accessible organizations
+	var orgsClient *resourcemanager.OrganizationsClient
+	var err error
+	if s.session != nil {
+		orgsClient, err = resourcemanager.NewOrganizationsClient(ctx, s.session.GetClientOption())
+	} else {
+		orgsClient, err = resourcemanager.NewOrganizationsClient(ctx)
+	}
+	if err != nil {
+		return nil, orgNames, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
+	}
+	defer orgsClient.Close()
+
+	// Search for organizations
+	searchReq := &resourcemanagerpb.SearchOrganizationsRequest{}
+	it := orgsClient.SearchOrganizations(ctx, searchReq)
+	for {
+		org, err := it.Next()
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			// Log the error - likely permission denied for organization search
+			parsedErr := gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
+			gcpinternal.HandleGCPError(parsedErr, logger, globals.GCP_IAM_MODULE_NAME, "Could not search organizations")
+			break
+		}
+
+		orgID := strings.TrimPrefix(org.Name, "organizations/")
+		orgNames[orgID] = org.DisplayName
+
+		// Get IAM policy for this organization
+		policy, err := orgsClient.GetIamPolicy(ctx, &iampb.GetIamPolicyRequest{
+			Resource: org.Name,
+		})
+		if err != nil {
+			continue
+		}
+
+		// Convert policy to scope bindings
+		for _, binding := range policy.Bindings {
+			for _, member := range binding.Members {
+				sb := ScopeBinding{
+					ScopeType:   "organization",
+					ScopeID:     orgID,
+					ScopeName:   org.DisplayName,
+					Member:      member,
+					MemberType:  determinePrincipalType(member),
+					MemberEmail: extractEmail(member),
+					Role:        binding.Role,
+					IsCustom:    isCustomRole(binding.Role),
+				}
+				if binding.Condition != nil {
+					sb.HasCondition = true
+					sb.ConditionInfo = &IAMCondition{
+						Title:       binding.Condition.Title,
+						Description: binding.Condition.Description,
+						Expression:  binding.Condition.Expression,
+					}
+				}
+				bindings = append(bindings, sb)
+			}
+		}
+	}
+
+	return bindings, orgNames, nil
+}
+
+// GetFolderIAM gets IAM bindings for all accessible folders
+func (s *IAMService) GetFolderIAM(ctx context.Context) ([]ScopeBinding, map[string]string, error) {
+	var bindings []ScopeBinding
+	folderNames := make(map[string]string)
+
+	var foldersClient *resourcemanager.FoldersClient
+	var err error
+	if s.session != nil {
+		foldersClient, err = resourcemanager.NewFoldersClient(ctx, s.session.GetClientOption())
+	} else {
+		foldersClient, err = resourcemanager.NewFoldersClient(ctx)
+	}
+	if err != nil {
+		return nil, folderNames, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
+	}
+	defer foldersClient.Close()
+
+	// Search for all folders
+	searchReq := &resourcemanagerpb.SearchFoldersRequest{}
+	it := foldersClient.SearchFolders(ctx, searchReq)
+	for {
+		folder, err := it.Next()
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			// Log the error - likely permission denied for folder search
+			parsedErr := gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
+			gcpinternal.HandleGCPError(parsedErr, logger, globals.GCP_IAM_MODULE_NAME, "Could not search folders")
+			break
+		}
+
+		folderID := strings.TrimPrefix(folder.Name, "folders/")
+		folderNames[folderID] = folder.DisplayName
+
+		// Get IAM policy for this folder
+		policy, err := foldersClient.GetIamPolicy(ctx, &iampb.GetIamPolicyRequest{
+			Resource: folder.Name,
+		})
+		if err != nil {
+			continue
+		}
+
+		// Convert policy to scope bindings
+		for _, binding := range policy.Bindings {
+			for _, member := range binding.Members {
+				sb := ScopeBinding{
+					ScopeType:   "folder",
+					ScopeID:     folderID,
+					ScopeName:   folder.DisplayName,
+					Member:      member,
+					MemberType:  determinePrincipalType(member),
+					MemberEmail: extractEmail(member),
+					Role:        binding.Role,
+					IsCustom:    isCustomRole(binding.Role),
+				}
+				if binding.Condition != nil {
+					sb.HasCondition = true
+					sb.ConditionInfo = &IAMCondition{
+						Title:       binding.Condition.Title,
+						Description: binding.Condition.Description,
+						Expression:  binding.Condition.Expression,
+					}
+				}
+				bindings = append(bindings, sb)
+			}
+		}
+	}
+
+	return bindings, folderNames, nil
+}
+
+// GetAllScopeIAM gets IAM bindings from organizations, folders, and projects
+func (s *IAMService) GetAllScopeIAM(ctx context.Context, projectIDs []string, projectNames map[string]string) ([]ScopeBinding, error) {
+	var allBindings []ScopeBinding
+
+	// Get organization IAM
+	orgBindings, _, err := s.GetOrganizationIAM(ctx)
+	if err != nil {
+		// Log but continue - we might not have org access
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_IAM_MODULE_NAME, "Could not enumerate organization IAM")
+	} else {
+		allBindings = append(allBindings, orgBindings...)
+	}
+
+	// Get folder IAM
+	folderBindings, _, err := s.GetFolderIAM(ctx)
+	if err != nil {
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_IAM_MODULE_NAME, "Could not enumerate folder IAM")
+	} else {
+		allBindings = append(allBindings, folderBindings...)
+	}
+
+	// Get project IAM for each project
+	for _, projectID := range projectIDs {
+		projectBindings, err := s.Policies(projectID, "project")
+		if err != nil {
+			gcpinternal.HandleGCPError(err, logger, globals.GCP_IAM_MODULE_NAME,
+				fmt.Sprintf("Could not enumerate IAM for project %s", projectID))
+			continue
+		}
+
+		projectName := projectID
+		if name, ok := projectNames[projectID]; ok {
+			projectName = name
+		}
+
+		for _, pb := range projectBindings {
+			for _, member := range pb.Members {
+				sb := ScopeBinding{
+					ScopeType:   "project",
+					ScopeID:     projectID,
+					ScopeName:   projectName,
+					Member:      member,
+					MemberType:  determinePrincipalType(member),
+					MemberEmail: extractEmail(member),
+					Role:        pb.Role,
+					IsCustom:    isCustomRole(pb.Role),
+				}
+				if pb.HasCondition && pb.ConditionInfo != nil {
+					sb.HasCondition = true
+					sb.ConditionInfo = pb.ConditionInfo
+				}
+				allBindings = append(allBindings, sb)
+			}
+		}
+	}
+
+	return allBindings, nil
+}
+
+// ============================================================================
+// MFA Status Lookup via Cloud Identity API
+// ============================================================================
+
+// MFAStatus represents the MFA status for a user
+type MFAStatus struct {
+	Email      string `json:"email"`
+	HasMFA     bool   `json:"hasMfa"`
+	MFAType    string `json:"mfaType"`    // 2SV method type
+	Enrolled   bool   `json:"enrolled"`   // Whether 2SV is enrolled
+	Enforced   bool   `json:"enforced"`   // Whether 2SV is enforced by policy
+	LastUpdate string `json:"lastUpdate"`
+	Error      string `json:"error"`      // Error message if lookup failed
+}
+
+// GetUserMFAStatus attempts to get MFA status for a user via Cloud Identity API
+// This requires cloudidentity.users.get or admin.directory.users.get permission
+func (s *IAMService) GetUserMFAStatus(ctx context.Context, email string) (*MFAStatus, error) {
+	status := &MFAStatus{
+		Email: email,
+	}
+
+	// Cloud Identity doesn't directly expose 2SV status
+	// We need to use the Admin SDK Directory API which requires admin privileges
+	// For now, we'll attempt to look up the user and note if we can't
+
+	var ciService *cloudidentity.Service
+	var err error
+	if s.session != nil {
+		ciService, err = cloudidentity.NewService(ctx, s.session.GetClientOption())
+	} else {
+		ciService, err = cloudidentity.NewService(ctx)
+	}
+	if err != nil {
+		status.Error = "Cloud Identity API not accessible"
+		return status, nil
+	}
+
+	// Try to look up the user - this gives us some info but not 2SV status directly
+	// The Admin SDK would be needed for full 2SV info
+	lookupReq := ciService.Groups.Lookup()
+	// We can't directly query user 2SV via Cloud Identity
+	// This would require Admin SDK with admin.directory.users.get
+	_ = lookupReq
+
+	status.Error = "2SV status requires Admin SDK access"
+	return status, nil
+}
+
+// GetBulkMFAStatus attempts to get MFA status for multiple users
+// Returns a map of email -> MFAStatus
+func (s *IAMService) GetBulkMFAStatus(ctx context.Context, emails []string) map[string]*MFAStatus {
+	results := make(map[string]*MFAStatus)
+
+	for _, email := range emails {
+		// Skip non-user emails (service accounts, groups, etc.)
+		if strings.HasSuffix(email, ".iam.gserviceaccount.com") {
+			results[email] = &MFAStatus{
+				Email: email,
+				Error: "N/A (service account)",
+			}
+			continue
+		}
+		if strings.Contains(email, "group") || !strings.Contains(email, "@") {
+			results[email] = &MFAStatus{
+				Email: email,
+				Error: "N/A",
+			}
+			continue
+		}
+
+		status, _ := s.GetUserMFAStatus(ctx, email)
+		results[email] = status
+	}
+
+	return results
+}
+
+// ============================================================================
+// Enhanced Combined IAM with All Scopes
+// ============================================================================
+
+// EnhancedIAMData holds comprehensive IAM data including org/folder bindings
+type EnhancedIAMData struct {
+	ScopeBindings   []ScopeBinding           `json:"scopeBindings"`
+	ServiceAccounts []ServiceAccountInfo     `json:"serviceAccounts"`
+	CustomRoles     []CustomRole             `json:"customRoles"`
+	Groups          []GroupInfo              `json:"groups"`
+	MFAStatus       map[string]*MFAStatus    `json:"mfaStatus"`
+}
+
+// CombinedIAMEnhanced retrieves all IAM-related data including org/folder bindings
+func (s *IAMService) CombinedIAMEnhanced(ctx context.Context, projectIDs []string, projectNames map[string]string) (EnhancedIAMData, error) {
+	var data EnhancedIAMData
+	data.MFAStatus = make(map[string]*MFAStatus)
+
+	// Get all scope bindings (org, folder, project)
+	scopeBindings, err := s.GetAllScopeIAM(ctx, projectIDs, projectNames)
+	if err != nil {
+		return data, fmt.Errorf("failed to get scope bindings: %v", err)
+	}
+	data.ScopeBindings = scopeBindings
+
+	// Collect unique user emails for MFA lookup
+	userEmails := make(map[string]bool)
+	for _, sb := range scopeBindings {
+		if sb.MemberType == "User" {
+			userEmails[sb.MemberEmail] = true
+		}
+	}
+
+	// Get MFA status for users (best effort)
+	var emailList []string
+	for email := range userEmails {
+		emailList = append(emailList, email)
+	}
+	data.MFAStatus = s.GetBulkMFAStatus(ctx, emailList)
+
+	// Get service accounts and custom roles for each project
+	for _, projectID := range projectIDs {
+		// Service accounts
+		serviceAccounts, err := s.ServiceAccounts(projectID)
+		if err == nil {
+			data.ServiceAccounts = append(data.ServiceAccounts, serviceAccounts...)
+		}
+
+		// Custom roles
+		customRoles, err := s.CustomRoles(projectID)
+		if err == nil {
+			data.CustomRoles = append(data.CustomRoles, customRoles...)
+		}
+	}
+
+	// Extract groups from scope bindings
+	groupMap := make(map[string]*GroupInfo)
+	for _, sb := range scopeBindings {
+		if sb.MemberType == "Group" {
+			if _, exists := groupMap[sb.MemberEmail]; !exists {
+				groupMap[sb.MemberEmail] = &GroupInfo{
+					Email:     sb.MemberEmail,
+					ProjectID: sb.ScopeID, // Use first scope where seen
+					Roles:     []string{},
+				}
+			}
+			groupMap[sb.MemberEmail].Roles = append(groupMap[sb.MemberEmail].Roles, sb.Role)
+		}
+	}
+	for _, g := range groupMap {
+		data.Groups = append(data.Groups, *g)
+	}
+
+	return data, nil
 }

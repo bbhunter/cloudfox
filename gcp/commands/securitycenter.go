@@ -23,6 +23,7 @@ const GCP_SECURITYCENTER_MODULE_NAME string = "security-center"
 var GCPSecurityCenterCommand = &cobra.Command{
 	Use:     GCP_SECURITYCENTER_MODULE_NAME,
 	Aliases: []string{"scc", "security", "defender"},
+	Hidden:  true,
 	Short:   "Enumerate Security Command Center findings and recommendations",
 	Long: `Enumerate Security Command Center (SCC) findings, assets, and security recommendations.
 
@@ -51,11 +52,9 @@ type SCCFinding struct {
 	ResourceType      string
 	ProjectID         string
 	Description       string
-	Recommendation    string
 	CreateTime        string
 	SourceDisplayName string
 	ExternalURI       string
-	RiskScore         int
 }
 
 type SCCAsset struct {
@@ -135,8 +134,8 @@ func (m *SecurityCenterModule) Execute(ctx context.Context, logger internal.Logg
 	// Create Security Command Center client
 	client, err := securitycenter.NewClient(ctx)
 	if err != nil {
-		logger.ErrorM(fmt.Sprintf("Failed to create Security Command Center client: %v", err), GCP_SECURITYCENTER_MODULE_NAME)
-		logger.InfoM("Ensure the Security Command Center API is enabled and you have appropriate permissions", GCP_SECURITYCENTER_MODULE_NAME)
+		parsedErr := gcpinternal.ParseGCPError(err, "securitycenter.googleapis.com")
+		gcpinternal.HandleGCPError(parsedErr, logger, GCP_SECURITYCENTER_MODULE_NAME, "Failed to create client")
 		return
 	}
 	defer client.Close()
@@ -205,8 +204,9 @@ func (m *SecurityCenterModule) processProject(ctx context.Context, projectID str
 		}
 		if err != nil {
 			m.CommandCounter.Error++
-			gcpinternal.HandleGCPError(err, logger, GCP_SECURITYCENTER_MODULE_NAME,
-				fmt.Sprintf("Could not enumerate findings in project %s", projectID))
+			parsedErr := gcpinternal.ParseGCPError(err, "securitycenter.googleapis.com")
+			gcpinternal.HandleGCPError(parsedErr, logger, GCP_SECURITYCENTER_MODULE_NAME,
+				fmt.Sprintf("Project %s", projectID))
 			break
 		}
 
@@ -298,12 +298,6 @@ func (m *SecurityCenterModule) parseFinding(finding *securitycenterpb.Finding, p
 		}
 	}
 
-	// Calculate risk score based on severity and category
-	sccFinding.RiskScore = calculateRiskScore(sccFinding.Severity, sccFinding.Category)
-
-	// Generate recommendation based on category
-	sccFinding.Recommendation = generateRecommendation(sccFinding.Category, sccFinding.ResourceType)
-
 	return sccFinding
 }
 
@@ -323,207 +317,73 @@ func severityRank(severity string) int {
 	}
 }
 
-// calculateRiskScore calculates a risk score based on severity and category
-func calculateRiskScore(severity, category string) int {
-	baseScore := 0
-	switch severity {
-	case "CRITICAL":
-		baseScore = 90
-	case "HIGH":
-		baseScore = 70
-	case "MEDIUM":
-		baseScore = 50
-	case "LOW":
-		baseScore = 30
-	default:
-		baseScore = 10
-	}
-
-	// Adjust based on category
-	categoryLower := strings.ToLower(category)
-	if strings.Contains(categoryLower, "public") {
-		baseScore += 10
-	}
-	if strings.Contains(categoryLower, "credential") || strings.Contains(categoryLower, "secret") {
-		baseScore += 10
-	}
-	if strings.Contains(categoryLower, "firewall") || strings.Contains(categoryLower, "open") {
-		baseScore += 5
-	}
-
-	if baseScore > 100 {
-		baseScore = 100
-	}
-	return baseScore
-}
-
-// generateRecommendation generates a remediation recommendation based on category
-func generateRecommendation(category, resourceType string) string {
-	categoryLower := strings.ToLower(category)
-
-	switch {
-	case strings.Contains(categoryLower, "public"):
-		return "Restrict public access and implement proper network controls"
-	case strings.Contains(categoryLower, "firewall"):
-		return "Review and restrict firewall rules to limit exposure"
-	case strings.Contains(categoryLower, "encryption"):
-		return "Enable encryption at rest and in transit"
-	case strings.Contains(categoryLower, "iam"):
-		return "Review IAM permissions and apply least privilege principle"
-	case strings.Contains(categoryLower, "logging"):
-		return "Enable audit logging and monitoring"
-	case strings.Contains(categoryLower, "mfa") || strings.Contains(categoryLower, "2sv"):
-		return "Enable multi-factor authentication"
-	case strings.Contains(categoryLower, "ssl") || strings.Contains(categoryLower, "tls"):
-		return "Upgrade to TLS 1.2+ and disable weak ciphers"
-	case strings.Contains(categoryLower, "password"):
-		return "Implement strong password policies"
-	case strings.Contains(categoryLower, "key"):
-		return "Rotate keys and implement key management best practices"
-	case strings.Contains(categoryLower, "backup"):
-		return "Implement backup and disaster recovery procedures"
-	default:
-		return "Review finding and implement appropriate security controls"
-	}
-}
-
 // ------------------------------
 // Loot File Management
 // ------------------------------
 func (m *SecurityCenterModule) initializeLootFiles() {
-	m.LootMap["scc-critical-findings"] = &internal.LootFile{
-		Name:     "scc-critical-findings",
-		Contents: "# Security Command Center - Critical Findings\n# Generated by CloudFox\n# These require immediate attention!\n\n",
-	}
-	m.LootMap["scc-high-severity"] = &internal.LootFile{
-		Name:     "scc-high-severity",
-		Contents: "# Security Command Center - High Severity Findings\n# Generated by CloudFox\n\n",
-	}
-	m.LootMap["scc-remediation-commands"] = &internal.LootFile{
-		Name:     "scc-remediation-commands",
-		Contents: "# Security Command Center - Remediation Commands\n# Generated by CloudFox\n# These commands can help address security findings\n\n",
-	}
-	m.LootMap["scc-affected-assets"] = &internal.LootFile{
-		Name:     "scc-affected-assets",
-		Contents: "# Security Command Center - Affected Assets\n# Generated by CloudFox\n\n",
-	}
-	m.LootMap["scc-exploitation-commands"] = &internal.LootFile{
-		Name:     "scc-exploitation-commands",
-		Contents: "# Security Command Center - Exploitation Commands\n# Generated by CloudFox\n# WARNING: Only use with proper authorization!\n\n",
+	m.LootMap["security-center-commands"] = &internal.LootFile{
+		Name: "security-center-commands",
+		Contents: "# Security Command Center Commands\n" +
+			"# Generated by CloudFox\n" +
+			"# WARNING: Only use with proper authorization\n\n",
 	}
 }
 
 func (m *SecurityCenterModule) addFindingToLoot(finding SCCFinding, projectID string) {
-	// Critical findings
-	if finding.Severity == "CRITICAL" {
-		m.LootMap["scc-critical-findings"].Contents += fmt.Sprintf(
-			"## Finding: %s\n"+
-				"Category: %s\n"+
-				"Resource: %s\n"+
-				"Project: %s\n"+
-				"Risk Score: %d\n"+
-				"Description: %s\n"+
-				"Recommendation: %s\n\n",
-			finding.Name,
-			finding.Category,
-			finding.ResourceName,
-			projectID,
-			finding.RiskScore,
-			finding.Description,
-			finding.Recommendation,
-		)
+	// Only add CRITICAL and HIGH severity findings to loot
+	if finding.Severity != "CRITICAL" && finding.Severity != "HIGH" {
+		return
 	}
 
-	// High severity findings
-	if finding.Severity == "HIGH" {
-		m.LootMap["scc-high-severity"].Contents += fmt.Sprintf(
-			"## Finding: %s\n"+
-				"Category: %s\n"+
-				"Resource: %s\n"+
-				"Project: %s\n"+
-				"Recommendation: %s\n\n",
-			finding.Name,
-			finding.Category,
-			finding.ResourceName,
-			projectID,
-			finding.Recommendation,
-		)
+	m.LootMap["security-center-commands"].Contents += fmt.Sprintf(
+		"## Finding: %s (%s)\n"+
+			"# Category: %s\n"+
+			"# Resource: %s\n"+
+			"# Project: %s\n",
+		finding.Name, finding.Severity,
+		finding.Category,
+		finding.ResourceName,
+		projectID,
+	)
+
+	if finding.Description != "" {
+		m.LootMap["security-center-commands"].Contents += fmt.Sprintf("# Description: %s\n", finding.Description)
 	}
 
-	// Remediation commands based on category
+	if finding.ExternalURI != "" {
+		m.LootMap["security-center-commands"].Contents += fmt.Sprintf("# Console URL: %s\n", finding.ExternalURI)
+	}
+
+	// Add gcloud commands
+	m.LootMap["security-center-commands"].Contents += fmt.Sprintf(
+		"\n# View finding details:\n"+
+			"gcloud scc findings list --source=\"-\" --project=%s --filter=\"name:\\\"%s\\\"\"\n\n",
+		projectID, finding.Name,
+	)
+
+	// Add specific commands based on category
 	categoryLower := strings.ToLower(finding.Category)
-	if finding.Severity == "CRITICAL" || finding.Severity == "HIGH" {
-		m.LootMap["scc-remediation-commands"].Contents += fmt.Sprintf(
-			"# %s (%s)\n"+
-				"# Resource: %s\n",
-			finding.Category,
-			finding.Severity,
+	switch {
+	case strings.Contains(categoryLower, "public_bucket"):
+		m.LootMap["security-center-commands"].Contents += fmt.Sprintf(
+			"# Remove public access:\n"+
+				"gsutil iam ch -d allUsers:objectViewer %s\n"+
+				"gsutil iam ch -d allAuthenticatedUsers:objectViewer %s\n\n",
+			finding.ResourceName,
 			finding.ResourceName,
 		)
-
-		// Add specific remediation commands based on category
-		switch {
-		case strings.Contains(categoryLower, "public_bucket"):
-			m.LootMap["scc-remediation-commands"].Contents += fmt.Sprintf(
-				"gsutil iam ch -d allUsers:objectViewer %s\n"+
-					"gsutil iam ch -d allAuthenticatedUsers:objectViewer %s\n\n",
-				finding.ResourceName,
-				finding.ResourceName,
-			)
-		case strings.Contains(categoryLower, "firewall"):
-			m.LootMap["scc-remediation-commands"].Contents += fmt.Sprintf(
-				"# Review firewall rule:\n"+
-					"gcloud compute firewall-rules describe %s --project=%s\n"+
-					"# Delete if unnecessary:\n"+
-					"# gcloud compute firewall-rules delete %s --project=%s\n\n",
-				finding.ResourceName,
-				projectID,
-				finding.ResourceName,
-				projectID,
-			)
-		case strings.Contains(categoryLower, "service_account_key"):
-			m.LootMap["scc-remediation-commands"].Contents += fmt.Sprintf(
-				"# List and delete old keys:\n"+
-					"gcloud iam service-accounts keys list --iam-account=%s\n\n",
-				finding.ResourceName,
-			)
-		default:
-			m.LootMap["scc-remediation-commands"].Contents += fmt.Sprintf(
-				"# See SCC console for detailed remediation steps:\n"+
-					"# %s\n\n",
-				finding.ExternalURI,
-			)
-		}
-
-		// Add exploitation commands for pentest
-		switch {
-		case strings.Contains(categoryLower, "public"):
-			m.LootMap["scc-exploitation-commands"].Contents += fmt.Sprintf(
-				"# Publicly accessible resource: %s\n"+
-					"# Category: %s\n"+
-					"# Attempt to access without authentication\n\n",
-				finding.ResourceName,
-				finding.Category,
-			)
-		case strings.Contains(categoryLower, "firewall"):
-			m.LootMap["scc-exploitation-commands"].Contents += fmt.Sprintf(
-				"# Open firewall rule detected: %s\n"+
-					"# Category: %s\n"+
-					"# Scan for accessible services:\n"+
-					"# nmap -Pn -p- <target_ip>\n\n",
-				finding.ResourceName,
-				finding.Category,
-			)
-		}
-	}
-
-	// Track affected assets
-	if finding.ResourceName != "" {
-		m.LootMap["scc-affected-assets"].Contents += fmt.Sprintf(
-			"%s (%s) - %s\n",
+	case strings.Contains(categoryLower, "firewall"):
+		m.LootMap["security-center-commands"].Contents += fmt.Sprintf(
+			"# Review firewall rule:\n"+
+				"gcloud compute firewall-rules describe %s --project=%s\n\n",
 			finding.ResourceName,
-			finding.Severity,
-			finding.Category,
+			projectID,
+		)
+	case strings.Contains(categoryLower, "service_account_key"):
+		m.LootMap["security-center-commands"].Contents += fmt.Sprintf(
+			"# List service account keys:\n"+
+				"gcloud iam service-accounts keys list --iam-account=%s\n\n",
+			finding.ResourceName,
 		)
 	}
 }
@@ -539,107 +399,77 @@ func (m *SecurityCenterModule) writeOutput(ctx context.Context, logger internal.
 
 	// Main findings table
 	findingsHeader := []string{
+		"Project Name",
+		"Project ID",
 		"Severity",
 		"Category",
 		"Resource",
-		"Project Name",
-		"Project ID",
-		"Risk Score",
+		"Resource Type",
+		"State",
 		"Created",
+		"External URI",
 	}
 
 	var findingsBody [][]string
 	for _, f := range m.Findings {
+		resourceType := f.ResourceType
+		if resourceType == "" {
+			resourceType = "-"
+		}
+		externalURI := f.ExternalURI
+		if externalURI == "" {
+			externalURI = "-"
+		}
+
 		findingsBody = append(findingsBody, []string{
-			f.Severity,
-			f.Category,
-			sccTruncateString(f.ResourceName, 60),
 			m.GetProjectName(f.ProjectID),
 			f.ProjectID,
-			fmt.Sprintf("%d", f.RiskScore),
+			f.Severity,
+			f.Category,
+			f.ResourceName,
+			resourceType,
+			f.State,
 			f.CreateTime,
+			externalURI,
 		})
-	}
-
-	// Critical/High findings table
-	criticalHeader := []string{
-		"Category",
-		"Resource",
-		"Project Name",
-		"Project ID",
-		"Description",
-		"Recommendation",
-	}
-
-	var criticalBody [][]string
-	for _, f := range m.Findings {
-		if f.Severity == "CRITICAL" || f.Severity == "HIGH" {
-			criticalBody = append(criticalBody, []string{
-				f.Category,
-				sccTruncateString(f.ResourceName, 50),
-				m.GetProjectName(f.ProjectID),
-				f.ProjectID,
-				sccTruncateString(f.Description, 60),
-				sccTruncateString(f.Recommendation, 50),
-			})
-		}
 	}
 
 	// Assets table
 	assetsHeader := []string{
-		"Resource",
-		"Type",
 		"Project Name",
 		"Project ID",
+		"Resource",
+		"Resource Type",
 		"Finding Count",
 		"Max Severity",
 	}
 
 	var assetsBody [][]string
 	for _, asset := range m.Assets {
+		resourceType := asset.ResourceType
+		if resourceType == "" {
+			resourceType = "-"
+		}
+
 		assetsBody = append(assetsBody, []string{
-			sccTruncateString(asset.ResourceName, 60),
-			asset.ResourceType,
 			m.GetProjectName(asset.ProjectID),
 			asset.ProjectID,
+			asset.ResourceName,
+			resourceType,
 			fmt.Sprintf("%d", asset.FindingCount),
 			asset.Severity,
 		})
 	}
 
-	// Sort assets by finding count (index 4 now, not 3, since we added Project Name column)
+	// Sort assets by finding count
 	sort.Slice(assetsBody, func(i, j int) bool {
 		return assetsBody[i][4] > assetsBody[j][4]
 	})
 
-	// Summary by category
-	categoryCount := make(map[string]int)
-	for _, f := range m.Findings {
-		categoryCount[f.Category]++
-	}
-
-	summaryHeader := []string{
-		"Category",
-		"Finding Count",
-	}
-
-	var summaryBody [][]string
-	for cat, count := range categoryCount {
-		summaryBody = append(summaryBody, []string{
-			cat,
-			fmt.Sprintf("%d", count),
-		})
-	}
-
-	// Sort summary by count
-	sort.Slice(summaryBody, func(i, j int) bool {
-		return summaryBody[i][1] > summaryBody[j][1]
-	})
-
-	// Collect loot files
+	// Collect loot files - only include if they have content beyond the header
 	var lootFiles []internal.LootFile
 	for _, loot := range m.LootMap {
-		if loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# Generated by CloudFox\n\n") {
+		if loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# WARNING: Only use with proper authorization\n\n") {
 			lootFiles = append(lootFiles, *loot)
 		}
 	}
@@ -653,31 +483,12 @@ func (m *SecurityCenterModule) writeOutput(ctx context.Context, logger internal.
 		},
 	}
 
-	// Add critical/high findings table if any
-	if len(criticalBody) > 0 {
-		tables = append(tables, internal.TableFile{
-			Name:   "scc-critical-high",
-			Header: criticalHeader,
-			Body:   criticalBody,
-		})
-		logger.InfoM(fmt.Sprintf("[FINDING] Found %d CRITICAL/HIGH severity finding(s)", len(criticalBody)), GCP_SECURITYCENTER_MODULE_NAME)
-	}
-
 	// Add assets table if any
 	if len(assetsBody) > 0 {
 		tables = append(tables, internal.TableFile{
 			Name:   "scc-assets",
 			Header: assetsHeader,
 			Body:   assetsBody,
-		})
-	}
-
-	// Add summary table
-	if len(summaryBody) > 0 {
-		tables = append(tables, internal.TableFile{
-			Name:   "scc-summary",
-			Header: summaryHeader,
-			Body:   summaryBody,
 		})
 	}
 
@@ -709,12 +520,4 @@ func (m *SecurityCenterModule) writeOutput(ctx context.Context, logger internal.
 		logger.ErrorM(fmt.Sprintf("Error writing output: %v", err), GCP_SECURITYCENTER_MODULE_NAME)
 		m.CommandCounter.Error++
 	}
-}
-
-// sccTruncateString truncates a string to max length with ellipsis
-func sccTruncateString(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen-3] + "..."
 }

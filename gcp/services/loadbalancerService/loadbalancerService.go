@@ -43,10 +43,6 @@ type LoadBalancerInfo struct {
 
 	// Security config
 	SecurityPolicy  string   `json:"securityPolicy"` // Cloud Armor
-
-	// Security analysis
-	RiskLevel       string   `json:"riskLevel"`
-	RiskReasons     []string `json:"riskReasons"`
 }
 
 // SSLPolicyInfo represents an SSL policy
@@ -56,8 +52,6 @@ type SSLPolicyInfo struct {
 	MinTLSVersion  string   `json:"minTlsVersion"`
 	Profile        string   `json:"profile"` // COMPATIBLE, MODERN, RESTRICTED, CUSTOM
 	CustomFeatures []string `json:"customFeatures"`
-	RiskLevel      string   `json:"riskLevel"`
-	RiskReasons    []string `json:"riskReasons"`
 }
 
 // BackendServiceInfo represents a backend service
@@ -72,8 +66,6 @@ type BackendServiceInfo struct {
 	SessionAffinity   string   `json:"sessionAffinity"`
 	ConnectionDraining int64   `json:"connectionDraining"`
 	Backends          []string `json:"backends"`
-	RiskLevel         string   `json:"riskLevel"`
-	RiskReasons       []string `json:"riskReasons"`
 }
 
 // ListLoadBalancers retrieves all load balancers in a project
@@ -148,9 +140,7 @@ func (s *LoadBalancerService) ListSSLPolicies(projectID string) ([]SSLPolicyInfo
 			MinTLSVersion:  policy.MinTlsVersion,
 			Profile:        policy.Profile,
 			CustomFeatures: policy.CustomFeatures,
-			RiskReasons:    []string{},
 		}
-		info.RiskLevel, info.RiskReasons = s.analyzeSSLPolicyRisk(info)
 		policies = append(policies, info)
 	}
 
@@ -202,13 +192,12 @@ func (s *LoadBalancerService) ListBackendServices(projectID string) ([]BackendSe
 
 func (s *LoadBalancerService) parseForwardingRule(rule *compute.ForwardingRule, projectID, region string) LoadBalancerInfo {
 	info := LoadBalancerInfo{
-		Name:        rule.Name,
-		ProjectID:   projectID,
-		Region:      region,
-		IPAddress:   rule.IPAddress,
-		Port:        rule.PortRange,
-		Protocol:    rule.IPProtocol,
-		RiskReasons: []string{},
+		Name:      rule.Name,
+		ProjectID: projectID,
+		Region:    region,
+		IPAddress: rule.IPAddress,
+		Port:      rule.PortRange,
+		Protocol:  rule.IPProtocol,
 	}
 
 	// Determine load balancer type
@@ -238,20 +227,17 @@ func (s *LoadBalancerService) parseForwardingRule(rule *compute.ForwardingRule, 
 		info.BackendServices = []string{extractName(rule.BackendService)}
 	}
 
-	info.RiskLevel, info.RiskReasons = s.analyzeLoadBalancerRisk(info)
-
 	return info
 }
 
 func (s *LoadBalancerService) parseBackendService(backend *compute.BackendService, projectID string) BackendServiceInfo {
 	info := BackendServiceInfo{
-		Name:              backend.Name,
-		ProjectID:         projectID,
-		Protocol:          backend.Protocol,
-		Port:              backend.Port,
-		EnableCDN:         backend.EnableCDN,
-		SessionAffinity:   backend.SessionAffinity,
-		RiskReasons:       []string{},
+		Name:            backend.Name,
+		ProjectID:       projectID,
+		Protocol:        backend.Protocol,
+		Port:            backend.Port,
+		EnableCDN:       backend.EnableCDN,
+		SessionAffinity: backend.SessionAffinity,
 	}
 
 	if backend.SecurityPolicy != "" {
@@ -270,99 +256,12 @@ func (s *LoadBalancerService) parseBackendService(backend *compute.BackendServic
 		info.Backends = append(info.Backends, extractName(be.Group))
 	}
 
-	info.RiskLevel, info.RiskReasons = s.analyzeBackendServiceRisk(info)
-
 	return info
 }
 
 func (s *LoadBalancerService) parseRegionalBackendService(backend *compute.BackendService, projectID, region string) BackendServiceInfo {
 	info := s.parseBackendService(backend, projectID)
 	return info
-}
-
-func (s *LoadBalancerService) analyzeLoadBalancerRisk(lb LoadBalancerInfo) (string, []string) {
-	var reasons []string
-	score := 0
-
-	// External load balancer
-	if lb.Scheme == "EXTERNAL" {
-		reasons = append(reasons, "External-facing load balancer")
-		score += 1
-	}
-
-	// No SSL for external
-	if lb.Scheme == "EXTERNAL" && lb.Type != "HTTPS" && lb.Type != "SSL_PROXY" {
-		reasons = append(reasons, "External LB without HTTPS/SSL")
-		score += 2
-	}
-
-	// Check for weak SSL policy would require additional lookup
-	if lb.SSLPolicy == "" && (lb.Type == "HTTPS" || lb.Type == "SSL_PROXY") {
-		reasons = append(reasons, "No custom SSL policy (using default)")
-		score += 1
-	}
-
-	if score >= 3 {
-		return "HIGH", reasons
-	} else if score >= 2 {
-		return "MEDIUM", reasons
-	} else if score >= 1 {
-		return "LOW", reasons
-	}
-	return "INFO", reasons
-}
-
-func (s *LoadBalancerService) analyzeSSLPolicyRisk(policy SSLPolicyInfo) (string, []string) {
-	var reasons []string
-	score := 0
-
-	// Weak TLS version
-	if policy.MinTLSVersion == "TLS_1_0" {
-		reasons = append(reasons, "Allows TLS 1.0 (deprecated)")
-		score += 3
-	} else if policy.MinTLSVersion == "TLS_1_1" {
-		reasons = append(reasons, "Allows TLS 1.1 (deprecated)")
-		score += 2
-	}
-
-	// COMPATIBLE profile allows weak ciphers
-	if policy.Profile == "COMPATIBLE" {
-		reasons = append(reasons, "COMPATIBLE profile allows weak ciphers")
-		score += 1
-	}
-
-	if score >= 3 {
-		return "HIGH", reasons
-	} else if score >= 2 {
-		return "MEDIUM", reasons
-	} else if score >= 1 {
-		return "LOW", reasons
-	}
-	return "INFO", reasons
-}
-
-func (s *LoadBalancerService) analyzeBackendServiceRisk(backend BackendServiceInfo) (string, []string) {
-	var reasons []string
-	score := 0
-
-	// No Cloud Armor policy
-	if backend.SecurityPolicy == "" {
-		reasons = append(reasons, "No Cloud Armor security policy attached")
-		score += 1
-	}
-
-	// No health check
-	if backend.HealthCheck == "" {
-		reasons = append(reasons, "No health check configured")
-		score += 1
-	}
-
-	if score >= 2 {
-		return "MEDIUM", reasons
-	} else if score >= 1 {
-		return "LOW", reasons
-	}
-	return "INFO", reasons
 }
 
 func extractName(fullPath string) string {

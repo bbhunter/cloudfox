@@ -24,6 +24,7 @@ const GCP_COMPLIANCEDASHBOARD_MODULE_NAME string = "compliance-dashboard"
 var GCPComplianceDashboardCommand = &cobra.Command{
 	Use:     GCP_COMPLIANCEDASHBOARD_MODULE_NAME,
 	Aliases: []string{"compliance", "cis", "benchmark"},
+	Hidden:  true,
 	Short:   "Assess regulatory compliance against CIS GCP Benchmarks and security frameworks",
 	Long: `Assess regulatory compliance posture against industry standards and security frameworks.
 
@@ -1676,11 +1677,11 @@ func (m *ComplianceDashboardModule) writeOutput(ctx context.Context, logger inte
 		}
 		controlsBody = append(controlsBody, []string{
 			c.ControlID,
-			truncateString(c.ControlName, 50),
+			c.ControlName,
 			c.Framework,
 			c.Severity,
 			c.Status,
-			truncateString(details, 40),
+			details,
 		})
 	}
 
@@ -1700,7 +1701,7 @@ func (m *ComplianceDashboardModule) writeOutput(ctx context.Context, logger inte
 		failuresBody = append(failuresBody, []string{
 			f.ControlID,
 			f.Severity,
-			truncateString(f.ResourceName, 50),
+			f.ResourceName,
 			f.ResourceType,
 			m.GetProjectName(f.ProjectID),
 			f.ProjectID,

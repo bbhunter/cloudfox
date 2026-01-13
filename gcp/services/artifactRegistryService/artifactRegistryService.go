@@ -3,6 +3,7 @@ package artifactregistryservice
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -294,11 +295,17 @@ func parseDockerImageName(imageName string) DockerImageDetails {
 	imageName = imageAndDigest[0]
 	digest := imageAndDigest[1]
 
+	// URL-decode the image name (e.g., "library%2Fnginx" -> "library/nginx")
+	decodedImageName, err := url.PathUnescape(imageName)
+	if err != nil {
+		decodedImageName = imageName // fallback to original if decode fails
+	}
+
 	return DockerImageDetails{
 		ProjectID:  projectID,
 		Location:   location,
 		Repository: repository,
-		ImageName:  imageName,
+		ImageName:  decodedImageName,
 		Digest:     digest,
 	}
 }

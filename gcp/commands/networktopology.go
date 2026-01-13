@@ -73,6 +73,12 @@ type Subnet struct {
 	Purpose               string
 	Role                  string
 	StackType             string
+	IAMBindings           []SubnetIAMBinding
+}
+
+type SubnetIAMBinding struct {
+	Role   string
+	Member string
 }
 
 type VPCPeering struct {
@@ -109,14 +115,6 @@ type CloudNATConfig struct {
 	EnableLogging        bool
 }
 
-type TrustBoundary struct {
-	Name        string
-	Type        string // "vpc-peering", "shared-vpc", "service-perimeter"
-	SourceScope string
-	TargetScope string
-	RiskLevel   string
-	Details     string
-}
 
 type NetworkRoute struct {
 	Name        string
@@ -135,16 +133,14 @@ type NetworkRoute struct {
 type NetworkTopologyModule struct {
 	gcpinternal.BaseGCPModule
 
-	// Module-specific fields
-	Networks       []VPCNetwork
-	Subnets        []Subnet
-	Peerings       []VPCPeering
-	SharedVPCs     map[string]*SharedVPCConfig
-	NATs           []CloudNATConfig
-	TrustBoundarie []TrustBoundary
-	Routes         []NetworkRoute
-	LootMap        map[string]*internal.LootFile
-	mu             sync.Mutex
+	Networks   []VPCNetwork
+	Subnets    []Subnet
+	Peerings   []VPCPeering
+	SharedVPCs map[string]*SharedVPCConfig
+	NATs       []CloudNATConfig
+	Routes     []NetworkRoute
+	LootMap    map[string]*internal.LootFile
+	mu         sync.Mutex
 }
 
 // ------------------------------
@@ -170,15 +166,14 @@ func runGCPNetworkTopologyCommand(cmd *cobra.Command, args []string) {
 
 	// Create module instance
 	module := &NetworkTopologyModule{
-		BaseGCPModule:  gcpinternal.NewBaseGCPModule(cmdCtx),
-		Networks:       []VPCNetwork{},
-		Subnets:        []Subnet{},
-		Peerings:       []VPCPeering{},
-		SharedVPCs:     make(map[string]*SharedVPCConfig),
-		NATs:           []CloudNATConfig{},
-		TrustBoundarie: []TrustBoundary{},
-		Routes:         []NetworkRoute{},
-		LootMap:        make(map[string]*internal.LootFile),
+		BaseGCPModule: gcpinternal.NewBaseGCPModule(cmdCtx),
+		Networks:      []VPCNetwork{},
+		Subnets:       []Subnet{},
+		Peerings:      []VPCPeering{},
+		SharedVPCs:    make(map[string]*SharedVPCConfig),
+		NATs:          []CloudNATConfig{},
+		Routes:        []NetworkRoute{},
+		LootMap:       make(map[string]*internal.LootFile),
 	}
 
 	// Initialize loot files
@@ -192,8 +187,6 @@ func runGCPNetworkTopologyCommand(cmd *cobra.Command, args []string) {
 // Module Execution
 // ------------------------------
 func (m *NetworkTopologyModule) Execute(ctx context.Context, logger internal.Logger) {
-	logger.InfoM("Mapping network topology and trust boundaries...", GCP_NETWORKTOPOLOGY_MODULE_NAME)
-
 	// Create Compute client
 	computeService, err := compute.NewService(ctx)
 	if err != nil {
@@ -212,23 +205,15 @@ func (m *NetworkTopologyModule) Execute(ctx context.Context, logger internal.Log
 	}
 	wg.Wait()
 
-	// Analyze trust boundaries
-	m.analyzeTrustBoundaries(logger)
-
 	// Check results
 	if len(m.Networks) == 0 {
 		logger.InfoM("No VPC networks found", GCP_NETWORKTOPOLOGY_MODULE_NAME)
 		return
 	}
 
-	logger.SuccessM(fmt.Sprintf("Mapped %d VPC network(s), %d subnet(s), %d peering(s)",
-		len(m.Networks), len(m.Subnets), len(m.Peerings)), GCP_NETWORKTOPOLOGY_MODULE_NAME)
+	logger.SuccessM(fmt.Sprintf("Found %d VPC network(s), %d subnet(s), %d peering(s), %d Cloud NAT(s)",
+		len(m.Networks), len(m.Subnets), len(m.Peerings), len(m.NATs)), GCP_NETWORKTOPOLOGY_MODULE_NAME)
 
-	if len(m.TrustBoundarie) > 0 {
-		logger.InfoM(fmt.Sprintf("[FINDING] Found %d trust boundary relationship(s)", len(m.TrustBoundarie)), GCP_NETWORKTOPOLOGY_MODULE_NAME)
-	}
-
-	// Write output
 	m.writeOutput(ctx, logger)
 }
 
@@ -319,12 +304,13 @@ func (m *NetworkTopologyModule) enumerateSubnets(ctx context.Context, projectID 
 			if subnetList.Subnetworks == nil {
 				continue
 			}
+			regionName := m.extractRegionFromURL(region)
 			for _, subnet := range subnetList.Subnetworks {
 				subnetRecord := Subnet{
 					Name:                  subnet.Name,
 					ProjectID:             projectID,
 					Network:               subnet.Network,
-					Region:                m.extractRegionFromURL(region),
+					Region:                regionName,
 					IPCIDRRange:           subnet.IpCidrRange,
 					PrivateIPGoogleAccess: subnet.PrivateIpGoogleAccess,
 					Purpose:               subnet.Purpose,
@@ -343,6 +329,9 @@ func (m *NetworkTopologyModule) enumerateSubnets(ctx context.Context, projectID 
 						fmt.Sprintf("%s:%s", sr.RangeName, sr.IpCidrRange))
 				}
 
+				// Get IAM bindings for the subnet
+				subnetRecord.IAMBindings = m.getSubnetIAMBindings(ctx, computeService, projectID, regionName, subnet.Name)
+
 				m.mu.Lock()
 				m.Subnets = append(m.Subnets, subnetRecord)
 				m.mu.Unlock()
@@ -356,6 +345,28 @@ func (m *NetworkTopologyModule) enumerateSubnets(ctx context.Context, projectID 
 		gcpinternal.HandleGCPError(err, logger, GCP_NETWORKTOPOLOGY_MODULE_NAME,
 			fmt.Sprintf("Could not list subnets in project %s", projectID))
 	}
+}
+
+// getSubnetIAMBindings retrieves IAM bindings for a subnet
+func (m *NetworkTopologyModule) getSubnetIAMBindings(ctx context.Context, computeService *compute.Service, projectID, region, subnetName string) []SubnetIAMBinding {
+	policy, err := computeService.Subnetworks.GetIamPolicy(projectID, region, subnetName).Context(ctx).Do()
+	if err != nil {
+		return nil
+	}
+
+	var bindings []SubnetIAMBinding
+	for _, binding := range policy.Bindings {
+		if binding == nil {
+			continue
+		}
+		for _, member := range binding.Members {
+			bindings = append(bindings, SubnetIAMBinding{
+				Role:   binding.Role,
+				Member: member,
+			})
+		}
+	}
+	return bindings
 }
 
 func (m *NetworkTopologyModule) enumerateRoutes(ctx context.Context, projectID string, computeService *compute.Service, logger internal.Logger) {
@@ -506,86 +517,6 @@ func (m *NetworkTopologyModule) checkSharedVPCHost(ctx context.Context, projectI
 	}
 }
 
-// ------------------------------
-// Trust Boundary Analysis
-// ------------------------------
-func (m *NetworkTopologyModule) analyzeTrustBoundaries(logger internal.Logger) {
-	// Analyze VPC peering trust boundaries
-	for _, peering := range m.Peerings {
-		boundary := TrustBoundary{
-			Name:        peering.Name,
-			Type:        "vpc-peering",
-			SourceScope: fmt.Sprintf("projects/%s/networks/%s", peering.ProjectID, m.extractNetworkName(peering.Network)),
-			TargetScope: peering.PeerNetwork,
-		}
-
-		// Assess risk level
-		if peering.ProjectID != peering.PeerProjectID {
-			boundary.RiskLevel = "HIGH"
-			boundary.Details = "Cross-project VPC peering enables network connectivity between different projects"
-		} else {
-			boundary.RiskLevel = "MEDIUM"
-			boundary.Details = "Same-project VPC peering enables connectivity between networks"
-		}
-
-		// Check route sharing
-		if peering.ExportCustomRoute || peering.ImportCustomRoute {
-			boundary.Details += "; Custom routes are shared"
-		}
-
-		m.mu.Lock()
-		m.TrustBoundarie = append(m.TrustBoundarie, boundary)
-		m.mu.Unlock()
-
-		// Add to loot
-		m.addTrustBoundaryToLoot(boundary)
-	}
-
-	// Analyze Shared VPC trust boundaries
-	for hostProject, config := range m.SharedVPCs {
-		for _, serviceProject := range config.ServiceProjects {
-			boundary := TrustBoundary{
-				Name:        fmt.Sprintf("shared-vpc-%s-%s", hostProject, serviceProject),
-				Type:        "shared-vpc",
-				SourceScope: fmt.Sprintf("projects/%s", hostProject),
-				TargetScope: fmt.Sprintf("projects/%s", serviceProject),
-				RiskLevel:   "MEDIUM",
-				Details:     fmt.Sprintf("Shared VPC: %s provides network resources to %s", hostProject, serviceProject),
-			}
-
-			m.mu.Lock()
-			m.TrustBoundarie = append(m.TrustBoundarie, boundary)
-			m.mu.Unlock()
-
-			m.addTrustBoundaryToLoot(boundary)
-		}
-	}
-
-	// Analyze routes for potential trust issues
-	for _, route := range m.Routes {
-		if route.NextHopType == "vpn" || route.NextHopType == "peering" {
-			boundary := TrustBoundary{
-				Name:        route.Name,
-				Type:        "network-route",
-				SourceScope: route.Network,
-				TargetScope: route.NextHop,
-				RiskLevel:   "LOW",
-				Details:     fmt.Sprintf("Route to %s via %s", route.DestRange, route.NextHopType),
-			}
-
-			// Elevated risk for default route (0.0.0.0/0) going through external paths
-			if route.DestRange == "0.0.0.0/0" && (route.NextHopType == "vpn" || route.NextHopType == "peering") {
-				boundary.RiskLevel = "HIGH"
-				boundary.Details = fmt.Sprintf("Default route (%s) via %s - all internet traffic routes through external path",
-					route.DestRange, route.NextHopType)
-			}
-
-			m.mu.Lock()
-			m.TrustBoundarie = append(m.TrustBoundarie, boundary)
-			m.mu.Unlock()
-		}
-	}
-}
 
 // ------------------------------
 // Helper Functions
@@ -629,47 +560,10 @@ func (m *NetworkTopologyModule) extractRegionFromURL(url string) string {
 // Loot File Management
 // ------------------------------
 func (m *NetworkTopologyModule) initializeLootFiles() {
-	m.LootMap["network-topology"] = &internal.LootFile{
-		Name:     "network-topology",
-		Contents: "# Network Topology Map\n# Generated by CloudFox\n\n",
+	m.LootMap["network-topology-commands"] = &internal.LootFile{
+		Name:     "network-topology-commands",
+		Contents: "# Network Topology Commands\n# Generated by CloudFox\n# WARNING: Only use with proper authorization\n\n",
 	}
-	m.LootMap["peering-analysis"] = &internal.LootFile{
-		Name:     "peering-analysis",
-		Contents: "# VPC Peering Analysis\n# Generated by CloudFox\n\n",
-	}
-	m.LootMap["shared-vpc-commands"] = &internal.LootFile{
-		Name:     "shared-vpc-commands",
-		Contents: "# Shared VPC Analysis Commands\n# Generated by CloudFox\n\n",
-	}
-	m.LootMap["trust-boundaries"] = &internal.LootFile{
-		Name:     "trust-boundaries",
-		Contents: "# Trust Boundary Analysis\n# Generated by CloudFox\n\n",
-	}
-	m.LootMap["nat-analysis"] = &internal.LootFile{
-		Name:     "nat-analysis",
-		Contents: "# Cloud NAT Configuration Analysis\n# Generated by CloudFox\n\n",
-	}
-}
-
-func (m *NetworkTopologyModule) addTrustBoundaryToLoot(boundary TrustBoundary) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	m.LootMap["trust-boundaries"].Contents += fmt.Sprintf(
-		"## %s (%s)\n"+
-			"Type: %s\n"+
-			"Source: %s\n"+
-			"Target: %s\n"+
-			"Risk Level: %s\n"+
-			"Details: %s\n\n",
-		boundary.Name,
-		boundary.RiskLevel,
-		boundary.Type,
-		boundary.SourceScope,
-		boundary.TargetScope,
-		boundary.RiskLevel,
-		boundary.Details,
-	)
 }
 
 // ------------------------------
@@ -686,9 +580,9 @@ func (m *NetworkTopologyModule) writeOutput(ctx context.Context, logger internal
 
 	// VPC Networks table
 	networksHeader := []string{
-		"Network",
 		"Project Name",
 		"Project ID",
+		"Network",
 		"Routing Mode",
 		"Subnets",
 		"Peerings",
@@ -704,9 +598,9 @@ func (m *NetworkTopologyModule) writeOutput(ctx context.Context, logger internal
 		}
 
 		networksBody = append(networksBody, []string{
-			n.Name,
 			m.GetProjectName(n.ProjectID),
 			n.ProjectID,
+			n.Name,
 			n.RoutingMode,
 			fmt.Sprintf("%d", n.SubnetCount),
 			fmt.Sprintf("%d", n.PeeringCount),
@@ -714,23 +608,26 @@ func (m *NetworkTopologyModule) writeOutput(ctx context.Context, logger internal
 			fmt.Sprintf("%d", n.MTU),
 		})
 
-		// Add to topology loot
-		m.LootMap["network-topology"].Contents += fmt.Sprintf(
-			"## VPC: %s (%s)\n"+
-				"Routing Mode: %s\n"+
-				"Subnets: %d\n"+
-				"Peerings: %d\n"+
-				"Shared VPC: %s\n\n",
+		// Add network commands to loot
+		m.LootMap["network-topology-commands"].Contents += fmt.Sprintf(
+			"## VPC Network: %s (Project: %s)\n"+
+				"# Describe network:\n"+
+				"gcloud compute networks describe %s --project=%s\n\n"+
+				"# List subnets in network:\n"+
+				"gcloud compute networks subnets list --network=%s --project=%s\n\n"+
+				"# List firewall rules for network:\n"+
+				"gcloud compute firewall-rules list --filter=\"network:%s\" --project=%s\n\n",
 			n.Name, n.ProjectID,
-			n.RoutingMode,
-			n.SubnetCount,
-			n.PeeringCount,
-			sharedVPC,
+			n.Name, n.ProjectID,
+			n.Name, n.ProjectID,
+			n.Name, n.ProjectID,
 		)
 	}
 
-	// Subnets table
+	// Subnets table - one row per IAM binding if present, otherwise one row per subnet
 	subnetsHeader := []string{
+		"Project Name",
+		"Project ID",
 		"Subnet",
 		"Network",
 		"Region",
@@ -738,6 +635,8 @@ func (m *NetworkTopologyModule) writeOutput(ctx context.Context, logger internal
 		"Private Google Access",
 		"Flow Logs",
 		"Purpose",
+		"IAM Role",
+		"IAM Member",
 	}
 
 	var subnetsBody [][]string
@@ -747,19 +646,57 @@ func (m *NetworkTopologyModule) writeOutput(ctx context.Context, logger internal
 			purpose = "PRIVATE"
 		}
 
-		subnetsBody = append(subnetsBody, []string{
-			s.Name,
-			m.extractNetworkName(s.Network),
-			s.Region,
-			s.IPCIDRRange,
-			fmt.Sprintf("%t", s.PrivateIPGoogleAccess),
-			fmt.Sprintf("%t", s.FlowLogsEnabled),
-			purpose,
-		})
+		if len(s.IAMBindings) > 0 {
+			// One row per IAM binding
+			for _, binding := range s.IAMBindings {
+				subnetsBody = append(subnetsBody, []string{
+					m.GetProjectName(s.ProjectID),
+					s.ProjectID,
+					s.Name,
+					m.extractNetworkName(s.Network),
+					s.Region,
+					s.IPCIDRRange,
+					boolToYesNo(s.PrivateIPGoogleAccess),
+					boolToYesNo(s.FlowLogsEnabled),
+					purpose,
+					binding.Role,
+					binding.Member,
+				})
+			}
+		} else {
+			// No IAM bindings - single row
+			subnetsBody = append(subnetsBody, []string{
+				m.GetProjectName(s.ProjectID),
+				s.ProjectID,
+				s.Name,
+				m.extractNetworkName(s.Network),
+				s.Region,
+				s.IPCIDRRange,
+				boolToYesNo(s.PrivateIPGoogleAccess),
+				boolToYesNo(s.FlowLogsEnabled),
+				purpose,
+				"-",
+				"-",
+			})
+		}
+
+		// Add subnet commands to loot
+		m.LootMap["network-topology-commands"].Contents += fmt.Sprintf(
+			"## Subnet: %s (Project: %s, Region: %s)\n"+
+				"# Describe subnet:\n"+
+				"gcloud compute networks subnets describe %s --region=%s --project=%s\n\n"+
+				"# Get subnet IAM policy:\n"+
+				"gcloud compute networks subnets get-iam-policy %s --region=%s --project=%s\n\n",
+			s.Name, s.ProjectID, s.Region,
+			s.Name, s.Region, s.ProjectID,
+			s.Name, s.Region, s.ProjectID,
+		)
 	}
 
 	// VPC Peerings table
 	peeringsHeader := []string{
+		"Project Name",
+		"Project ID",
 		"Name",
 		"Local Network",
 		"Peer Network",
@@ -772,60 +709,40 @@ func (m *NetworkTopologyModule) writeOutput(ctx context.Context, logger internal
 	var peeringsBody [][]string
 	for _, p := range m.Peerings {
 		peeringsBody = append(peeringsBody, []string{
+			m.GetProjectName(p.ProjectID),
+			p.ProjectID,
 			p.Name,
 			m.extractNetworkName(p.Network),
 			m.extractNetworkName(p.PeerNetwork),
 			p.PeerProjectID,
 			p.State,
-			fmt.Sprintf("%t", p.ImportCustomRoute),
-			fmt.Sprintf("%t", p.ExportCustomRoute),
+			boolToYesNo(p.ImportCustomRoute),
+			boolToYesNo(p.ExportCustomRoute),
 		})
 
-		// Add to peering analysis loot
-		m.LootMap["peering-analysis"].Contents += fmt.Sprintf(
-			"## Peering: %s\n"+
-				"Local: %s\n"+
-				"Peer: %s (project: %s)\n"+
-				"State: %s\n"+
-				"Custom Routes - Import: %t, Export: %t\n\n"+
-				"# Commands to analyze:\n"+
-				"gcloud compute networks peerings list --project=%s\n"+
-				"gcloud compute networks peerings list-routes %s --project=%s --network=%s --region=REGION --direction=INCOMING\n\n",
-			p.Name,
-			m.extractNetworkName(p.Network),
-			m.extractNetworkName(p.PeerNetwork), p.PeerProjectID,
-			p.State,
-			p.ImportCustomRoute, p.ExportCustomRoute,
+		// Add peering commands to loot
+		m.LootMap["network-topology-commands"].Contents += fmt.Sprintf(
+			"## VPC Peering: %s (Project: %s)\n"+
+				"# Local: %s -> Peer: %s (project: %s)\n"+
+				"# List peerings:\n"+
+				"gcloud compute networks peerings list --project=%s\n\n"+
+				"# List peering routes (incoming):\n"+
+				"gcloud compute networks peerings list-routes %s --project=%s --network=%s --region=REGION --direction=INCOMING\n\n"+
+				"# List peering routes (outgoing):\n"+
+				"gcloud compute networks peerings list-routes %s --project=%s --network=%s --region=REGION --direction=OUTGOING\n\n",
+			p.Name, p.ProjectID,
+			m.extractNetworkName(p.Network), m.extractNetworkName(p.PeerNetwork), p.PeerProjectID,
 			p.ProjectID,
+			p.Name, p.ProjectID, m.extractNetworkName(p.Network),
 			p.Name, p.ProjectID, m.extractNetworkName(p.Network),
 		)
 	}
 
-	// Trust Boundaries table
-	trustHeader := []string{
-		"Name",
-		"Type",
-		"Source",
-		"Target",
-		"Risk Level",
-	}
-
-	var trustBody [][]string
-	for _, t := range m.TrustBoundarie {
-		trustBody = append(trustBody, []string{
-			t.Name,
-			t.Type,
-			truncateString(t.SourceScope, 40),
-			truncateString(t.TargetScope, 40),
-			t.RiskLevel,
-		})
-	}
-
 	// Cloud NAT table
 	natHeader := []string{
-		"Name",
 		"Project Name",
 		"Project ID",
+		"Name",
 		"Region",
 		"Network",
 		"NAT IPs",
@@ -834,48 +751,45 @@ func (m *NetworkTopologyModule) writeOutput(ctx context.Context, logger internal
 
 	var natBody [][]string
 	for _, nat := range m.NATs {
-		natIPs := strings.Join(nat.NATIPAddresses, ",")
-		if len(natIPs) > 30 {
-			natIPs = fmt.Sprintf("%d IPs", len(nat.NATIPAddresses))
+		natIPs := strings.Join(nat.NATIPAddresses, ", ")
+		if natIPs == "" {
+			natIPs = "AUTO"
 		}
 
 		natBody = append(natBody, []string{
-			nat.Name,
 			m.GetProjectName(nat.ProjectID),
 			nat.ProjectID,
+			nat.Name,
 			nat.Region,
 			m.extractNetworkName(nat.Network),
 			natIPs,
-			fmt.Sprintf("%t", nat.EnableLogging),
+			boolToYesNo(nat.EnableLogging),
 		})
 
-		// Add to NAT analysis loot
-		m.LootMap["nat-analysis"].Contents += fmt.Sprintf(
-			"## Cloud NAT: %s\n"+
-				"Project: %s\n"+
-				"Region: %s\n"+
-				"Network: %s\n"+
-				"NAT IPs: %v\n"+
-				"Min Ports Per VM: %d\n"+
-				"Logging Enabled: %t\n\n",
-			nat.Name,
-			nat.ProjectID,
-			nat.Region,
-			m.extractNetworkName(nat.Network),
-			nat.NATIPAddresses,
-			nat.MinPortsPerVM,
-			nat.EnableLogging,
+		// Add NAT commands to loot
+		m.LootMap["network-topology-commands"].Contents += fmt.Sprintf(
+			"## Cloud NAT: %s (Project: %s, Region: %s)\n"+
+				"# Describe router with NAT config:\n"+
+				"gcloud compute routers describe ROUTER_NAME --region=%s --project=%s\n\n"+
+				"# List NAT mappings:\n"+
+				"gcloud compute routers get-nat-mapping-info ROUTER_NAME --region=%s --project=%s\n\n",
+			nat.Name, nat.ProjectID, nat.Region,
+			nat.Region, nat.ProjectID,
+			nat.Region, nat.ProjectID,
 		)
 	}
 
-	// Shared VPC commands
+	// Add Shared VPC commands to loot
 	for hostProject, config := range m.SharedVPCs {
-		m.LootMap["shared-vpc-commands"].Contents += fmt.Sprintf(
+		m.LootMap["network-topology-commands"].Contents += fmt.Sprintf(
 			"## Shared VPC Host: %s\n"+
-				"Service Projects: %v\n\n"+
+				"# Service Projects: %v\n"+
 				"# List Shared VPC resources:\n"+
-				"gcloud compute shared-vpc list-associated-resources %s\n"+
-				"gcloud compute shared-vpc get-host-project %s\n\n",
+				"gcloud compute shared-vpc list-associated-resources %s\n\n"+
+				"# Get host project for service project:\n"+
+				"gcloud compute shared-vpc get-host-project SERVICE_PROJECT_ID\n\n"+
+				"# List usable subnets for service project:\n"+
+				"gcloud compute networks subnets list-usable --project=%s\n\n",
 			hostProject,
 			config.ServiceProjects,
 			hostProject,
@@ -886,7 +800,7 @@ func (m *NetworkTopologyModule) writeOutput(ctx context.Context, logger internal
 	// Collect loot files
 	var lootFiles []internal.LootFile
 	for _, loot := range m.LootMap {
-		if loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# Generated by CloudFox\n\n") {
+		if loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# WARNING: Only use with proper authorization\n\n") {
 			lootFiles = append(lootFiles, *loot)
 		}
 	}
@@ -913,14 +827,6 @@ func (m *NetworkTopologyModule) writeOutput(ctx context.Context, logger internal
 			Name:   "vpc-peerings",
 			Header: peeringsHeader,
 			Body:   peeringsBody,
-		})
-	}
-
-	if len(trustBody) > 0 {
-		tables = append(tables, internal.TableFile{
-			Name:   "trust-boundaries",
-			Header: trustHeader,
-			Body:   trustBody,
 		})
 	}
 

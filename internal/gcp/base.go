@@ -42,6 +42,10 @@ func ParseGCPError(err error, apiName string) error {
 			if strings.Contains(errStr, "SERVICE_DISABLED") {
 				return fmt.Errorf("%w: %s", ErrAPINotEnabled, apiName)
 			}
+			// Check for quota project requirement (API not enabled or misconfigured)
+			if strings.Contains(errStr, "requires a quota project") {
+				return fmt.Errorf("%w: %s (enable API or set quota project)", ErrAPINotEnabled, apiName)
+			}
 			return ErrPermissionDenied
 
 		case codes.NotFound:
@@ -331,6 +335,11 @@ func InitializeCommandContext(cmd *cobra.Command, moduleName string) (*CommandCo
 	wrap, _ := parentCmd.PersistentFlags().GetBool("wrap")
 	outputDirectory, _ := parentCmd.PersistentFlags().GetString("outdir")
 	format, _ := parentCmd.PersistentFlags().GetString("output")
+
+	// Default to "all" format if not set (GCP doesn't expose this flag yet)
+	if format == "" {
+		format = "all"
+	}
 
 	// -------------------- Get project IDs from context --------------------
 	var projectIDs []string

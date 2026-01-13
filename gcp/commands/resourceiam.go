@@ -1,0 +1,343 @@
+package commands
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"sync"
+
+	resourceiamservice "github.com/BishopFox/cloudfox/gcp/services/resourceIAMService"
+	"github.com/BishopFox/cloudfox/globals"
+	"github.com/BishopFox/cloudfox/internal"
+	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/spf13/cobra"
+)
+
+var GCPResourceIAMCommand = &cobra.Command{
+	Use:     globals.GCP_RESOURCEIAM_MODULE_NAME,
+	Aliases: []string{"resiam", "resource-policies"},
+	Short:   "Enumerate IAM policies on GCP resources (buckets, datasets, secrets, etc.)",
+	Long: `Enumerate IAM policies attached directly to GCP resources.
+
+This module discovers WHO has access to WHAT resources by enumerating
+resource-level IAM policies (not just project-level policies).
+
+Supported Resource Types:
+- Cloud Storage buckets
+- BigQuery datasets
+- Pub/Sub topics and subscriptions
+- Secret Manager secrets
+- Cloud KMS keys
+- Cloud Functions
+- Cloud Run services
+
+Key Findings:
+- Public access (allUsers/allAuthenticatedUsers)
+- Cross-project access patterns
+- Overly permissive roles on sensitive resources
+- Federated identity access to resources`,
+	Run: runGCPResourceIAMCommand,
+}
+
+// ------------------------------
+// Module Struct
+// ------------------------------
+type ResourceIAMModule struct {
+	gcpinternal.BaseGCPModule
+
+	Bindings []resourceiamservice.ResourceIAMBinding
+	LootMap  map[string]*internal.LootFile
+	mu       sync.Mutex
+}
+
+// ------------------------------
+// Output Struct
+// ------------------------------
+type ResourceIAMOutput struct {
+	Table []internal.TableFile
+	Loot  []internal.LootFile
+}
+
+func (o ResourceIAMOutput) TableFiles() []internal.TableFile { return o.Table }
+func (o ResourceIAMOutput) LootFiles() []internal.LootFile   { return o.Loot }
+
+// ------------------------------
+// Command Entry Point
+// ------------------------------
+func runGCPResourceIAMCommand(cmd *cobra.Command, args []string) {
+	cmdCtx, err := gcpinternal.InitializeCommandContext(cmd, globals.GCP_RESOURCEIAM_MODULE_NAME)
+	if err != nil {
+		return
+	}
+
+	module := &ResourceIAMModule{
+		BaseGCPModule: gcpinternal.NewBaseGCPModule(cmdCtx),
+		Bindings:      []resourceiamservice.ResourceIAMBinding{},
+		LootMap:       make(map[string]*internal.LootFile),
+	}
+
+	module.initializeLootFiles()
+	module.Execute(cmdCtx.Ctx, cmdCtx.Logger)
+}
+
+// ------------------------------
+// Module Execution
+// ------------------------------
+func (m *ResourceIAMModule) Execute(ctx context.Context, logger internal.Logger) {
+	logger.InfoM("Enumerating resource-level IAM policies...", globals.GCP_RESOURCEIAM_MODULE_NAME)
+
+	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_RESOURCEIAM_MODULE_NAME, m.processProject)
+
+	if len(m.Bindings) == 0 {
+		logger.InfoM("No resource IAM bindings found", globals.GCP_RESOURCEIAM_MODULE_NAME)
+		return
+	}
+
+	// Count statistics
+	publicCount := 0
+	resourceTypes := make(map[string]int)
+	for _, b := range m.Bindings {
+		resourceTypes[b.ResourceType]++
+		if b.IsPublic {
+			publicCount++
+		}
+	}
+
+	// Build summary
+	var typeSummary []string
+	for rt, count := range resourceTypes {
+		typeSummary = append(typeSummary, fmt.Sprintf("%d %s(s)", count, rt))
+	}
+
+	logger.SuccessM(fmt.Sprintf("Found %d resource IAM binding(s): %s",
+		len(m.Bindings), strings.Join(typeSummary, ", ")), globals.GCP_RESOURCEIAM_MODULE_NAME)
+
+	if publicCount > 0 {
+		logger.InfoM(fmt.Sprintf("[FINDING] Found %d PUBLIC resource binding(s)!", publicCount), globals.GCP_RESOURCEIAM_MODULE_NAME)
+	}
+
+	m.writeOutput(ctx, logger)
+}
+
+// ------------------------------
+// Project Processor
+// ------------------------------
+func (m *ResourceIAMModule) processProject(ctx context.Context, projectID string, logger internal.Logger) {
+	if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
+		logger.InfoM(fmt.Sprintf("Enumerating resource IAM in project: %s", projectID), globals.GCP_RESOURCEIAM_MODULE_NAME)
+	}
+
+	svc := resourceiamservice.New()
+	bindings, err := svc.GetAllResourceIAM(ctx, projectID)
+	if err != nil {
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_RESOURCEIAM_MODULE_NAME,
+			fmt.Sprintf("Could not enumerate resource IAM in project %s", projectID))
+		return
+	}
+
+	m.mu.Lock()
+	m.Bindings = append(m.Bindings, bindings...)
+
+	// Generate loot for public resources
+	for _, b := range bindings {
+		if b.IsPublic {
+			m.addPublicResourceToLoot(b)
+		}
+	}
+	m.mu.Unlock()
+
+	if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
+		logger.InfoM(fmt.Sprintf("Found %d resource IAM binding(s) in project %s", len(bindings), projectID), globals.GCP_RESOURCEIAM_MODULE_NAME)
+	}
+}
+
+// ------------------------------
+// Loot Management
+// ------------------------------
+func (m *ResourceIAMModule) initializeLootFiles() {
+	m.LootMap["resource-iam-commands"] = &internal.LootFile{
+		Name:     "resource-iam-commands",
+		Contents: "# Resource IAM Commands\n# Generated by CloudFox\n\n",
+	}
+	m.LootMap["public-resources"] = &internal.LootFile{
+		Name:     "public-resources",
+		Contents: "# Public Resources\n# Generated by CloudFox\n# These resources have allUsers or allAuthenticatedUsers access!\n\n",
+	}
+}
+
+func (m *ResourceIAMModule) addPublicResourceToLoot(b resourceiamservice.ResourceIAMBinding) {
+	m.LootMap["public-resources"].Contents += fmt.Sprintf(
+		"# %s: %s\n# Member: %s, Role: %s\n",
+		b.ResourceType, b.ResourceName, b.Member, b.Role,
+	)
+
+	// Add exploitation commands based on resource type
+	switch b.ResourceType {
+	case "bucket":
+		m.LootMap["public-resources"].Contents += fmt.Sprintf(
+			"gsutil ls %s\ngsutil cat %s/*\n\n",
+			b.ResourceName, b.ResourceName,
+		)
+	case "function":
+		m.LootMap["public-resources"].Contents += fmt.Sprintf(
+			"# Function may be publicly invokable\ngcloud functions describe %s --project=%s\n\n",
+			b.ResourceID, b.ProjectID,
+		)
+	case "cloudrun":
+		m.LootMap["public-resources"].Contents += fmt.Sprintf(
+			"# Cloud Run service may be publicly accessible\ngcloud run services describe %s --project=%s\n\n",
+			b.ResourceID, b.ProjectID,
+		)
+	}
+}
+
+// resourceKey creates a unique key for a resource to group bindings
+func resourceKey(b resourceiamservice.ResourceIAMBinding) string {
+	return fmt.Sprintf("%s|%s|%s", b.ProjectID, b.ResourceType, b.ResourceName)
+}
+
+// shortenRole extracts a readable role name from the full role path
+func shortenRole(role string) string {
+	// roles/storage.objectViewer -> objectViewer
+	// projects/xxx/roles/customRole -> customRole
+	if idx := strings.LastIndex(role, "/"); idx != -1 {
+		return role[idx+1:]
+	}
+	return role
+}
+
+// ------------------------------
+// Output Generation
+// ------------------------------
+func (m *ResourceIAMModule) writeOutput(ctx context.Context, logger internal.Logger) {
+	header := []string{
+		"Project ID",
+		"Resource Type",
+		"Resource ID",
+		"Resource Name",
+		"Public",
+		"Access (memberType:member [role])",
+		"Condition",
+	}
+
+	// Group bindings by resource
+	resourceBindings := make(map[string][]resourceiamservice.ResourceIAMBinding)
+	resourceOrder := []string{} // Maintain order
+	for _, b := range m.Bindings {
+		key := resourceKey(b)
+		if _, exists := resourceBindings[key]; !exists {
+			resourceOrder = append(resourceOrder, key)
+		}
+		resourceBindings[key] = append(resourceBindings[key], b)
+	}
+
+	var body [][]string
+	for _, key := range resourceOrder {
+		bindings := resourceBindings[key]
+		if len(bindings) == 0 {
+			continue
+		}
+
+		// Use first binding for resource info
+		first := bindings[0]
+
+		// Check if any binding is public
+		isPublic := "No"
+		for _, b := range bindings {
+			if b.IsPublic {
+				isPublic = "Yes"
+				break
+			}
+		}
+
+		// Build access list: one line per entity "memberType:member [role]"
+		var accessList []string
+		var conditionList []string
+		for _, b := range bindings {
+			// Format: memberType:member [shortRole]
+			member := b.MemberEmail
+			if member == "" {
+				member = b.Member
+			}
+			memberType := strings.ToLower(b.MemberType)
+			role := shortenRole(b.Role)
+
+			entry := fmt.Sprintf("%s:%s [%s]", memberType, member, role)
+			accessList = append(accessList, entry)
+
+			// Collect condition expressions
+			if b.HasCondition && b.ConditionExpression != "" {
+				condEntry := b.ConditionExpression
+				if b.ConditionTitle != "" {
+					condEntry = fmt.Sprintf("%s: %s", b.ConditionTitle, b.ConditionExpression)
+				}
+				// Avoid duplicates
+				found := false
+				for _, existing := range conditionList {
+					if existing == condEntry {
+						found = true
+						break
+					}
+				}
+				if !found {
+					conditionList = append(conditionList, condEntry)
+				}
+			}
+		}
+
+		condition := "-"
+		if len(conditionList) > 0 {
+			condition = strings.Join(conditionList, "\n")
+		}
+
+		body = append(body, []string{
+			first.ProjectID,
+			first.ResourceType,
+			first.ResourceID,
+			first.ResourceName,
+			isPublic,
+			strings.Join(accessList, "\n"),
+			condition,
+		})
+	}
+
+	// Collect loot files
+	var lootFiles []internal.LootFile
+	for _, loot := range m.LootMap {
+		if loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# Generated by CloudFox\n\n") &&
+			!strings.HasSuffix(loot.Contents, "# These resources have allUsers or allAuthenticatedUsers access!\n\n") {
+			lootFiles = append(lootFiles, *loot)
+		}
+	}
+
+	tables := []internal.TableFile{
+		{
+			Name:   "resource-iam",
+			Header: header,
+			Body:   body,
+		},
+	}
+
+	output := ResourceIAMOutput{
+		Table: tables,
+		Loot:  lootFiles,
+	}
+
+	err := internal.HandleOutputSmart(
+		"gcp",
+		m.Format,
+		m.OutputDirectory,
+		m.Verbosity,
+		m.WrapTable,
+		"project",
+		m.ProjectIDs,
+		[]string{},
+		m.Account,
+		output,
+	)
+	if err != nil {
+		logger.ErrorM(fmt.Sprintf("Error writing output: %v", err), globals.GCP_RESOURCEIAM_MODULE_NAME)
+		m.CommandCounter.Error++
+	}
+}

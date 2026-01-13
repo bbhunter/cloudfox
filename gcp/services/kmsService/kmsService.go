@@ -26,6 +26,12 @@ type KeyRingInfo struct {
 	KeyCount    int
 }
 
+// IAMBinding represents a single IAM role binding
+type IAMBinding struct {
+	Role   string
+	Member string
+}
+
 // CryptoKeyInfo holds KMS crypto key details with security-relevant information
 type CryptoKeyInfo struct {
 	Name              string
@@ -53,9 +59,7 @@ type CryptoKeyInfo struct {
 	Labels            map[string]string
 
 	// IAM
-	EncrypterMembers  []string
-	DecrypterMembers  []string
-	AdminMembers      []string
+	IAMBindings       []IAMBinding
 	IsPublicEncrypt   bool
 	IsPublicDecrypt   bool
 }
@@ -124,8 +128,7 @@ func (ks *KMSService) CryptoKeys(projectID string) ([]CryptoKeyInfo, error) {
 				// Try to get IAM policy
 				iamPolicy, iamErr := ks.getKeyIAMPolicy(service, key.Name)
 				if iamErr == nil && iamPolicy != nil {
-					info.EncrypterMembers, info.DecrypterMembers, info.AdminMembers,
-						info.IsPublicEncrypt, info.IsPublicDecrypt = parseKeyBindings(iamPolicy)
+					info.IAMBindings, info.IsPublicEncrypt, info.IsPublicDecrypt = parseKeyBindings(iamPolicy)
 				}
 
 				keys = append(keys, info)
@@ -231,35 +234,27 @@ func (ks *KMSService) getKeyIAMPolicy(service *kms.Service, keyName string) (*km
 	return policy, nil
 }
 
-// parseKeyBindings extracts who has key permissions and checks for public access
-func parseKeyBindings(policy *kms.Policy) (encrypters []string, decrypters []string, admins []string, publicEncrypt bool, publicDecrypt bool) {
+// parseKeyBindings extracts all IAM bindings and checks for public access
+func parseKeyBindings(policy *kms.Policy) (bindings []IAMBinding, publicEncrypt bool, publicDecrypt bool) {
 	for _, binding := range policy.Bindings {
-		switch binding.Role {
-		case "roles/cloudkms.cryptoKeyEncrypter":
-			encrypters = append(encrypters, binding.Members...)
-			for _, member := range binding.Members {
-				if member == "allUsers" || member == "allAuthenticatedUsers" {
+		for _, member := range binding.Members {
+			bindings = append(bindings, IAMBinding{
+				Role:   binding.Role,
+				Member: member,
+			})
+
+			// Check for public access on encrypt/decrypt roles
+			if member == "allUsers" || member == "allAuthenticatedUsers" {
+				switch binding.Role {
+				case "roles/cloudkms.cryptoKeyEncrypter":
 					publicEncrypt = true
-				}
-			}
-		case "roles/cloudkms.cryptoKeyDecrypter":
-			decrypters = append(decrypters, binding.Members...)
-			for _, member := range binding.Members {
-				if member == "allUsers" || member == "allAuthenticatedUsers" {
+				case "roles/cloudkms.cryptoKeyDecrypter":
 					publicDecrypt = true
-				}
-			}
-		case "roles/cloudkms.cryptoKeyEncrypterDecrypter":
-			encrypters = append(encrypters, binding.Members...)
-			decrypters = append(decrypters, binding.Members...)
-			for _, member := range binding.Members {
-				if member == "allUsers" || member == "allAuthenticatedUsers" {
+				case "roles/cloudkms.cryptoKeyEncrypterDecrypter":
 					publicEncrypt = true
 					publicDecrypt = true
 				}
 			}
-		case "roles/cloudkms.admin":
-			admins = append(admins, binding.Members...)
 		}
 	}
 	return

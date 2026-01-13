@@ -135,6 +135,9 @@ var GCPAllChecksCommand = &cobra.Command{
 			if childCmd == cmd { // Skip the run-all command itself to avoid infinite recursion
 				continue
 			}
+			if childCmd.Hidden { // Skip hidden commands
+				continue
+			}
 
 			GCPLogger.InfoM(fmt.Sprintf("Running command: %s", childCmd.Use), "all-checks")
 			childCmd.Run(cmd, args)
@@ -170,12 +173,14 @@ func init() {
 		commands.GCPSecretsCommand,
 		commands.GCPIAMCommand,
 		commands.GCPPermissionsCommand,
+		commands.GCPResourceIAMCommand,
 		commands.GCPInstancesCommand,
 		commands.GCPWhoAmICommand,
 
-		// New compute/serverless commands
+		// Compute/serverless commands
 		commands.GCPFunctionsCommand,
 		commands.GCPCloudRunCommand,
+		commands.GCPAppEngineCommand,
 		commands.GCPGKECommand,
 		commands.GCPCloudSQLCommand,
 
@@ -187,7 +192,7 @@ func init() {
 		commands.GCPDNSCommand,
 		commands.GCPFirewallCommand,
 		commands.GCPServiceAccountsCommand,
-		commands.GCPAPIKeysCommand,
+		commands.GCPKeysCommand,
 		commands.GCPEndpointsCommand,
 		commands.GCPWorkloadIdentityCommand,
 		commands.GCPOrganizationsCommand,
@@ -204,10 +209,16 @@ func init() {
 		// Security/Compliance commands
 		commands.GCPVPCSCCommand,
 		commands.GCPAssetInventoryCommand,
+		commands.GCPSecurityCenterCommand,
+		commands.GCPComplianceDashboardCommand,
+		commands.GCPBackupInventoryCommand,
+		commands.GCPCostSecurityCommand,
+		commands.GCPMonitoringAlertsCommand,
 
 		// Network/Infrastructure commands
 		commands.GCPLoadBalancersCommand,
 		commands.GCPVPCNetworksCommand,
+		commands.GCPNetworkTopologyCommand,
 
 		// ML/Data Science commands
 		commands.GCPNotebooksCommand,
@@ -219,21 +230,19 @@ func init() {
 		commands.GCPAccessLevelsCommand,
 
 		// Pentest/Exploitation commands
-		commands.GCPHMACKeysCommand,
 		commands.GCPPrivescCommand,
 		commands.GCPOrgPoliciesCommand,
 		commands.GCPBucketEnumCommand,
 		commands.GCPCrossProjectCommand,
-		commands.GCPCustomRolesCommand,
-		commands.GCPPublicResourcesCommand,
 		commands.GCPLoggingGapsCommand,
 		commands.GCPSourceReposCommand,
-		commands.GCPSSHOsLoginCommand,
 		commands.GCPServiceAgentsCommand,
 		commands.GCPDomainWideDelegationCommand,
-		commands.GCPNetworkEndpointsCommand,
+		commands.GCPPrivateServiceConnectCommand,
 		commands.GCPCloudArmorCommand,
 		commands.GCPCertManagerCommand,
+		commands.GCPLateralMovementCommand,
+		commands.GCPDataExfiltrationCommand,
 
 		// All checks (last)
 		GCPAllChecksCommand,

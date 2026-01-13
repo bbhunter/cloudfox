@@ -25,7 +25,7 @@ const GCP_DNS_MODULE_NAME string = "dns"
 const GCP_SCHEDULER_MODULE_NAME string = "scheduler"
 const GCP_ORGANIZATIONS_MODULE_NAME string = "organizations"
 const GCP_APIKEYS_MODULE_NAME string = "apikeys"
-const GCP_ENDPOINTS_MODULE_NAME string = "endpoints"
+const GCP_EXPOSURE_MODULE_NAME string = "exposure"
 const GCP_CLOUDBUILD_MODULE_NAME string = "cloudbuild"
 const GCP_DATAFLOW_MODULE_NAME string = "dataflow"
 const GCP_COMPOSER_MODULE_NAME string = "composer"
@@ -45,33 +45,34 @@ const GCP_BEYONDCORP_MODULE_NAME string = "beyondcorp"
 const GCP_ACCESSLEVELS_MODULE_NAME string = "access-levels"
 
 // Pentest modules
+const GCP_KEYS_MODULE_NAME string = "keys"
 const GCP_HMACKEYS_MODULE_NAME string = "hmac-keys"
 const GCP_PRIVESC_MODULE_NAME string = "privesc"
 const GCP_ORGPOLICIES_MODULE_NAME string = "org-policies"
 const GCP_BUCKETENUM_MODULE_NAME string = "bucket-enum"
 const GCP_CROSSPROJECT_MODULE_NAME string = "cross-project"
-const GCP_CUSTOMROLES_MODULE_NAME string = "custom-roles"
 const GCP_PUBLICRESOURCES_MODULE_NAME string = "public-resources"
 const GCP_SOURCEREPOS_MODULE_NAME string = "source-repos"
 const GCP_LOGGINGGAPS_MODULE_NAME string = "logging-gaps"
 const GCP_SSHOSLOGIN_MODULE_NAME string = "ssh-oslogin"
 const GCP_SERVICEAGENTS_MODULE_NAME string = "service-agents"
 const GCP_DOMAINWIDEDELEGATION_MODULE_NAME string = "domain-wide-delegation"
-const GCP_NETWORKENDPOINTS_MODULE_NAME string = "network-endpoints"
+const GCP_PRIVATESERVICECONNECT_MODULE_NAME string = "private-service-connect"
 const GCP_CLOUDARMOR_MODULE_NAME string = "cloud-armor"
 const GCP_CERTMANAGER_MODULE_NAME string = "cert-manager"
+
+// Resource IAM module
+const GCP_RESOURCEIAM_MODULE_NAME string = "resource-iam"
 
 // New security analysis modules (Azure equivalents)
 const GCP_SECURITYCENTER_MODULE_NAME string = "security-center"
 const GCP_LATERALMOVEMENT_MODULE_NAME string = "lateral-movement"
-const GCP_NETWORKEXPOSURE_MODULE_NAME string = "network-exposure"
 const GCP_DATAEXFILTRATION_MODULE_NAME string = "data-exfiltration"
 const GCP_BACKUPINVENTORY_MODULE_NAME string = "backup-inventory"
 const GCP_COMPLIANCEDASHBOARD_MODULE_NAME string = "compliance-dashboard"
 const GCP_COSTSECURITY_MODULE_NAME string = "cost-security"
 const GCP_MONITORINGALERTS_MODULE_NAME string = "monitoring-alerts"
 const GCP_NETWORKTOPOLOGY_MODULE_NAME string = "network-topology"
-const GCP_IDENTITYPROTECTION_MODULE_NAME string = "identity-protection"
 
 // Verbosity levels (matching Azure pattern)
 var GCP_VERBOSITY int = 0

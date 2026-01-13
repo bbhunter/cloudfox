@@ -32,8 +32,6 @@ type VPCNetworkInfo struct {
 	Subnetworks           []string `json:"subnetworks"`
 	Peerings              []string `json:"peerings"`
 	FirewallPolicyCount   int      `json:"firewallPolicyCount"`
-	RiskLevel             string   `json:"riskLevel"`
-	RiskReasons           []string `json:"riskReasons"`
 }
 
 // SubnetInfo represents a subnetwork
@@ -48,8 +46,6 @@ type SubnetInfo struct {
 	Purpose               string   `json:"purpose"`
 	EnableFlowLogs        bool     `json:"enableFlowLogs"`
 	SecondaryIPRanges     []string `json:"secondaryIpRanges"`
-	RiskLevel             string   `json:"riskLevel"`
-	RiskReasons           []string `json:"riskReasons"`
 }
 
 // VPCPeeringInfo represents a VPC peering connection
@@ -63,24 +59,18 @@ type VPCPeeringInfo struct {
 	ExportCustomRoutes   bool   `json:"exportCustomRoutes"`
 	ImportCustomRoutes   bool   `json:"importCustomRoutes"`
 	ExchangeSubnetRoutes bool   `json:"exchangeSubnetRoutes"`
-	RiskLevel            string `json:"riskLevel"`
-	RiskReasons          []string `json:"riskReasons"`
-	LateralMovementPath  bool     `json:"lateralMovementPath"`
-	ExploitCommands      []string `json:"exploitCommands"`
 }
 
 // RouteInfo represents a route
 type RouteInfo struct {
-	Name             string   `json:"name"`
-	ProjectID        string   `json:"projectId"`
-	Network          string   `json:"network"`
-	DestRange        string   `json:"destRange"`
-	NextHopType      string   `json:"nextHopType"`
-	NextHop          string   `json:"nextHop"`
-	Priority         int64    `json:"priority"`
-	Tags             []string `json:"tags"`
-	RiskLevel        string   `json:"riskLevel"`
-	RiskReasons      []string `json:"riskReasons"`
+	Name        string   `json:"name"`
+	ProjectID   string   `json:"projectId"`
+	Network     string   `json:"network"`
+	DestRange   string   `json:"destRange"`
+	NextHopType string   `json:"nextHopType"`
+	NextHop     string   `json:"nextHop"`
+	Priority    int64    `json:"priority"`
+	Tags        []string `json:"tags"`
 }
 
 // ListVPCNetworks retrieves all VPC networks
@@ -184,11 +174,7 @@ func (s *VPCService) ListVPCPeerings(projectID string) ([]VPCPeeringInfo, error)
 				ExportCustomRoutes:   peering.ExportCustomRoutes,
 				ImportCustomRoutes:   peering.ImportCustomRoutes,
 				ExchangeSubnetRoutes: peering.ExchangeSubnetRoutes,
-				RiskReasons:          []string{},
-				ExploitCommands:      []string{},
 			}
-			info.RiskLevel, info.RiskReasons, info.LateralMovementPath = s.analyzePeeringRisk(info)
-			info.ExploitCommands = s.generatePeeringExploitCommands(info)
 			peerings = append(peerings, info)
 		}
 	}
@@ -234,7 +220,6 @@ func (s *VPCService) parseNetwork(network *compute.Network, projectID string) VP
 		AutoCreateSubnetworks: network.AutoCreateSubnetworks,
 		RoutingMode:           network.RoutingConfig.RoutingMode,
 		MTU:                   network.Mtu,
-		RiskReasons:           []string{},
 	}
 
 	for _, subnet := range network.Subnetworks {
@@ -244,8 +229,6 @@ func (s *VPCService) parseNetwork(network *compute.Network, projectID string) VP
 	for _, peering := range network.Peerings {
 		info.Peerings = append(info.Peerings, peering.Name)
 	}
-
-	info.RiskLevel, info.RiskReasons = s.analyzeNetworkRisk(info)
 
 	return info
 }
@@ -260,7 +243,6 @@ func (s *VPCService) parseSubnet(subnet *compute.Subnetwork, projectID string) S
 		GatewayAddress:        subnet.GatewayAddress,
 		PrivateIPGoogleAccess: subnet.PrivateIpGoogleAccess,
 		Purpose:               subnet.Purpose,
-		RiskReasons:           []string{},
 	}
 
 	if subnet.LogConfig != nil {
@@ -270,8 +252,6 @@ func (s *VPCService) parseSubnet(subnet *compute.Subnetwork, projectID string) S
 	for _, secondary := range subnet.SecondaryIpRanges {
 		info.SecondaryIPRanges = append(info.SecondaryIPRanges, fmt.Sprintf("%s:%s", secondary.RangeName, secondary.IpCidrRange))
 	}
-
-	info.RiskLevel, info.RiskReasons = s.analyzeSubnetRisk(info)
 
 	return info
 }
@@ -284,7 +264,6 @@ func (s *VPCService) parseRoute(route *compute.Route, projectID string) RouteInf
 		DestRange: route.DestRange,
 		Priority:  route.Priority,
 		Tags:      route.Tags,
-		RiskReasons: []string{},
 	}
 
 	// Determine next hop type
@@ -311,131 +290,7 @@ func (s *VPCService) parseRoute(route *compute.Route, projectID string) RouteInf
 		info.NextHop = extractName(route.NextHopVpnTunnel)
 	}
 
-	info.RiskLevel, info.RiskReasons = s.analyzeRouteRisk(info)
-
 	return info
-}
-
-func (s *VPCService) analyzeNetworkRisk(network VPCNetworkInfo) (string, []string) {
-	var reasons []string
-	score := 0
-
-	// Auto-create subnetworks can be less controlled
-	if network.AutoCreateSubnetworks {
-		reasons = append(reasons, "Auto-create subnetworks enabled")
-		score += 1
-	}
-
-	// Has peerings (potential lateral movement path)
-	if len(network.Peerings) > 0 {
-		reasons = append(reasons, fmt.Sprintf("Has %d VPC peering(s)", len(network.Peerings)))
-		score += 1
-	}
-
-	if score >= 2 {
-		return "MEDIUM", reasons
-	} else if score >= 1 {
-		return "LOW", reasons
-	}
-	return "INFO", reasons
-}
-
-func (s *VPCService) analyzeSubnetRisk(subnet SubnetInfo) (string, []string) {
-	var reasons []string
-	score := 0
-
-	// No Private Google Access
-	if !subnet.PrivateIPGoogleAccess {
-		reasons = append(reasons, "Private Google Access not enabled")
-		score += 1
-	}
-
-	// No flow logs
-	if !subnet.EnableFlowLogs {
-		reasons = append(reasons, "VPC Flow Logs not enabled")
-		score += 1
-	}
-
-	if score >= 2 {
-		return "MEDIUM", reasons
-	} else if score >= 1 {
-		return "LOW", reasons
-	}
-	return "INFO", reasons
-}
-
-func (s *VPCService) analyzePeeringRisk(peering VPCPeeringInfo) (string, []string, bool) {
-	var reasons []string
-	score := 0
-	lateralMovement := false
-
-	// Exports custom routes (potential route leakage)
-	if peering.ExportCustomRoutes {
-		reasons = append(reasons, "Exports custom routes to peer")
-		score += 1
-	}
-
-	// Imports custom routes
-	if peering.ImportCustomRoutes {
-		reasons = append(reasons, "Imports custom routes from peer")
-		score += 1
-	}
-
-	// Cross-project peering - lateral movement opportunity
-	if peering.PeerProjectID != "" && peering.PeerProjectID != peering.ProjectID {
-		reasons = append(reasons, fmt.Sprintf("Cross-project peering to %s", peering.PeerProjectID))
-		lateralMovement = true
-		score += 2
-	}
-
-	// Exchange subnet routes - full network visibility
-	if peering.ExchangeSubnetRoutes {
-		reasons = append(reasons, "Exchanges subnet routes (full network reachability)")
-		lateralMovement = true
-		score += 1
-	}
-
-	// Active peering
-	if peering.State == "ACTIVE" && lateralMovement {
-		reasons = append(reasons, "Active peering enables lateral movement")
-		score += 1
-	}
-
-	if score >= 3 {
-		return "HIGH", reasons, lateralMovement
-	} else if score >= 2 {
-		return "MEDIUM", reasons, lateralMovement
-	} else if score >= 1 {
-		return "LOW", reasons, lateralMovement
-	}
-	return "INFO", reasons, lateralMovement
-}
-
-func (s *VPCService) generatePeeringExploitCommands(peering VPCPeeringInfo) []string {
-	var commands []string
-
-	if peering.State != "ACTIVE" {
-		return commands
-	}
-
-	commands = append(commands,
-		fmt.Sprintf("# VPC Peering: %s -> %s", peering.Network, peering.PeerNetwork))
-
-	if peering.PeerProjectID != "" && peering.PeerProjectID != peering.ProjectID {
-		commands = append(commands,
-			fmt.Sprintf("# Target project: %s", peering.PeerProjectID),
-			fmt.Sprintf("# List instances in peer project:\ngcloud compute instances list --project=%s", peering.PeerProjectID),
-			fmt.Sprintf("# List subnets in peer project:\ngcloud compute networks subnets list --project=%s", peering.PeerProjectID))
-	}
-
-	if peering.ExchangeSubnetRoutes {
-		commands = append(commands,
-			"# Network scan from compromised instance in this VPC:",
-			"# nmap -sn <peer-subnet-cidr>",
-			"# Can reach resources in peered VPC via internal IPs")
-	}
-
-	return commands
 }
 
 func extractProjectFromNetwork(networkPath string) string {
@@ -448,30 +303,6 @@ func extractProjectFromNetwork(networkPath string) string {
 		}
 	}
 	return ""
-}
-
-func (s *VPCService) analyzeRouteRisk(route RouteInfo) (string, []string) {
-	var reasons []string
-	score := 0
-
-	// Route to 0.0.0.0/0 via instance (NAT instance)
-	if route.DestRange == "0.0.0.0/0" && route.NextHopType == "instance" {
-		reasons = append(reasons, "Default route via instance (NAT instance)")
-		score += 1
-	}
-
-	// Route to specific external IP via instance
-	if route.NextHopType == "ip" {
-		reasons = append(reasons, "Route to specific IP address")
-		score += 1
-	}
-
-	if score >= 2 {
-		return "MEDIUM", reasons
-	} else if score >= 1 {
-		return "LOW", reasons
-	}
-	return "INFO", reasons
 }
 
 func extractName(fullPath string) string {

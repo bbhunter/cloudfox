@@ -29,8 +29,9 @@ type Certificate struct {
 	State           string   `json:"state"`
 	IssuanceState   string   `json:"issuanceState"`
 	AttachedTo      []string `json:"attachedTo"` // LBs or other resources
-	RiskLevel       string   `json:"riskLevel"`
-	RiskReasons     []string `json:"riskReasons"`
+	Wildcard        bool     `json:"wildcard"`
+	Expired         bool     `json:"expired"`
+	SelfManaged     bool     `json:"selfManaged"`
 }
 
 // SSLCertificate represents a compute SSL certificate (classic)
@@ -42,8 +43,9 @@ type SSLCertificate struct {
 	ExpireTime      string   `json:"expireTime"`
 	DaysUntilExpiry int      `json:"daysUntilExpiry"`
 	CreationTime    string   `json:"creationTime"`
-	RiskLevel       string   `json:"riskLevel"`
-	RiskReasons     []string `json:"riskReasons"`
+	Wildcard        bool     `json:"wildcard"`
+	Expired         bool     `json:"expired"`
+	SelfManaged     bool     `json:"selfManaged"`
 }
 
 // CertificateMap represents a Certificate Manager certificate map
@@ -53,8 +55,6 @@ type CertificateMap struct {
 	Location     string   `json:"location"`
 	EntryCount   int      `json:"entryCount"`
 	Certificates []string `json:"certificates"`
-	RiskLevel    string   `json:"riskLevel"`
-	RiskReasons  []string `json:"riskReasons"`
 }
 
 // GetCertificates retrieves Certificate Manager certificates
@@ -79,11 +79,10 @@ func (s *CertManagerService) GetCertificates(projectID string) ([]Certificate, e
 
 		for _, cert := range resp.Certificates {
 			c := Certificate{
-				Name:        extractNameFromPath(cert.Name),
-				ProjectID:   projectID,
-				Location:    location,
-				Domains:     cert.SanDnsnames,
-				RiskReasons: []string{},
+				Name:      extractNameFromPath(cert.Name),
+				ProjectID: projectID,
+				Location:  location,
+				Domains:   cert.SanDnsnames,
 			}
 
 			// Determine type and state
@@ -94,6 +93,7 @@ func (s *CertManagerService) GetCertificates(projectID string) ([]Certificate, e
 			} else if cert.SelfManaged != nil {
 				c.Type = "SELF_MANAGED"
 				c.State = "ACTIVE" // Self-managed certs are active if they exist
+				c.SelfManaged = true
 			}
 
 			// Parse expiration
@@ -102,11 +102,17 @@ func (s *CertManagerService) GetCertificates(projectID string) ([]Certificate, e
 				expTime, err := time.Parse(time.RFC3339, cert.ExpireTime)
 				if err == nil {
 					c.DaysUntilExpiry = int(time.Until(expTime).Hours() / 24)
+					c.Expired = c.DaysUntilExpiry < 0
 				}
 			}
 
-			// Analyze risk
-			c.RiskLevel, c.RiskReasons = s.analyzeCertRisk(c)
+			// Check for wildcard domains
+			for _, domain := range c.Domains {
+				if strings.HasPrefix(domain, "*") {
+					c.Wildcard = true
+					break
+				}
+			}
 
 			certificates = append(certificates, c)
 		}
@@ -137,7 +143,7 @@ func (s *CertManagerService) GetSSLCertificates(projectID string) ([]SSLCertific
 			ProjectID:    projectID,
 			Type:         cert.Type,
 			CreationTime: cert.CreationTimestamp,
-			RiskReasons:  []string{},
+			SelfManaged:  cert.Type == "SELF_MANAGED",
 		}
 
 		// Get domains from managed certificate
@@ -151,11 +157,17 @@ func (s *CertManagerService) GetSSLCertificates(projectID string) ([]SSLCertific
 			expTime, err := time.Parse(time.RFC3339, cert.ExpireTime)
 			if err == nil {
 				c.DaysUntilExpiry = int(time.Until(expTime).Hours() / 24)
+				c.Expired = c.DaysUntilExpiry < 0
 			}
 		}
 
-		// Analyze risk
-		c.RiskLevel, c.RiskReasons = s.analyzeSSLCertRisk(c)
+		// Check for wildcard domains
+		for _, domain := range c.Domains {
+			if strings.HasPrefix(domain, "*") {
+				c.Wildcard = true
+				break
+			}
+		}
 
 		certificates = append(certificates, c)
 	}
@@ -175,7 +187,7 @@ func (s *CertManagerService) GetSSLCertificates(projectID string) ([]SSLCertific
 					ProjectID:    projectID,
 					Type:         cert.Type,
 					CreationTime: cert.CreationTimestamp,
-					RiskReasons:  []string{},
+					SelfManaged:  cert.Type == "SELF_MANAGED",
 				}
 
 				if cert.Managed != nil {
@@ -187,10 +199,18 @@ func (s *CertManagerService) GetSSLCertificates(projectID string) ([]SSLCertific
 					expTime, err := time.Parse(time.RFC3339, cert.ExpireTime)
 					if err == nil {
 						c.DaysUntilExpiry = int(time.Until(expTime).Hours() / 24)
+						c.Expired = c.DaysUntilExpiry < 0
 					}
 				}
 
-				c.RiskLevel, c.RiskReasons = s.analyzeSSLCertRisk(c)
+				// Check for wildcard domains
+				for _, domain := range c.Domains {
+					if strings.HasPrefix(domain, "*") {
+						c.Wildcard = true
+						break
+					}
+				}
+
 				certificates = append(certificates, c)
 			}
 		}
@@ -220,10 +240,9 @@ func (s *CertManagerService) GetCertificateMaps(projectID string) ([]Certificate
 
 		for _, certMap := range resp.CertificateMaps {
 			cm := CertificateMap{
-				Name:        extractNameFromPath(certMap.Name),
-				ProjectID:   projectID,
-				Location:    location,
-				RiskReasons: []string{},
+				Name:      extractNameFromPath(certMap.Name),
+				ProjectID: projectID,
+				Location:  location,
 			}
 
 			// Get entries for this map
@@ -237,114 +256,11 @@ func (s *CertManagerService) GetCertificateMaps(projectID string) ([]Certificate
 				}
 			}
 
-			cm.RiskLevel, cm.RiskReasons = s.analyzeMapRisk(cm)
 			maps = append(maps, cm)
 		}
 	}
 
 	return maps, nil
-}
-
-func (s *CertManagerService) analyzeCertRisk(cert Certificate) (string, []string) {
-	var reasons []string
-	score := 0
-
-	// Check expiration
-	if cert.DaysUntilExpiry < 0 {
-		reasons = append(reasons, "Certificate has EXPIRED!")
-		score += 3
-	} else if cert.DaysUntilExpiry <= 7 {
-		reasons = append(reasons, fmt.Sprintf("Certificate expires in %d day(s) - CRITICAL", cert.DaysUntilExpiry))
-		score += 2
-	} else if cert.DaysUntilExpiry <= 30 {
-		reasons = append(reasons, fmt.Sprintf("Certificate expires in %d day(s)", cert.DaysUntilExpiry))
-		score += 1
-	}
-
-	// Check state
-	if cert.State == "FAILED" {
-		reasons = append(reasons, "Certificate in FAILED state")
-		score += 2
-	}
-
-	// Check issuance state for managed certs
-	if cert.Type == "GOOGLE_MANAGED" && cert.IssuanceState != "ACTIVE" {
-		reasons = append(reasons, fmt.Sprintf("Managed certificate issuance state: %s", cert.IssuanceState))
-		score += 1
-	}
-
-	// Self-managed certs need more attention
-	if cert.Type == "SELF_MANAGED" {
-		reasons = append(reasons, "Self-managed certificate requires manual renewal")
-	}
-
-	// Check for wildcard domains (can be abused if key is compromised)
-	for _, domain := range cert.Domains {
-		if strings.HasPrefix(domain, "*") {
-			reasons = append(reasons, fmt.Sprintf("Wildcard certificate: %s", domain))
-			break
-		}
-	}
-
-	if score >= 3 {
-		return "HIGH", reasons
-	} else if score >= 2 {
-		return "MEDIUM", reasons
-	} else if score >= 1 {
-		return "LOW", reasons
-	}
-	return "INFO", reasons
-}
-
-func (s *CertManagerService) analyzeSSLCertRisk(cert SSLCertificate) (string, []string) {
-	var reasons []string
-	score := 0
-
-	// Check expiration
-	if cert.DaysUntilExpiry < 0 {
-		reasons = append(reasons, "Certificate has EXPIRED!")
-		score += 3
-	} else if cert.DaysUntilExpiry <= 7 {
-		reasons = append(reasons, fmt.Sprintf("Certificate expires in %d day(s) - CRITICAL", cert.DaysUntilExpiry))
-		score += 2
-	} else if cert.DaysUntilExpiry <= 30 {
-		reasons = append(reasons, fmt.Sprintf("Certificate expires in %d day(s)", cert.DaysUntilExpiry))
-		score += 1
-	}
-
-	// Self-managed needs more attention
-	if cert.Type == "SELF_MANAGED" {
-		reasons = append(reasons, "Self-managed certificate requires manual renewal")
-	}
-
-	// Check for wildcard
-	for _, domain := range cert.Domains {
-		if strings.HasPrefix(domain, "*") {
-			reasons = append(reasons, fmt.Sprintf("Wildcard certificate: %s", domain))
-			break
-		}
-	}
-
-	if score >= 3 {
-		return "HIGH", reasons
-	} else if score >= 2 {
-		return "MEDIUM", reasons
-	} else if score >= 1 {
-		return "LOW", reasons
-	}
-	return "INFO", reasons
-}
-
-func (s *CertManagerService) analyzeMapRisk(certMap CertificateMap) (string, []string) {
-	var reasons []string
-
-	if certMap.EntryCount == 0 {
-		reasons = append(reasons, "Certificate map has no entries")
-		return "LOW", reasons
-	}
-
-	reasons = append(reasons, fmt.Sprintf("Has %d certificate(s)", len(certMap.Certificates)))
-	return "INFO", reasons
 }
 
 func extractNameFromPath(path string) string {

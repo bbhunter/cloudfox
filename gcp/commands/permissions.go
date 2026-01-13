@@ -9,7 +9,6 @@ import (
 
 	IAMService "github.com/BishopFox/cloudfox/gcp/services/iamService"
 	orgsservice "github.com/BishopFox/cloudfox/gcp/services/organizationsService"
-	privescservice "github.com/BishopFox/cloudfox/gcp/services/privescService"
 	"github.com/BishopFox/cloudfox/globals"
 	"github.com/BishopFox/cloudfox/internal"
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
@@ -32,22 +31,7 @@ This module provides COMPLETE permission visibility by:
 - Identifying cross-project access patterns
 - Flagging dangerous/privesc permissions
 
-Output Tables:
-1. permissions-exploded: ONE ROW PER PERMISSION with full context
-2. permissions-summary: Entity summary with permission counts
-3. permissions-by-scope: Permissions grouped by resource scope (org/folder/project)
-4. permissions-dangerous: Privesc-relevant permissions
-5. permissions-cross-project: Permissions granting cross-project access
-
-Each permission row includes:
-- Entity (user/SA/group)
-- Permission name
-- Role that grants this permission
-- Resource scope (organization/folder/project ID)
-- Inheritance source (where the binding was defined)
-- Condition (if any IAM conditions apply)
-
-This is a comprehensive enumeration - expect longer execution times for large organizations.`,
+Output: Single unified table with one row per permission entry.`,
 	Run: runGCPPermissionsCommand,
 }
 
@@ -81,23 +65,26 @@ var highPrivilegePermissionPrefixes = []string{
 
 // ExplodedPermission represents a single permission entry with full context
 type ExplodedPermission struct {
-	Entity            string // Full entity identifier (e.g., user:foo@example.com)
-	EntityType        string // User, ServiceAccount, Group, etc.
-	EntityEmail       string // Clean email without prefix
-	Permission        string // Individual permission name
-	Role              string // Role that grants this permission
-	RoleType          string // predefined, custom, basic
-	ResourceScope     string // Full resource path (organizations/123, folders/456, projects/xyz)
-	ResourceScopeType string // organization, folder, project
-	ResourceScopeID   string // Just the ID portion
-	InheritedFrom     string // Where the binding was defined (if different from scope)
-	IsInherited       bool   // True if permission comes from a higher level
-	HasCondition      bool   // True if IAM condition applies
-	Condition         string // Condition expression if any
-	EffectiveProject  string // The project this permission is effective in
-	ProjectName       string // Display name of the effective project
-	IsCrossProject    bool   // True if entity is from different project
-	SourceProject     string // Entity's home project (for cross-project detection)
+	Entity            string
+	EntityType        string
+	EntityEmail       string
+	Permission        string
+	Role              string
+	RoleType          string
+	ResourceScope     string
+	ResourceScopeType string
+	ResourceScopeID   string
+	ResourceScopeName string
+	InheritedFrom     string
+	IsInherited       bool
+	HasCondition      bool
+	Condition         string
+	ConditionTitle    string
+	EffectiveProject  string
+	ProjectName       string
+	IsCrossProject    bool
+	SourceProject     string
+	IsHighPrivilege   bool
 }
 
 // ------------------------------
@@ -110,10 +97,14 @@ type PermissionsModule struct {
 	ExplodedPerms     []ExplodedPermission
 	EntityPermissions []IAMService.EntityPermissions
 	GroupInfos        []IAMService.GroupInfo
-	OrgBindings       []IAMService.PolicyBinding // Organization-level bindings
-	FolderBindings    map[string][]IAMService.PolicyBinding // Folder ID -> bindings
+	OrgBindings       []IAMService.PolicyBinding
+	FolderBindings    map[string][]IAMService.PolicyBinding
 	LootMap           map[string]*internal.LootFile
 	mu                sync.Mutex
+
+	// Organization info for output path
+	OrgIDs   []string
+	OrgNames map[string]string
 }
 
 // ------------------------------
@@ -131,13 +122,11 @@ func (o PermissionsOutput) LootFiles() []internal.LootFile   { return o.Loot }
 // Command Entry Point
 // ------------------------------
 func runGCPPermissionsCommand(cmd *cobra.Command, args []string) {
-	// Initialize command context
 	cmdCtx, err := gcpinternal.InitializeCommandContext(cmd, globals.GCP_PERMISSIONS_MODULE_NAME)
 	if err != nil {
-		return // Error already logged
+		return
 	}
 
-	// Create module instance
 	module := &PermissionsModule{
 		BaseGCPModule:     gcpinternal.NewBaseGCPModule(cmdCtx),
 		ExplodedPerms:     []ExplodedPermission{},
@@ -146,12 +135,11 @@ func runGCPPermissionsCommand(cmd *cobra.Command, args []string) {
 		OrgBindings:       []IAMService.PolicyBinding{},
 		FolderBindings:    make(map[string][]IAMService.PolicyBinding),
 		LootMap:           make(map[string]*internal.LootFile),
+		OrgIDs:            []string{},
+		OrgNames:          make(map[string]string),
 	}
 
-	// Initialize loot files
 	module.initializeLootFiles()
-
-	// Execute enumeration
 	module.Execute(cmdCtx.Ctx, cmdCtx.Logger)
 }
 
@@ -168,7 +156,6 @@ func (m *PermissionsModule) Execute(ctx context.Context, logger internal.Logger)
 	// Run project enumeration with concurrency
 	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_PERMISSIONS_MODULE_NAME, m.processProject)
 
-	// Check results
 	if len(m.ExplodedPerms) == 0 {
 		logger.InfoM("No permissions found", globals.GCP_PERMISSIONS_MODULE_NAME)
 		return
@@ -179,7 +166,7 @@ func (m *PermissionsModule) Execute(ctx context.Context, logger internal.Logger)
 	uniquePerms := make(map[string]bool)
 	inheritedCount := 0
 	crossProjectCount := 0
-	dangerousCount := 0
+	highPrivCount := 0
 
 	for _, ep := range m.ExplodedPerms {
 		uniqueEntities[ep.Entity] = true
@@ -190,15 +177,15 @@ func (m *PermissionsModule) Execute(ctx context.Context, logger internal.Logger)
 		if ep.IsCrossProject {
 			crossProjectCount++
 		}
-		if getDangerousPermissionInfo(ep.Permission) != nil {
-			dangerousCount++
+		if ep.IsHighPrivilege {
+			highPrivCount++
 		}
 	}
 
 	logger.SuccessM(fmt.Sprintf("Exploded %d total permission entries for %d entities",
 		len(m.ExplodedPerms), len(uniqueEntities)), globals.GCP_PERMISSIONS_MODULE_NAME)
-	logger.InfoM(fmt.Sprintf("Unique permissions: %d | Inherited: %d | Cross-project: %d | Dangerous: %d",
-		len(uniquePerms), inheritedCount, crossProjectCount, dangerousCount), globals.GCP_PERMISSIONS_MODULE_NAME)
+	logger.InfoM(fmt.Sprintf("Unique permissions: %d | Inherited: %d | Cross-project: %d | High-privilege: %d",
+		len(uniquePerms), inheritedCount, crossProjectCount, highPrivCount), globals.GCP_PERMISSIONS_MODULE_NAME)
 
 	if len(m.GroupInfos) > 0 {
 		groupsEnumerated := 0
@@ -209,27 +196,22 @@ func (m *PermissionsModule) Execute(ctx context.Context, logger internal.Logger)
 		}
 		logger.InfoM(fmt.Sprintf("Found %d group(s), enumerated membership for %d", len(m.GroupInfos), groupsEnumerated), globals.GCP_PERMISSIONS_MODULE_NAME)
 
-		// Warn about blindspot if we couldn't enumerate some groups
 		unenumeratedGroups := len(m.GroupInfos) - groupsEnumerated
 		if unenumeratedGroups > 0 {
 			logger.InfoM(fmt.Sprintf("[WARNING] Could not enumerate membership for %d group(s) - permissions inherited via these groups are NOT visible!", unenumeratedGroups), globals.GCP_PERMISSIONS_MODULE_NAME)
 		}
 	}
 
-	// Write output
 	m.writeOutput(ctx, logger)
 }
 
 // enumerateOrganizationBindings tries to get organization-level IAM bindings
 func (m *PermissionsModule) enumerateOrganizationBindings(ctx context.Context, logger internal.Logger) {
-	// Try to discover the organization
 	orgsSvc := orgsservice.New()
 
-	// Use SearchProjects to find organizations from project ancestry
 	if len(m.ProjectIDs) > 0 {
 		iamSvc := IAMService.New()
 
-		// Try to get org bindings via the first project's ancestry
 		bindings, err := iamSvc.PoliciesWithInheritance(m.ProjectIDs[0])
 		if err != nil {
 			if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
@@ -238,11 +220,15 @@ func (m *PermissionsModule) enumerateOrganizationBindings(ctx context.Context, l
 			return
 		}
 
-		// Extract org and folder bindings
 		for _, binding := range bindings {
 			if binding.ResourceType == "organization" {
 				m.mu.Lock()
 				m.OrgBindings = append(m.OrgBindings, binding)
+				// Track org IDs
+				if !contains(m.OrgIDs, binding.ResourceID) {
+					m.OrgIDs = append(m.OrgIDs, binding.ResourceID)
+					m.OrgNames[binding.ResourceID] = binding.ResourceID // Use ID as name for now
+				}
 				m.mu.Unlock()
 			} else if binding.ResourceType == "folder" {
 				m.mu.Lock()
@@ -264,7 +250,16 @@ func (m *PermissionsModule) enumerateOrganizationBindings(ctx context.Context, l
 		}
 	}
 
-	_ = orgsSvc // silence unused warning if not used
+	_ = orgsSvc
+}
+
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
 }
 
 // ------------------------------
@@ -275,7 +270,6 @@ func (m *PermissionsModule) processProject(ctx context.Context, projectID string
 		logger.InfoM(fmt.Sprintf("Enumerating permissions in project: %s", projectID), globals.GCP_PERMISSIONS_MODULE_NAME)
 	}
 
-	// Create service and fetch permissions with group expansion
 	iamService := IAMService.New()
 	entityPerms, groupInfos, err := iamService.GetAllEntityPermissionsWithGroupExpansion(projectID)
 	if err != nil {
@@ -285,10 +279,11 @@ func (m *PermissionsModule) processProject(ctx context.Context, projectID string
 		return
 	}
 
-	// Explode permissions - create one entry per permission
 	var explodedPerms []ExplodedPermission
 	for _, ep := range entityPerms {
 		for _, perm := range ep.Permissions {
+			isHighPriv := isHighPrivilegePermission(perm.Permission)
+
 			exploded := ExplodedPermission{
 				Entity:            ep.Entity,
 				EntityType:        ep.EntityType,
@@ -299,17 +294,23 @@ func (m *PermissionsModule) processProject(ctx context.Context, projectID string
 				ResourceScope:     fmt.Sprintf("%s/%s", perm.ResourceType, perm.ResourceID),
 				ResourceScopeType: perm.ResourceType,
 				ResourceScopeID:   perm.ResourceID,
+				ResourceScopeName: m.getScopeName(perm.ResourceType, perm.ResourceID),
 				IsInherited:       perm.IsInherited,
 				InheritedFrom:     perm.InheritedFrom,
 				HasCondition:      perm.HasCondition,
 				Condition:         perm.Condition,
 				EffectiveProject:  projectID,
 				ProjectName:       m.GetProjectName(projectID),
+				IsHighPrivilege:   isHighPriv,
+			}
+
+			// Parse condition title if present
+			if perm.HasCondition && perm.Condition != "" {
+				exploded.ConditionTitle = parseConditionTitle(perm.Condition)
 			}
 
 			// Detect cross-project access
 			if ep.EntityType == "ServiceAccount" {
-				// Extract project from SA email (format: sa-name@project-id.iam.gserviceaccount.com)
 				parts := strings.Split(ep.Email, "@")
 				if len(parts) == 2 {
 					saParts := strings.Split(parts[1], ".")
@@ -327,20 +328,14 @@ func (m *PermissionsModule) processProject(ctx context.Context, projectID string
 		}
 	}
 
-	// Thread-safe append
 	m.mu.Lock()
 	m.ExplodedPerms = append(m.ExplodedPerms, explodedPerms...)
 	m.EntityPermissions = append(m.EntityPermissions, entityPerms...)
 	m.GroupInfos = append(m.GroupInfos, groupInfos...)
 
-	// Generate loot for each entity
+	// Generate loot
 	for _, ep := range entityPerms {
 		m.addEntityToLoot(ep)
-	}
-
-	// Generate loot for group memberships
-	for _, gi := range groupInfos {
-		m.addGroupToLoot(gi)
 	}
 	m.mu.Unlock()
 
@@ -349,217 +344,89 @@ func (m *PermissionsModule) processProject(ctx context.Context, projectID string
 	}
 }
 
+func (m *PermissionsModule) getScopeName(scopeType, scopeID string) string {
+	switch scopeType {
+	case "project":
+		return m.GetProjectName(scopeID)
+	case "organization":
+		if name, ok := m.OrgNames[scopeID]; ok {
+			return name
+		}
+		return scopeID
+	case "folder":
+		return scopeID // Could be enhanced to lookup folder names
+	default:
+		return scopeID
+	}
+}
+
+func parseConditionTitle(condition string) string {
+	// Try to extract title from condition if it looks like a struct
+	if strings.Contains(condition, "title:") {
+		parts := strings.Split(condition, "title:")
+		if len(parts) > 1 {
+			titlePart := strings.TrimSpace(parts[1])
+			if idx := strings.Index(titlePart, " "); idx > 0 {
+				return titlePart[:idx]
+			}
+			return titlePart
+		}
+	}
+	return ""
+}
+
 // ------------------------------
 // Loot File Management
 // ------------------------------
 func (m *PermissionsModule) initializeLootFiles() {
-	m.LootMap["permissions-all"] = &internal.LootFile{
-		Name:     "permissions-all",
-		Contents: "# GCP Entity Permissions (All)\n# Generated by CloudFox\n# Format: Entity | Permission | Role | Scope | Inherited | Condition\n\n",
-	}
-	m.LootMap["permissions-high-privilege"] = &internal.LootFile{
-		Name:     "permissions-high-privilege",
-		Contents: "# GCP High-Privilege Permissions\n# Generated by CloudFox\n# These permissions can lead to privilege escalation\n\n",
-	}
-	m.LootMap["permissions-by-entity"] = &internal.LootFile{
-		Name:     "permissions-by-entity",
-		Contents: "# GCP Permissions Grouped by Entity\n# Generated by CloudFox\n\n",
-	}
-	m.LootMap["permissions-inherited"] = &internal.LootFile{
-		Name:     "permissions-inherited",
-		Contents: "# GCP Inherited Permissions\n# Generated by CloudFox\n# These permissions are inherited from folders or organization\n\n",
-	}
-	m.LootMap["permissions-conditional"] = &internal.LootFile{
-		Name:     "permissions-conditional",
-		Contents: "# GCP Conditional Permissions\n# Generated by CloudFox\n# These permissions have IAM conditions (conditional access)\n\n",
-	}
-	m.LootMap["group-memberships"] = &internal.LootFile{
-		Name:     "group-memberships",
-		Contents: "# GCP Group Memberships\n# Generated by CloudFox\n# Shows group members including nested groups\n\n",
-	}
-	m.LootMap["groups-unenumerated"] = &internal.LootFile{
-		Name:     "groups-unenumerated",
-		Contents: "# GCP Groups - Membership NOT Enumerated (BLINDSPOT)\n# Generated by CloudFox\n# These groups have IAM permissions but membership could not be enumerated\n# Members of these groups inherit permissions that are NOT visible in other output\n# Requires Cloud Identity API access to enumerate\n\n",
-	}
-	// Pentest-focused loot files
-	m.LootMap["permissions-dangerous"] = &internal.LootFile{
-		Name:     "permissions-dangerous",
-		Contents: "# GCP Dangerous Permissions (Privesc Risk)\n# Generated by CloudFox\n# These permissions can lead to privilege escalation\n\n",
-	}
-	m.LootMap["permissions-dangerous-by-category"] = &internal.LootFile{
-		Name:     "permissions-dangerous-by-category",
-		Contents: "# GCP Dangerous Permissions by Category\n# Generated by CloudFox\n\n",
-	}
-	m.LootMap["permissions-cross-project"] = &internal.LootFile{
-		Name:     "permissions-cross-project",
-		Contents: "# GCP Cross-Project Permissions\n# Generated by CloudFox\n# Service accounts with access to projects outside their home project\n\n",
-	}
-	m.LootMap["permissions-org-level"] = &internal.LootFile{
-		Name:     "permissions-org-level",
-		Contents: "# GCP Organization-Level Permissions\n# Generated by CloudFox\n# These permissions are inherited by ALL projects in the organization\n\n",
+	m.LootMap["permissions-commands"] = &internal.LootFile{
+		Name:     "permissions-commands",
+		Contents: "# GCP Permissions Commands\n# Generated by CloudFox\n\n",
 	}
 }
 
 func (m *PermissionsModule) addEntityToLoot(ep IAMService.EntityPermissions) {
-	// Permissions by entity
-	m.LootMap["permissions-by-entity"].Contents += fmt.Sprintf(
-		"# Entity: %s (Type: %s)\n"+
-			"# Project: %s\n"+
-			"# Roles: %s\n"+
-			"# Total Permissions: %d (Unique: %d)\n",
-		ep.Email, ep.EntityType,
-		ep.ProjectID,
-		strings.Join(ep.Roles, ", "),
-		ep.TotalPerms, ep.UniquePerms,
-	)
+	// Only add service accounts with high-privilege permissions
+	hasHighPriv := false
+	var highPrivPerms []string
 
-	// Sort permissions for consistent output
-	sortedPerms := make([]IAMService.PermissionEntry, len(ep.Permissions))
-	copy(sortedPerms, ep.Permissions)
-	sort.Slice(sortedPerms, func(i, j int) bool {
-		return sortedPerms[i].Permission < sortedPerms[j].Permission
-	})
-
-	for _, perm := range sortedPerms {
-		inherited := ""
-		if perm.IsInherited {
-			inherited = fmt.Sprintf(" [inherited from %s]", perm.InheritedFrom)
-		}
-		condition := ""
-		if perm.HasCondition {
-			condition = fmt.Sprintf(" [condition: %s]", perm.Condition)
-		}
-
-		m.LootMap["permissions-by-entity"].Contents += fmt.Sprintf(
-			"  %s (via %s)%s%s\n",
-			perm.Permission, perm.Role, inherited, condition,
-		)
-
-		// All permissions
-		m.LootMap["permissions-all"].Contents += fmt.Sprintf(
-			"%s | %s | %s | %s/%s | %v | %s\n",
-			ep.Email, perm.Permission, perm.Role, perm.ResourceType, perm.ResourceID, perm.IsInherited, perm.Condition,
-		)
-
-		// High privilege permissions
+	for _, perm := range ep.Permissions {
 		if isHighPrivilegePermission(perm.Permission) {
-			m.LootMap["permissions-high-privilege"].Contents += fmt.Sprintf(
-				"# Entity: %s (Type: %s)\n"+
-					"# Permission: %s\n"+
-					"# Role: %s (%s)\n"+
-					"# Resource: %s/%s%s%s\n\n",
-				ep.Email, ep.EntityType,
-				perm.Permission,
-				perm.Role, perm.RoleType,
-				perm.ResourceType, perm.ResourceID, inherited, condition,
-			)
-		}
-
-		// Dangerous permissions with detailed categorization
-		if dpInfo := getDangerousPermissionInfo(perm.Permission); dpInfo != nil {
-			m.LootMap["permissions-dangerous"].Contents += fmt.Sprintf(
-				"## [%s] %s\n"+
-					"## Entity: %s (%s)\n"+
-					"## Permission: %s\n"+
-					"## Category: %s\n"+
-					"## Description: %s\n"+
-					"## Role: %s\n"+
-					"## Project: %s%s%s\n\n",
-				dpInfo.RiskLevel, dpInfo.Category,
-				ep.Email, ep.EntityType,
-				dpInfo.Permission,
-				dpInfo.Category,
-				dpInfo.Description,
-				perm.Role,
-				perm.ResourceID, inherited, condition,
-			)
-
-			m.LootMap["permissions-dangerous-by-category"].Contents += fmt.Sprintf(
-				"[%s] %s | %s | %s | %s | %s\n",
-				dpInfo.RiskLevel, dpInfo.Category, ep.Email, dpInfo.Permission, dpInfo.Description, perm.ResourceID,
-			)
-		}
-
-		// Inherited permissions
-		if perm.IsInherited {
-			m.LootMap["permissions-inherited"].Contents += fmt.Sprintf(
-				"%s | %s | %s | %s\n",
-				ep.Email, perm.Permission, perm.Role, perm.InheritedFrom,
-			)
-		}
-
-		// Conditional permissions
-		if perm.HasCondition {
-			m.LootMap["permissions-conditional"].Contents += fmt.Sprintf(
-				"%s | %s | %s | %s\n",
-				ep.Email, perm.Permission, perm.Role, perm.Condition,
-			)
-		}
-
-		// Organization-level permissions
-		if perm.ResourceType == "organization" {
-			m.LootMap["permissions-org-level"].Contents += fmt.Sprintf(
-				"%s | %s | %s | %s\n",
-				ep.Email, perm.Permission, perm.Role, perm.ResourceID,
-			)
-		}
-	}
-	m.LootMap["permissions-by-entity"].Contents += "\n"
-}
-
-// addGroupToLoot adds group membership information to loot files
-func (m *PermissionsModule) addGroupToLoot(gi IAMService.GroupInfo) {
-	enumStatus := "not enumerated"
-	if gi.MembershipEnumerated {
-		enumStatus = "enumerated"
-	}
-
-	m.LootMap["group-memberships"].Contents += fmt.Sprintf(
-		"# Group: %s\n"+
-			"# Display Name: %s\n"+
-			"# Project: %s\n"+
-			"# Member Count: %d\n"+
-			"# Has Nested Groups: %v\n"+
-			"# Membership Status: %s\n"+
-			"# Roles: %s\n",
-		gi.Email,
-		gi.DisplayName,
-		gi.ProjectID,
-		gi.MemberCount,
-		gi.HasNestedGroups,
-		enumStatus,
-		strings.Join(gi.Roles, ", "),
-	)
-
-	if gi.MembershipEnumerated && len(gi.Members) > 0 {
-		m.LootMap["group-memberships"].Contents += "# Members:\n"
-		for _, member := range gi.Members {
-			m.LootMap["group-memberships"].Contents += fmt.Sprintf(
-				"  - %s (Type: %s, Role: %s)\n",
-				member.Email, member.Type, member.Role,
-			)
+			hasHighPriv = true
+			highPrivPerms = append(highPrivPerms, perm.Permission)
 		}
 	}
 
-	if gi.HasNestedGroups && len(gi.NestedGroups) > 0 {
-		m.LootMap["group-memberships"].Contents += "# Nested Groups:\n"
-		for _, nested := range gi.NestedGroups {
-			m.LootMap["group-memberships"].Contents += fmt.Sprintf("  - %s\n", nested)
+	if ep.EntityType == "ServiceAccount" {
+		if hasHighPriv {
+			m.LootMap["permissions-commands"].Contents += fmt.Sprintf(
+				"# Service Account: %s [HIGH PRIVILEGE]\n"+
+					"# High-privilege permissions: %s\n"+
+					"# Roles: %s\n",
+				ep.Email,
+				strings.Join(highPrivPerms, ", "),
+				strings.Join(ep.Roles, ", "),
+			)
+		} else {
+			m.LootMap["permissions-commands"].Contents += fmt.Sprintf(
+				"# Service Account: %s\n"+
+					"# Roles: %s\n",
+				ep.Email,
+				strings.Join(ep.Roles, ", "),
+			)
 		}
-	}
 
-	m.LootMap["group-memberships"].Contents += "\n"
-
-	// Track unenumerated groups as a blindspot
-	if !gi.MembershipEnumerated {
-		m.LootMap["groups-unenumerated"].Contents += fmt.Sprintf(
-			"# BLINDSPOT: Group %s\n"+
-				"# Project: %s\n"+
-				"# Roles assigned to this group: %s\n"+
-				"# Members of this group inherit these roles but are NOT visible!\n\n",
-			gi.Email,
-			gi.ProjectID,
-			strings.Join(gi.Roles, ", "),
+		m.LootMap["permissions-commands"].Contents += fmt.Sprintf(
+			"gcloud iam service-accounts describe %s --project=%s\n"+
+				"gcloud iam service-accounts keys list --iam-account=%s --project=%s\n"+
+				"gcloud iam service-accounts get-iam-policy %s --project=%s\n"+
+				"gcloud iam service-accounts keys create ./key.json --iam-account=%s --project=%s\n"+
+				"gcloud auth print-access-token --impersonate-service-account=%s\n\n",
+			ep.Email, ep.ProjectID,
+			ep.Email, ep.ProjectID,
+			ep.Email, ep.ProjectID,
+			ep.Email, ep.ProjectID,
+			ep.Email,
 		)
 	}
 }
@@ -574,454 +441,222 @@ func isHighPrivilegePermission(permission string) bool {
 	return false
 }
 
-// DangerousPermissionInfo contains detailed info about a dangerous permission
-type DangerousPermissionInfo struct {
-	Permission  string
-	Category    string
-	RiskLevel   string
-	Description string
+// PermFederatedIdentityInfo contains parsed information about a federated identity
+type PermFederatedIdentityInfo struct {
+	IsFederated  bool
+	ProviderType string // AWS, GitHub, GitLab, OIDC, SAML, Azure, etc.
+	PoolName     string
+	Subject      string
+	Attribute    string
 }
 
-// getDangerousPermissionInfo returns detailed info if permission is dangerous, nil otherwise
-func getDangerousPermissionInfo(permission string) *DangerousPermissionInfo {
-	dangerousPerms := privescservice.GetDangerousPermissions()
-	for _, dp := range dangerousPerms {
-		if permission == dp.Permission {
-			return &DangerousPermissionInfo{
-				Permission:  dp.Permission,
-				Category:    dp.Category,
-				RiskLevel:   dp.RiskLevel,
-				Description: dp.Description,
+// parsePermFederatedIdentity detects and parses federated identity principals
+func parsePermFederatedIdentity(identity string) PermFederatedIdentityInfo {
+	info := PermFederatedIdentityInfo{}
+
+	// Check for principal:// or principalSet:// format
+	if !strings.HasPrefix(identity, "principal://") && !strings.HasPrefix(identity, "principalSet://") {
+		return info
+	}
+
+	info.IsFederated = true
+
+	// Extract pool name if present
+	if strings.Contains(identity, "workloadIdentityPools/") {
+		parts := strings.Split(identity, "workloadIdentityPools/")
+		if len(parts) > 1 {
+			poolParts := strings.Split(parts[1], "/")
+			if len(poolParts) > 0 {
+				info.PoolName = poolParts[0]
 			}
 		}
 	}
-	return nil
+
+	// Detect provider type based on common patterns
+	identityLower := strings.ToLower(identity)
+
+	switch {
+	case strings.Contains(identityLower, "aws") || strings.Contains(identityLower, "amazon"):
+		info.ProviderType = "AWS"
+	case strings.Contains(identityLower, "github"):
+		info.ProviderType = "GitHub"
+	case strings.Contains(identityLower, "gitlab"):
+		info.ProviderType = "GitLab"
+	case strings.Contains(identityLower, "azure") || strings.Contains(identityLower, "microsoft"):
+		info.ProviderType = "Azure"
+	case strings.Contains(identityLower, "okta"):
+		info.ProviderType = "Okta"
+	case strings.Contains(identityLower, "bitbucket"):
+		info.ProviderType = "Bitbucket"
+	case strings.Contains(identityLower, "circleci"):
+		info.ProviderType = "CircleCI"
+	case strings.Contains(identity, "attribute."):
+		info.ProviderType = "OIDC"
+	default:
+		info.ProviderType = "Federated"
+	}
+
+	// Extract subject if present
+	// Format: .../subject/{subject}
+	if strings.Contains(identity, "/subject/") {
+		parts := strings.Split(identity, "/subject/")
+		if len(parts) > 1 {
+			info.Subject = parts[1]
+		}
+	}
+
+	// Extract attribute and value if present
+	// Format: .../attribute.{attr}/{value}
+	if strings.Contains(identity, "/attribute.") {
+		parts := strings.Split(identity, "/attribute.")
+		if len(parts) > 1 {
+			attrParts := strings.Split(parts[1], "/")
+			if len(attrParts) >= 1 {
+				info.Attribute = attrParts[0]
+			}
+			if len(attrParts) >= 2 {
+				// The value is the specific identity (e.g., repo name)
+				info.Subject = attrParts[1]
+			}
+		}
+	}
+
+	return info
+}
+
+// formatPermFederatedInfo formats federated identity info for display
+func formatPermFederatedInfo(info PermFederatedIdentityInfo) string {
+	if !info.IsFederated {
+		return "-"
+	}
+
+	result := info.ProviderType
+
+	// Show subject (specific identity like repo/workflow) if available
+	if info.Subject != "" {
+		result += ": " + info.Subject
+	} else if info.Attribute != "" {
+		result += " [" + info.Attribute + "]"
+	}
+
+	// Add pool name in parentheses
+	if info.PoolName != "" {
+		result += " (pool: " + info.PoolName + ")"
+	}
+
+	return result
+}
+
+// formatCondition formats a condition for display
+func formatPermissionCondition(hasCondition bool, condition, conditionTitle string) string {
+	if !hasCondition {
+		return "No"
+	}
+
+	if conditionTitle != "" {
+		return conditionTitle
+	}
+
+	// Parse common patterns
+	if strings.Contains(condition, "request.time") {
+		return "[time-limited]"
+	}
+	if strings.Contains(condition, "resource.name") {
+		return "[resource-scoped]"
+	}
+	if strings.Contains(condition, "origin.ip") || strings.Contains(condition, "request.origin") {
+		return "[IP-restricted]"
+	}
+	if strings.Contains(condition, "device") {
+		return "[device-policy]"
+	}
+
+	return "Yes"
 }
 
 // ------------------------------
 // Output Generation
 // ------------------------------
 func (m *PermissionsModule) writeOutput(ctx context.Context, logger internal.Logger) {
-	// ========================================
-	// TABLE 1: EXPLODED PERMISSIONS (Main table - one row per permission)
-	// ========================================
-	explodedHeader := []string{
-		"Entity",
-		"Type",
-		"Permission",
-		"Role",
-		"Role Type",
-		"Resource Scope",
+	// Single unified table with all permissions
+	header := []string{
 		"Scope Type",
 		"Scope ID",
+		"Scope Name",
+		"Entity Type",
+		"Identity",
+		"Permission",
+		"Role",
+		"Custom Role",
 		"Inherited",
 		"Inherited From",
 		"Condition",
-		"Effective Project",
-		"Project Name",
 		"Cross-Project",
+		"High Privilege",
+		"Federated",
 	}
 
-	var explodedBody [][]string
+	var body [][]string
 	for _, ep := range m.ExplodedPerms {
-		inherited := ""
-		if ep.IsInherited {
-			inherited = "✓"
-		}
-		crossProject := ""
-		if ep.IsCrossProject {
-			crossProject = fmt.Sprintf("✓ (from %s)", ep.SourceProject)
-		}
-		condition := ""
-		if ep.HasCondition {
-			condition = ep.Condition
+		isCustom := "No"
+		if ep.RoleType == "custom" || strings.HasPrefix(ep.Role, "projects/") || strings.HasPrefix(ep.Role, "organizations/") {
+			isCustom = "Yes"
 		}
 
-		explodedBody = append(explodedBody, []string{
-			ep.EntityEmail,
-			ep.EntityType,
-			ep.Permission,
-			ep.Role,
-			ep.RoleType,
-			ep.ResourceScope,
+		inherited := "No"
+		if ep.IsInherited {
+			inherited = "Yes"
+		}
+
+		inheritedFrom := "-"
+		if ep.IsInherited && ep.InheritedFrom != "" {
+			inheritedFrom = ep.InheritedFrom
+		}
+
+		condition := formatPermissionCondition(ep.HasCondition, ep.Condition, ep.ConditionTitle)
+
+		crossProject := "No"
+		if ep.IsCrossProject {
+			crossProject = fmt.Sprintf("Yes (from %s)", ep.SourceProject)
+		}
+
+		highPriv := "No"
+		if ep.IsHighPrivilege {
+			highPriv = "Yes"
+		}
+
+		// Check for federated identity
+		federated := formatPermFederatedInfo(parsePermFederatedIdentity(ep.EntityEmail))
+
+		body = append(body, []string{
 			ep.ResourceScopeType,
 			ep.ResourceScopeID,
+			ep.ResourceScopeName,
+			ep.EntityType,
+			ep.EntityEmail,
+			ep.Permission,
+			ep.Role,
+			isCustom,
 			inherited,
-			ep.InheritedFrom,
+			inheritedFrom,
 			condition,
-			ep.EffectiveProject,
-			ep.ProjectName,
 			crossProject,
+			highPriv,
+			federated,
 		})
 	}
 
-	// Sort by entity, then by permission for consistent output
-	sort.Slice(explodedBody, func(i, j int) bool {
-		if explodedBody[i][0] != explodedBody[j][0] {
-			return explodedBody[i][0] < explodedBody[j][0]
-		}
-		return explodedBody[i][2] < explodedBody[j][2]
-	})
-
-	// ========================================
-	// TABLE 2: Entity summary table
-	// ========================================
-	summaryHeader := []string{
-		"Entity",
-		"Type",
-		"Total Perms",
-		"Unique Perms",
-		"Roles",
-		"High Priv",
-		"Dangerous",
-		"Inherited",
-		"Conditional",
-		"Projects",
-		"Cross-Project",
-	}
-
-	// Aggregate by entity
-	entityStats := make(map[string]*struct {
-		entityType      string
-		totalPerms      int
-		uniquePerms     map[string]bool
-		roles           map[string]bool
-		highPriv        int
-		dangerous       int
-		inherited       int
-		conditional     int
-		projects        map[string]bool
-		crossProject    int
-	})
-
-	for _, ep := range m.ExplodedPerms {
-		if entityStats[ep.Entity] == nil {
-			entityStats[ep.Entity] = &struct {
-				entityType      string
-				totalPerms      int
-				uniquePerms     map[string]bool
-				roles           map[string]bool
-				highPriv        int
-				dangerous       int
-				inherited       int
-				conditional     int
-				projects        map[string]bool
-				crossProject    int
-			}{
-				entityType:  ep.EntityType,
-				uniquePerms: make(map[string]bool),
-				roles:       make(map[string]bool),
-				projects:    make(map[string]bool),
-			}
-		}
-		stats := entityStats[ep.Entity]
-		stats.totalPerms++
-		stats.uniquePerms[ep.Permission] = true
-		stats.roles[ep.Role] = true
-		stats.projects[ep.EffectiveProject] = true
-		if isHighPrivilegePermission(ep.Permission) {
-			stats.highPriv++
-		}
-		if getDangerousPermissionInfo(ep.Permission) != nil {
-			stats.dangerous++
-		}
-		if ep.IsInherited {
-			stats.inherited++
-		}
-		if ep.HasCondition {
-			stats.conditional++
-		}
-		if ep.IsCrossProject {
-			stats.crossProject++
-		}
-	}
-
-	var summaryBody [][]string
-	for entity, stats := range entityStats {
-		crossProjectStr := ""
-		if stats.crossProject > 0 {
-			crossProjectStr = fmt.Sprintf("✓ (%d)", stats.crossProject)
-		}
-		summaryBody = append(summaryBody, []string{
-			extractEmailFromEntity(entity),
-			stats.entityType,
-			fmt.Sprintf("%d", stats.totalPerms),
-			fmt.Sprintf("%d", len(stats.uniquePerms)),
-			fmt.Sprintf("%d", len(stats.roles)),
-			fmt.Sprintf("%d", stats.highPriv),
-			fmt.Sprintf("%d", stats.dangerous),
-			fmt.Sprintf("%d", stats.inherited),
-			fmt.Sprintf("%d", stats.conditional),
-			fmt.Sprintf("%d", len(stats.projects)),
-			crossProjectStr,
-		})
-	}
-
-	// Sort by dangerous count descending
-	sort.Slice(summaryBody, func(i, j int) bool {
-		di := 0
-		dj := 0
-		fmt.Sscanf(summaryBody[i][6], "%d", &di)
-		fmt.Sscanf(summaryBody[j][6], "%d", &dj)
-		return di > dj
-	})
-
-	// ========================================
-	// TABLE 3: Permissions by Scope (org/folder/project)
-	// ========================================
-	scopeHeader := []string{
-		"Scope Type",
-		"Scope ID",
-		"Entity",
-		"Type",
-		"Permission",
-		"Role",
-		"Inherited From",
-		"Condition",
-	}
-
-	var scopeBody [][]string
-	for _, ep := range m.ExplodedPerms {
-		scopeBody = append(scopeBody, []string{
-			ep.ResourceScopeType,
-			ep.ResourceScopeID,
-			ep.EntityEmail,
-			ep.EntityType,
-			ep.Permission,
-			ep.Role,
-			ep.InheritedFrom,
-			ep.Condition,
-		})
-	}
-
-	// Sort by scope type (org first, then folder, then project), then scope ID
+	// Sort by scope type (org first, then folder, then project), then entity, then permission
 	scopeOrder := map[string]int{"organization": 0, "folder": 1, "project": 2}
-	sort.Slice(scopeBody, func(i, j int) bool {
-		if scopeBody[i][0] != scopeBody[j][0] {
-			return scopeOrder[scopeBody[i][0]] < scopeOrder[scopeBody[j][0]]
+	sort.Slice(body, func(i, j int) bool {
+		if body[i][0] != body[j][0] {
+			return scopeOrder[body[i][0]] < scopeOrder[body[j][0]]
 		}
-		return scopeBody[i][1] < scopeBody[j][1]
+		if body[i][4] != body[j][4] {
+			return body[i][4] < body[j][4]
+		}
+		return body[i][5] < body[j][5]
 	})
-
-	// ========================================
-	// TABLE 4: Dangerous permissions table
-	// ========================================
-	dangerousHeader := []string{
-		"Risk",
-		"Category",
-		"Entity",
-		"Type",
-		"Permission",
-		"Description",
-		"Role",
-		"Scope",
-		"Inherited",
-		"Effective Project",
-		"Project Name",
-	}
-
-	var dangerousBody [][]string
-	criticalCount := 0
-	for _, ep := range m.ExplodedPerms {
-		if dpInfo := getDangerousPermissionInfo(ep.Permission); dpInfo != nil {
-			inherited := ""
-			if ep.IsInherited {
-				inherited = ep.InheritedFrom
-			}
-			dangerousBody = append(dangerousBody, []string{
-				dpInfo.RiskLevel,
-				dpInfo.Category,
-				ep.EntityEmail,
-				ep.EntityType,
-				dpInfo.Permission,
-				dpInfo.Description,
-				ep.Role,
-				ep.ResourceScope,
-				inherited,
-				ep.EffectiveProject,
-				ep.ProjectName,
-			})
-			if dpInfo.RiskLevel == "CRITICAL" {
-				criticalCount++
-			}
-		}
-	}
-
-	// Sort by risk level
-	riskOrder := map[string]int{"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
-	sort.Slice(dangerousBody, func(i, j int) bool {
-		return riskOrder[dangerousBody[i][0]] < riskOrder[dangerousBody[j][0]]
-	})
-
-	// ========================================
-	// TABLE 5: Cross-project permissions
-	// ========================================
-	crossProjectHeader := []string{
-		"Entity",
-		"Type",
-		"Source Project",
-		"Target Project",
-		"Target Project Name",
-		"Permission",
-		"Role",
-		"Inherited",
-	}
-
-	var crossProjectBody [][]string
-	for _, ep := range m.ExplodedPerms {
-		if ep.IsCrossProject {
-			inherited := ""
-			if ep.IsInherited {
-				inherited = ep.InheritedFrom
-			}
-			crossProjectBody = append(crossProjectBody, []string{
-				ep.EntityEmail,
-				ep.EntityType,
-				ep.SourceProject,
-				ep.EffectiveProject,
-				ep.ProjectName,
-				ep.Permission,
-				ep.Role,
-				inherited,
-			})
-		}
-	}
-
-	// ========================================
-	// TABLE 6: High privilege permissions table
-	// ========================================
-	highPrivHeader := []string{
-		"Entity",
-		"Type",
-		"Permission",
-		"Role",
-		"Scope",
-		"Inherited",
-		"Condition",
-		"Effective Project",
-		"Project Name",
-	}
-
-	var highPrivBody [][]string
-	for _, ep := range m.ExplodedPerms {
-		if isHighPrivilegePermission(ep.Permission) {
-			inherited := ""
-			if ep.IsInherited {
-				inherited = ep.InheritedFrom
-			}
-			condition := ""
-			if ep.HasCondition {
-				condition = ep.Condition
-			}
-
-			highPrivBody = append(highPrivBody, []string{
-				ep.EntityEmail,
-				ep.EntityType,
-				ep.Permission,
-				ep.Role,
-				ep.ResourceScope,
-				inherited,
-				condition,
-				ep.EffectiveProject,
-				ep.ProjectName,
-			})
-		}
-	}
-
-	// ========================================
-	// TABLE 7: Group membership table
-	// ========================================
-	groupHeader := []string{
-		"Group Email",
-		"Display Name",
-		"Member Count",
-		"Nested Groups",
-		"Enumerated",
-		"Roles",
-		"Project Name",
-		"Project ID",
-	}
-
-	var groupBody [][]string
-	for _, gi := range m.GroupInfos {
-		enumStatus := "No"
-		if gi.MembershipEnumerated {
-			enumStatus = "Yes"
-		}
-		nestedGroups := ""
-		if gi.HasNestedGroups {
-			nestedGroups = fmt.Sprintf("%d", len(gi.NestedGroups))
-		}
-
-		groupBody = append(groupBody, []string{
-			gi.Email,
-			gi.DisplayName,
-			fmt.Sprintf("%d", gi.MemberCount),
-			nestedGroups,
-			enumStatus,
-			fmt.Sprintf("%d", len(gi.Roles)),
-			m.GetProjectName(gi.ProjectID),
-			gi.ProjectID,
-		})
-	}
-
-	// ========================================
-	// TABLE 8: Group members detail table
-	// ========================================
-	groupMembersHeader := []string{
-		"Group Email",
-		"Member Email",
-		"Member Type",
-		"Role in Group",
-		"Project Name",
-		"Project ID",
-	}
-
-	var groupMembersBody [][]string
-	for _, gi := range m.GroupInfos {
-		if gi.MembershipEnumerated {
-			for _, member := range gi.Members {
-				groupMembersBody = append(groupMembersBody, []string{
-					gi.Email,
-					member.Email,
-					member.Type,
-					member.Role,
-					m.GetProjectName(gi.ProjectID),
-					gi.ProjectID,
-				})
-			}
-		}
-	}
-
-	// ========================================
-	// TABLE 9: Inherited permissions table
-	// ========================================
-	inheritedHeader := []string{
-		"Entity",
-		"Type",
-		"Permission",
-		"Role",
-		"Inherited From",
-		"Scope Type",
-		"Effective Project",
-		"Project Name",
-	}
-
-	var inheritedBody [][]string
-	for _, ep := range m.ExplodedPerms {
-		if ep.IsInherited {
-			inheritedBody = append(inheritedBody, []string{
-				ep.EntityEmail,
-				ep.EntityType,
-				ep.Permission,
-				ep.Role,
-				ep.InheritedFrom,
-				ep.ResourceScopeType,
-				ep.EffectiveProject,
-				ep.ProjectName,
-			})
-		}
-	}
 
 	// Collect loot files
 	var lootFiles []internal.LootFile
@@ -1031,83 +666,31 @@ func (m *PermissionsModule) writeOutput(ctx context.Context, logger internal.Log
 		}
 	}
 
-	// Build tables
 	tables := []internal.TableFile{
 		{
-			Name:   "permissions-exploded",
-			Header: explodedHeader,
-			Body:   explodedBody,
-		},
-		{
-			Name:   "permissions-summary",
-			Header: summaryHeader,
-			Body:   summaryBody,
+			Name:   "permissions",
+			Header: header,
+			Body:   body,
 		},
 	}
 
-	// Add scope table
-	if len(scopeBody) > 0 {
-		tables = append(tables, internal.TableFile{
-			Name:   "permissions-by-scope",
-			Header: scopeHeader,
-			Body:   scopeBody,
-		})
+	// Log findings
+	highPrivCount := 0
+	crossProjectCount := 0
+	for _, ep := range m.ExplodedPerms {
+		if ep.IsHighPrivilege {
+			highPrivCount++
+		}
+		if ep.IsCrossProject {
+			crossProjectCount++
+		}
 	}
 
-	// Add dangerous permissions table (pentest-focused)
-	if len(dangerousBody) > 0 {
-		tables = append(tables, internal.TableFile{
-			Name:   "permissions-dangerous",
-			Header: dangerousHeader,
-			Body:   dangerousBody,
-		})
-		logger.InfoM(fmt.Sprintf("[PENTEST] Found %d dangerous permission entries (%d CRITICAL) - privesc risk!", len(dangerousBody), criticalCount), globals.GCP_PERMISSIONS_MODULE_NAME)
+	if highPrivCount > 0 {
+		logger.InfoM(fmt.Sprintf("[FINDING] Found %d high-privilege permission entries!", highPrivCount), globals.GCP_PERMISSIONS_MODULE_NAME)
 	}
-
-	// Add cross-project table
-	if len(crossProjectBody) > 0 {
-		tables = append(tables, internal.TableFile{
-			Name:   "permissions-cross-project",
-			Header: crossProjectHeader,
-			Body:   crossProjectBody,
-		})
-		logger.InfoM(fmt.Sprintf("[FINDING] Found %d cross-project permission entries!", len(crossProjectBody)), globals.GCP_PERMISSIONS_MODULE_NAME)
-	}
-
-	// Add high privilege table if there are any
-	if len(highPrivBody) > 0 {
-		tables = append(tables, internal.TableFile{
-			Name:   "permissions-high-privilege",
-			Header: highPrivHeader,
-			Body:   highPrivBody,
-		})
-	}
-
-	// Add inherited permissions table
-	if len(inheritedBody) > 0 {
-		tables = append(tables, internal.TableFile{
-			Name:   "permissions-inherited",
-			Header: inheritedHeader,
-			Body:   inheritedBody,
-		})
-	}
-
-	// Add group summary table if there are any groups
-	if len(groupBody) > 0 {
-		tables = append(tables, internal.TableFile{
-			Name:   "permissions-groups",
-			Header: groupHeader,
-			Body:   groupBody,
-		})
-	}
-
-	// Add group members detail table if there are enumerated members
-	if len(groupMembersBody) > 0 {
-		tables = append(tables, internal.TableFile{
-			Name:   "permissions-group-members",
-			Header: groupMembersHeader,
-			Body:   groupMembersBody,
-		})
+	if crossProjectCount > 0 {
+		logger.InfoM(fmt.Sprintf("[FINDING] Found %d cross-project permission entries!", crossProjectCount), globals.GCP_PERMISSIONS_MODULE_NAME)
 	}
 
 	output := PermissionsOutput{
@@ -1115,22 +698,38 @@ func (m *PermissionsModule) writeOutput(ctx context.Context, logger internal.Log
 		Loot:  lootFiles,
 	}
 
-	// Build scopeNames using GetProjectName
-	scopeNames := make([]string, len(m.ProjectIDs))
-	for i, projectID := range m.ProjectIDs {
-		scopeNames[i] = m.GetProjectName(projectID)
+	// Determine output scope - use org if available, otherwise fall back to project
+	var scopeType string
+	var scopeIdentifiers []string
+	var scopeNames []string
+
+	if len(m.OrgIDs) > 0 {
+		scopeType = "organization"
+		for _, orgID := range m.OrgIDs {
+			scopeIdentifiers = append(scopeIdentifiers, orgID)
+			if name, ok := m.OrgNames[orgID]; ok && name != "" {
+				scopeNames = append(scopeNames, name)
+			} else {
+				scopeNames = append(scopeNames, orgID)
+			}
+		}
+	} else {
+		scopeType = "project"
+		scopeIdentifiers = m.ProjectIDs
+		for _, id := range m.ProjectIDs {
+			scopeNames = append(scopeNames, m.GetProjectName(id))
+		}
 	}
 
-	// Write output using HandleOutputSmart with scope support
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
 		m.OutputDirectory,
 		m.Verbosity,
 		m.WrapTable,
-		"project",           // scopeType
-		m.ProjectIDs,        // scopeIdentifiers
-		scopeNames,          // scopeNames
+		scopeType,
+		scopeIdentifiers,
+		scopeNames,
 		m.Account,
 		output,
 	)
@@ -1138,13 +737,4 @@ func (m *PermissionsModule) writeOutput(ctx context.Context, logger internal.Log
 		logger.ErrorM(fmt.Sprintf("Error writing output: %v", err), globals.GCP_PERMISSIONS_MODULE_NAME)
 		m.CommandCounter.Error++
 	}
-}
-
-// extractEmailFromEntity extracts the email portion from an entity string like "user:foo@example.com"
-func extractEmailFromEntity(entity string) string {
-	parts := strings.SplitN(entity, ":", 2)
-	if len(parts) == 2 {
-		return parts[1]
-	}
-	return entity
 }

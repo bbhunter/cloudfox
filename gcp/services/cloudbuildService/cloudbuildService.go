@@ -44,10 +44,9 @@ type TriggerInfo struct {
 	Substitutions   map[string]string `json:"substitutions"`
 
 	// Security analysis
-	IsPublicRepo    bool              `json:"isPublicRepo"`
-	HasSecrets      bool              `json:"hasSecrets"`
-	RiskLevel       string            `json:"riskLevel"`
-	RiskReasons     []string          `json:"riskReasons"`
+	IsPublicRepo     bool `json:"isPublicRepo"`
+	HasSecrets       bool `json:"hasSecrets"`
+	PrivescPotential bool `json:"privescPotential"`
 }
 
 // BuildInfo represents a Cloud Build execution
@@ -292,7 +291,6 @@ func (s *CloudBuildService) parseTrigger(trigger *cloudbuild.BuildTrigger, proje
 		Disabled:      trigger.Disabled,
 		CreateTime:    trigger.CreateTime,
 		Substitutions: trigger.Substitutions,
-		RiskReasons:   []string{},
 	}
 
 	// Parse source configuration
@@ -334,8 +332,14 @@ func (s *CloudBuildService) parseTrigger(trigger *cloudbuild.BuildTrigger, proje
 		}
 	}
 
-	// Security analysis
-	info.RiskLevel, info.RiskReasons = s.analyzeTriggerRisk(info)
+	// Determine privesc potential
+	// Default SA is often over-privileged, GitHub triggers can execute untrusted code
+	if info.ServiceAccount == "" {
+		info.PrivescPotential = true
+	}
+	if info.SourceType == "github" && info.BranchName != "" {
+		info.PrivescPotential = true
+	}
 
 	return info
 }
@@ -354,43 +358,4 @@ func containsSecretKeyword(key string) bool {
 func containsIgnoreCase(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr ||
 		len(s) > len(substr) && (s[:len(substr)] == substr || s[len(s)-len(substr):] == substr))
-}
-
-// analyzeTriggerRisk determines the risk level of a trigger
-func (s *CloudBuildService) analyzeTriggerRisk(trigger TriggerInfo) (string, []string) {
-	var reasons []string
-	score := 0
-
-	// Public repo triggers could be exploited
-	if trigger.SourceType == "github" && trigger.IsPublicRepo {
-		reasons = append(reasons, "Triggers from public GitHub repository")
-		score += 2
-	}
-
-	// Inline build configs might contain sensitive info
-	if trigger.BuildConfigType == "inline" {
-		reasons = append(reasons, "Uses inline build configuration")
-		score += 1
-	}
-
-	// Pull request triggers could be exploited by external PRs
-	if trigger.BranchName != "" && trigger.SourceType == "github" {
-		reasons = append(reasons, "PR-triggered builds may execute untrusted code")
-		score += 1
-	}
-
-	// No specific service account means using default (often over-privileged)
-	if trigger.ServiceAccount == "" {
-		reasons = append(reasons, "Uses default Cloud Build service account")
-		score += 1
-	}
-
-	if score >= 3 {
-		return "HIGH", reasons
-	} else if score >= 2 {
-		return "MEDIUM", reasons
-	} else if score >= 1 {
-		return "LOW", reasons
-	}
-	return "INFO", reasons
 }

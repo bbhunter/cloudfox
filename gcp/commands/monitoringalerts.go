@@ -23,6 +23,7 @@ const GCP_MONITORINGALERTS_MODULE_NAME string = "monitoring-alerts"
 var GCPMonitoringAlertsCommand = &cobra.Command{
 	Use:     GCP_MONITORINGALERTS_MODULE_NAME,
 	Aliases: []string{"alerts", "monitoring", "alerting"},
+	Hidden:  true,
 	Short:   "Enumerate Cloud Monitoring alerting policies and notification channels",
 	Long: `Analyze Cloud Monitoring alerting policies and notification channels for security gaps.
 
@@ -54,18 +55,14 @@ Requires appropriate IAM permissions:
 // ------------------------------
 
 type AlertPolicy struct {
-	Name              string
-	DisplayName       string
-	ProjectID         string
-	Enabled           bool
-	ConditionCount    int
-	NotificationCount int
-	Combiner          string
-	CreationRecord    string
-	MutationRecord    string
-	Severity          string
-	Documentation     string
-	Conditions        []AlertCondition
+	Name                 string
+	DisplayName          string
+	ProjectID            string
+	Enabled              bool
+	Combiner             string
+	Documentation        string
+	Conditions           []AlertCondition
+	NotificationChannels []string // Channel resource names
 }
 
 type AlertCondition struct {
@@ -108,13 +105,6 @@ type UptimeCheck struct {
 	SSLEnabled     bool
 }
 
-type AlertGap struct {
-	GapType        string // missing-alert, disabled-alert, no-notification
-	Severity       string
-	Description    string
-	Recommendation string
-	AffectedArea   string
-}
 
 // ------------------------------
 // Module Struct
@@ -122,20 +112,11 @@ type AlertGap struct {
 type MonitoringAlertsModule struct {
 	gcpinternal.BaseGCPModule
 
-	// Module-specific fields
 	AlertPolicies        []AlertPolicy
 	NotificationChannels []NotificationChannel
 	UptimeChecks         []UptimeCheck
-	AlertGaps            []AlertGap
 	LootMap              map[string]*internal.LootFile
 	mu                   sync.Mutex
-
-	// Tracking for gap analysis
-	hasIAMChangeAlert      bool
-	hasFirewallChangeAlert bool
-	hasNetworkChangeAlert  bool
-	hasSAKeyAlert          bool
-	hasAuditLogAlert       bool
 }
 
 // ------------------------------
@@ -165,7 +146,6 @@ func runGCPMonitoringAlertsCommand(cmd *cobra.Command, args []string) {
 		AlertPolicies:        []AlertPolicy{},
 		NotificationChannels: []NotificationChannel{},
 		UptimeChecks:         []UptimeCheck{},
-		AlertGaps:            []AlertGap{},
 		LootMap:              make(map[string]*internal.LootFile),
 	}
 
@@ -180,8 +160,6 @@ func runGCPMonitoringAlertsCommand(cmd *cobra.Command, args []string) {
 // Module Execution
 // ------------------------------
 func (m *MonitoringAlertsModule) Execute(ctx context.Context, logger internal.Logger) {
-	logger.InfoM("Analyzing Cloud Monitoring alerting configuration...", GCP_MONITORINGALERTS_MODULE_NAME)
-
 	// Create Monitoring client
 	alertClient, err := monitoring.NewAlertPolicyClient(ctx)
 	if err != nil {
@@ -212,28 +190,15 @@ func (m *MonitoringAlertsModule) Execute(ctx context.Context, logger internal.Lo
 		m.processProject(ctx, projectID, alertClient, channelClient, uptimeClient, logger)
 	}
 
-	// Analyze for gaps
-	m.analyzeAlertGaps(logger)
-
 	// Check results
-	totalPolicies := len(m.AlertPolicies)
-	totalChannels := len(m.NotificationChannels)
-	totalGaps := len(m.AlertGaps)
-
-	if totalPolicies == 0 && totalChannels == 0 {
+	if len(m.AlertPolicies) == 0 && len(m.NotificationChannels) == 0 {
 		logger.InfoM("No monitoring alerts or notification channels found", GCP_MONITORINGALERTS_MODULE_NAME)
-		logger.InfoM("[CRITICAL] Projects have no alerting configured!", GCP_MONITORINGALERTS_MODULE_NAME)
 		return
 	}
 
-	logger.SuccessM(fmt.Sprintf("Found %d alert policy(ies), %d notification channel(s)",
-		totalPolicies, totalChannels), GCP_MONITORINGALERTS_MODULE_NAME)
+	logger.SuccessM(fmt.Sprintf("Found %d alert policy(ies), %d notification channel(s), %d uptime check(s)",
+		len(m.AlertPolicies), len(m.NotificationChannels), len(m.UptimeChecks)), GCP_MONITORINGALERTS_MODULE_NAME)
 
-	if totalGaps > 0 {
-		logger.InfoM(fmt.Sprintf("[FINDING] Identified %d alerting gap(s)", totalGaps), GCP_MONITORINGALERTS_MODULE_NAME)
-	}
-
-	// Write output
 	m.writeOutput(ctx, logger)
 }
 
@@ -278,32 +243,16 @@ func (m *MonitoringAlertsModule) enumerateAlertPolicies(ctx context.Context, pro
 		}
 
 		alertPolicy := AlertPolicy{
-			Name:              policy.Name,
-			DisplayName:       policy.DisplayName,
-			ProjectID:         projectID,
-			Enabled:           policy.Enabled.GetValue(),
-			ConditionCount:    len(policy.Conditions),
-			NotificationCount: len(policy.NotificationChannels),
-			Combiner:          policy.Combiner.String(),
+			Name:                 policy.Name,
+			DisplayName:          policy.DisplayName,
+			ProjectID:            projectID,
+			Enabled:              policy.Enabled.GetValue(),
+			Combiner:             policy.Combiner.String(),
+			NotificationChannels: policy.NotificationChannels,
 		}
 
 		if policy.Documentation != nil {
 			alertPolicy.Documentation = policy.Documentation.Content
-		}
-
-		if policy.CreationRecord != nil {
-			alertPolicy.CreationRecord = policy.CreationRecord.MutateTime.AsTime().String()
-		}
-
-		if policy.MutationRecord != nil {
-			alertPolicy.MutationRecord = policy.MutationRecord.MutateTime.AsTime().String()
-		}
-
-		// Severity from user labels or documentation
-		if policy.UserLabels != nil {
-			if sev, ok := policy.UserLabels["severity"]; ok {
-				alertPolicy.Severity = sev
-			}
 		}
 
 		// Parse conditions
@@ -325,7 +274,6 @@ func (m *MonitoringAlertsModule) enumerateAlertPolicies(ctx context.Context, pro
 						condition.Duration = c.ConditionThreshold.Duration.String()
 					}
 
-					// Extract metric type from filter
 					condition.MetricType = m.extractMetricType(c.ConditionThreshold.Filter)
 				}
 			case *monitoringpb.AlertPolicy_Condition_ConditionAbsent:
@@ -340,9 +288,6 @@ func (m *MonitoringAlertsModule) enumerateAlertPolicies(ctx context.Context, pro
 			}
 
 			alertPolicy.Conditions = append(alertPolicy.Conditions, condition)
-
-			// Check for security-related alerts
-			m.checkSecurityAlert(condition.Filter, condition.DisplayName)
 		}
 
 		m.mu.Lock()
@@ -478,202 +423,6 @@ func (m *MonitoringAlertsModule) enumerateUptimeChecks(ctx context.Context, proj
 	}
 }
 
-// ------------------------------
-// Security Alert Detection
-// ------------------------------
-func (m *MonitoringAlertsModule) checkSecurityAlert(filter, displayName string) {
-	filterLower := strings.ToLower(filter)
-	nameLower := strings.ToLower(displayName)
-
-	// IAM policy changes
-	if strings.Contains(filterLower, "setiampolicy") ||
-		strings.Contains(filterLower, "iam_policy") ||
-		strings.Contains(nameLower, "iam") {
-		m.mu.Lock()
-		m.hasIAMChangeAlert = true
-		m.mu.Unlock()
-	}
-
-	// Firewall changes
-	if strings.Contains(filterLower, "compute.firewalls") ||
-		strings.Contains(filterLower, "firewall") ||
-		strings.Contains(nameLower, "firewall") {
-		m.mu.Lock()
-		m.hasFirewallChangeAlert = true
-		m.mu.Unlock()
-	}
-
-	// Network changes
-	if strings.Contains(filterLower, "compute.networks") ||
-		strings.Contains(filterLower, "vpc") ||
-		strings.Contains(nameLower, "network") {
-		m.mu.Lock()
-		m.hasNetworkChangeAlert = true
-		m.mu.Unlock()
-	}
-
-	// Service account key creation
-	if strings.Contains(filterLower, "serviceaccountkeys") ||
-		strings.Contains(filterLower, "service_account_key") ||
-		strings.Contains(nameLower, "service account key") {
-		m.mu.Lock()
-		m.hasSAKeyAlert = true
-		m.mu.Unlock()
-	}
-
-	// Audit log configuration
-	if strings.Contains(filterLower, "auditconfig") ||
-		strings.Contains(filterLower, "audit_config") ||
-		strings.Contains(nameLower, "audit") {
-		m.mu.Lock()
-		m.hasAuditLogAlert = true
-		m.mu.Unlock()
-	}
-}
-
-// ------------------------------
-// Gap Analysis
-// ------------------------------
-func (m *MonitoringAlertsModule) analyzeAlertGaps(logger internal.Logger) {
-	// Check for disabled alerts
-	for _, policy := range m.AlertPolicies {
-		if !policy.Enabled {
-			gap := AlertGap{
-				GapType:        "disabled-alert",
-				Severity:       "MEDIUM",
-				Description:    fmt.Sprintf("Alert policy '%s' is disabled", policy.DisplayName),
-				Recommendation: fmt.Sprintf("Enable the alert policy if it's still needed: gcloud alpha monitoring policies update %s --enabled", policy.Name),
-				AffectedArea:   policy.DisplayName,
-			}
-			m.AlertGaps = append(m.AlertGaps, gap)
-		}
-
-		// Check for alerts without notifications
-		if policy.NotificationCount == 0 && policy.Enabled {
-			gap := AlertGap{
-				GapType:        "no-notification",
-				Severity:       "HIGH",
-				Description:    fmt.Sprintf("Alert policy '%s' has no notification channels", policy.DisplayName),
-				Recommendation: "Add notification channels to ensure alerts are received",
-				AffectedArea:   policy.DisplayName,
-			}
-			m.AlertGaps = append(m.AlertGaps, gap)
-		}
-	}
-
-	// Check for unverified notification channels
-	for _, channel := range m.NotificationChannels {
-		if !channel.Verified && channel.Enabled {
-			gap := AlertGap{
-				GapType:        "unverified-channel",
-				Severity:       "MEDIUM",
-				Description:    fmt.Sprintf("Notification channel '%s' (%s) is not verified", channel.DisplayName, channel.Type),
-				Recommendation: "Verify the notification channel to ensure alerts are delivered",
-				AffectedArea:   channel.DisplayName,
-			}
-			m.AlertGaps = append(m.AlertGaps, gap)
-		}
-
-		if !channel.Enabled {
-			gap := AlertGap{
-				GapType:        "disabled-channel",
-				Severity:       "LOW",
-				Description:    fmt.Sprintf("Notification channel '%s' is disabled", channel.DisplayName),
-				Recommendation: "Enable or remove unused notification channels",
-				AffectedArea:   channel.DisplayName,
-			}
-			m.AlertGaps = append(m.AlertGaps, gap)
-		}
-	}
-
-	// Check for missing security alerts
-	if !m.hasIAMChangeAlert {
-		gap := AlertGap{
-			GapType:        "missing-alert",
-			Severity:       "HIGH",
-			Description:    "No alert policy for IAM policy changes",
-			Recommendation: "Create an alert for protoPayload.methodName=\"SetIamPolicy\"",
-			AffectedArea:   "IAM Security",
-		}
-		m.AlertGaps = append(m.AlertGaps, gap)
-		m.addMissingAlertToLoot("IAM Policy Changes", `resource.type="project" AND protoPayload.methodName="SetIamPolicy"`)
-	}
-
-	if !m.hasFirewallChangeAlert {
-		gap := AlertGap{
-			GapType:        "missing-alert",
-			Severity:       "HIGH",
-			Description:    "No alert policy for firewall rule changes",
-			Recommendation: "Create an alert for compute.firewalls.* methods",
-			AffectedArea:   "Network Security",
-		}
-		m.AlertGaps = append(m.AlertGaps, gap)
-		m.addMissingAlertToLoot("Firewall Changes", `resource.type="gce_firewall_rule" AND protoPayload.methodName=~"compute.firewalls.*"`)
-	}
-
-	if !m.hasNetworkChangeAlert {
-		gap := AlertGap{
-			GapType:        "missing-alert",
-			Severity:       "MEDIUM",
-			Description:    "No alert policy for VPC network changes",
-			Recommendation: "Create an alert for compute.networks.* methods",
-			AffectedArea:   "Network Security",
-		}
-		m.AlertGaps = append(m.AlertGaps, gap)
-		m.addMissingAlertToLoot("VPC Network Changes", `resource.type="gce_network" AND protoPayload.methodName=~"compute.networks.*"`)
-	}
-
-	if !m.hasSAKeyAlert {
-		gap := AlertGap{
-			GapType:        "missing-alert",
-			Severity:       "HIGH",
-			Description:    "No alert policy for service account key creation",
-			Recommendation: "Create an alert for CreateServiceAccountKey method",
-			AffectedArea:   "IAM Security",
-		}
-		m.AlertGaps = append(m.AlertGaps, gap)
-		m.addMissingAlertToLoot("Service Account Key Creation", `protoPayload.methodName="google.iam.admin.v1.CreateServiceAccountKey"`)
-	}
-
-	if !m.hasAuditLogAlert {
-		gap := AlertGap{
-			GapType:        "missing-alert",
-			Severity:       "MEDIUM",
-			Description:    "No alert policy for audit configuration changes",
-			Recommendation: "Create an alert for SetIamPolicy on audit configs",
-			AffectedArea:   "Logging Security",
-		}
-		m.AlertGaps = append(m.AlertGaps, gap)
-		m.addMissingAlertToLoot("Audit Configuration Changes", `protoPayload.methodName="SetIamPolicy" AND protoPayload.serviceData.policyDelta.auditConfigDeltas:*`)
-	}
-
-	// Check if no notification channels exist at all
-	if len(m.NotificationChannels) == 0 && len(m.AlertPolicies) > 0 {
-		gap := AlertGap{
-			GapType:        "missing-alert",
-			Severity:       "CRITICAL",
-			Description:    "No notification channels configured",
-			Recommendation: "Create notification channels (email, Slack, PagerDuty) to receive alerts",
-			AffectedArea:   "Alert Delivery",
-		}
-		m.AlertGaps = append(m.AlertGaps, gap)
-	}
-}
-
-func (m *MonitoringAlertsModule) addMissingAlertToLoot(alertName, filter string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	m.LootMap["missing-alerts"].Contents += fmt.Sprintf(
-		"## Missing Alert: %s\n"+
-			"Recommended Filter:\n"+
-			"%s\n\n"+
-			"# Create with gcloud:\n"+
-			"# gcloud alpha monitoring policies create --display-name=\"%s\" \\\n"+
-			"#   --condition-filter=\"%s\"\n\n",
-		alertName, filter, alertName, filter,
-	)
-}
 
 // ------------------------------
 // Helper Functions
@@ -695,21 +444,9 @@ func (m *MonitoringAlertsModule) extractMetricType(filter string) string {
 // Loot File Management
 // ------------------------------
 func (m *MonitoringAlertsModule) initializeLootFiles() {
-	m.LootMap["disabled-alerts"] = &internal.LootFile{
-		Name:     "disabled-alerts",
-		Contents: "# Disabled Alert Policies\n# Generated by CloudFox\n\n",
-	}
-	m.LootMap["missing-alerts"] = &internal.LootFile{
-		Name:     "missing-alerts",
-		Contents: "# Missing Security Alerts\n# Generated by CloudFox\n# Recommended alerts for security monitoring\n\n",
-	}
-	m.LootMap["alert-setup-commands"] = &internal.LootFile{
-		Name:     "alert-setup-commands",
-		Contents: "# Alert Setup Commands\n# Generated by CloudFox\n\n",
-	}
-	m.LootMap["notification-channels"] = &internal.LootFile{
-		Name:     "notification-channels",
-		Contents: "# Notification Channels\n# Generated by CloudFox\n\n",
+	m.LootMap["monitoring-alerts-commands"] = &internal.LootFile{
+		Name:     "monitoring-alerts-commands",
+		Contents: "# Monitoring Alerts Commands\n# Generated by CloudFox\n# WARNING: Only use with proper authorization\n\n",
 	}
 }
 
@@ -717,156 +454,217 @@ func (m *MonitoringAlertsModule) initializeLootFiles() {
 // Output Generation
 // ------------------------------
 func (m *MonitoringAlertsModule) writeOutput(ctx context.Context, logger internal.Logger) {
-	// Sort policies by enabled status and name
+	// Build notification channel name map for resolving channel references
+	channelNameMap := make(map[string]string)
+	for _, c := range m.NotificationChannels {
+		channelNameMap[c.Name] = c.DisplayName
+	}
+
+	// Sort policies by name
 	sort.Slice(m.AlertPolicies, func(i, j int) bool {
-		if m.AlertPolicies[i].Enabled != m.AlertPolicies[j].Enabled {
-			return m.AlertPolicies[i].Enabled
-		}
 		return m.AlertPolicies[i].DisplayName < m.AlertPolicies[j].DisplayName
 	})
 
-	// Alert Policies table
+	// Alert Policies table - one row per condition
 	policiesHeader := []string{
-		"Policy",
 		"Project Name",
 		"Project ID",
+		"Policy Name",
 		"Enabled",
-		"Conditions",
-		"Notifications",
-		"Combiner",
+		"Condition Name",
+		"Metric Type",
+		"Comparison",
+		"Threshold",
+		"Duration",
+		"Notification Channels",
 	}
 
 	var policiesBody [][]string
 	for _, p := range m.AlertPolicies {
-		enabled := "No"
-		if p.Enabled {
-			enabled = "Yes"
+		// Resolve notification channel names
+		var channelNames []string
+		for _, channelRef := range p.NotificationChannels {
+			if name, ok := channelNameMap[channelRef]; ok {
+				channelNames = append(channelNames, name)
+			} else {
+				// Extract name from resource path if not found
+				parts := strings.Split(channelRef, "/")
+				if len(parts) > 0 {
+					channelNames = append(channelNames, parts[len(parts)-1])
+				}
+			}
+		}
+		notificationChannelsStr := "-"
+		if len(channelNames) > 0 {
+			notificationChannelsStr = strings.Join(channelNames, ", ")
 		}
 
-		policiesBody = append(policiesBody, []string{
-			truncateString(p.DisplayName, 40),
-			m.GetProjectName(p.ProjectID),
-			p.ProjectID,
-			enabled,
-			fmt.Sprintf("%d", p.ConditionCount),
-			fmt.Sprintf("%d", p.NotificationCount),
-			p.Combiner,
-		})
+		// If policy has conditions, create one row per condition
+		if len(p.Conditions) > 0 {
+			for _, cond := range p.Conditions {
+				metricType := cond.MetricType
+				if metricType == "" {
+					metricType = "-"
+				}
+				comparison := cond.Comparison
+				if comparison == "" {
+					comparison = "-"
+				}
+				threshold := "-"
+				if cond.ThresholdValue != 0 {
+					threshold = fmt.Sprintf("%.2f", cond.ThresholdValue)
+				}
+				duration := cond.Duration
+				if duration == "" {
+					duration = "-"
+				}
 
-		// Add disabled alerts to loot
-		if !p.Enabled {
-			m.LootMap["disabled-alerts"].Contents += fmt.Sprintf(
-				"## %s\n"+
-					"Project: %s\n"+
-					"Name: %s\n"+
-					"# Enable: gcloud alpha monitoring policies update %s --enabled\n\n",
-				p.DisplayName, p.ProjectID, p.Name, p.Name,
-			)
+				policiesBody = append(policiesBody, []string{
+					m.GetProjectName(p.ProjectID),
+					p.ProjectID,
+					p.DisplayName,
+					boolToYesNo(p.Enabled),
+					cond.DisplayName,
+					metricType,
+					comparison,
+					threshold,
+					duration,
+					notificationChannelsStr,
+				})
+			}
+		} else {
+			// Policy with no conditions - single row
+			policiesBody = append(policiesBody, []string{
+				m.GetProjectName(p.ProjectID),
+				p.ProjectID,
+				p.DisplayName,
+				boolToYesNo(p.Enabled),
+				"-",
+				"-",
+				"-",
+				"-",
+				"-",
+				notificationChannelsStr,
+			})
 		}
+
+		// Add to loot
+		m.LootMap["monitoring-alerts-commands"].Contents += fmt.Sprintf(
+			"## Policy: %s (Project: %s)\n"+
+				"# Describe alert policy:\n"+
+				"gcloud alpha monitoring policies describe %s --project=%s\n\n",
+			p.DisplayName, p.ProjectID,
+			extractResourceName(p.Name), p.ProjectID,
+		)
 	}
 
-	// Notification Channels table
+	// Notification Channels table - with destination info
 	channelsHeader := []string{
-		"Channel",
 		"Project Name",
 		"Project ID",
+		"Channel Name",
 		"Type",
 		"Enabled",
 		"Verified",
+		"Destination",
 	}
 
 	var channelsBody [][]string
 	for _, c := range m.NotificationChannels {
-		enabled := "No"
-		if c.Enabled {
-			enabled = "Yes"
-		}
-		verified := "No"
-		if c.Verified {
-			verified = "Yes"
-		}
+		// Extract destination from labels based on type
+		destination := extractChannelDestination(c.Type, c.Labels)
 
 		channelsBody = append(channelsBody, []string{
-			truncateString(c.DisplayName, 40),
 			m.GetProjectName(c.ProjectID),
 			c.ProjectID,
+			c.DisplayName,
 			c.Type,
-			enabled,
-			verified,
+			boolToYesNo(c.Enabled),
+			boolToYesNo(c.Verified),
+			destination,
 		})
 
-		// Add to notification channels loot
-		m.LootMap["notification-channels"].Contents += fmt.Sprintf(
-			"%s (%s) - Enabled: %t, Verified: %t\n",
-			c.DisplayName, c.Type, c.Enabled, c.Verified,
+		// Add to loot
+		m.LootMap["monitoring-alerts-commands"].Contents += fmt.Sprintf(
+			"## Channel: %s (Project: %s)\n"+
+				"# Describe notification channel:\n"+
+				"gcloud alpha monitoring channels describe %s --project=%s\n\n",
+			c.DisplayName, c.ProjectID,
+			extractResourceName(c.Name), c.ProjectID,
 		)
 	}
 
-	// Alert Gaps table
-	gapsHeader := []string{
-		"Gap Type",
-		"Severity",
-		"Affected Area",
-		"Description",
-	}
-
-	var gapsBody [][]string
-	for _, g := range m.AlertGaps {
-		gapsBody = append(gapsBody, []string{
-			g.GapType,
-			g.Severity,
-			g.AffectedArea,
-			truncateString(g.Description, 50),
-		})
-
-		// Add setup commands to loot
-		if g.Recommendation != "" {
-			m.LootMap["alert-setup-commands"].Contents += fmt.Sprintf(
-				"# %s (%s)\n# %s\n%s\n\n",
-				g.AffectedArea, g.GapType, g.Description, g.Recommendation,
-			)
-		}
-	}
-
-	// Uptime Checks table
+	// Uptime Checks table - expanded
 	uptimeHeader := []string{
-		"Check",
 		"Project Name",
 		"Project ID",
+		"Check Name",
+		"Enabled",
 		"Host",
 		"Protocol",
 		"Port",
+		"Path",
 		"Period",
+		"Timeout",
+		"SSL Enabled",
 	}
 
 	var uptimeBody [][]string
 	for _, u := range m.UptimeChecks {
+		host := u.MonitoredHost
+		if host == "" {
+			host = "-"
+		}
+		path := u.Path
+		if path == "" {
+			path = "-"
+		}
+		timeout := u.Timeout
+		if timeout == "" {
+			timeout = "-"
+		}
+
 		uptimeBody = append(uptimeBody, []string{
-			truncateString(u.DisplayName, 30),
 			m.GetProjectName(u.ProjectID),
 			u.ProjectID,
-			truncateString(u.MonitoredHost, 30),
+			u.DisplayName,
+			boolToYesNo(u.Enabled),
+			host,
 			u.Protocol,
 			fmt.Sprintf("%d", u.Port),
+			path,
 			u.Period,
+			timeout,
+			boolToYesNo(u.SSLEnabled),
 		})
+
+		// Add to loot
+		m.LootMap["monitoring-alerts-commands"].Contents += fmt.Sprintf(
+			"## Uptime Check: %s (Project: %s)\n"+
+				"# Describe uptime check:\n"+
+				"gcloud alpha monitoring uptime describe %s --project=%s\n\n",
+			u.DisplayName, u.ProjectID,
+			extractResourceName(u.Name), u.ProjectID,
+		)
 	}
 
 	// Collect loot files
 	var lootFiles []internal.LootFile
 	for _, loot := range m.LootMap {
-		if loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# Generated by CloudFox\n\n") {
+		if loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# WARNING: Only use with proper authorization\n\n") {
 			lootFiles = append(lootFiles, *loot)
 		}
 	}
 
 	// Build tables
-	tables := []internal.TableFile{
-		{
+	var tables []internal.TableFile
+
+	if len(policiesBody) > 0 {
+		tables = append(tables, internal.TableFile{
 			Name:   "alerting-policies",
 			Header: policiesHeader,
 			Body:   policiesBody,
-		},
+		})
 	}
 
 	if len(channelsBody) > 0 {
@@ -874,14 +672,6 @@ func (m *MonitoringAlertsModule) writeOutput(ctx context.Context, logger interna
 			Name:   "notification-channels",
 			Header: channelsHeader,
 			Body:   channelsBody,
-		})
-	}
-
-	if len(gapsBody) > 0 {
-		tables = append(tables, internal.TableFile{
-			Name:   "alert-gaps",
-			Header: gapsHeader,
-			Body:   gapsBody,
 		})
 	}
 
@@ -912,8 +702,8 @@ func (m *MonitoringAlertsModule) writeOutput(ctx context.Context, logger interna
 		m.Verbosity,
 		m.WrapTable,
 		"project",
-		scopeNames,
 		m.ProjectIDs,
+		scopeNames,
 		m.Account,
 		output,
 	)
@@ -921,4 +711,51 @@ func (m *MonitoringAlertsModule) writeOutput(ctx context.Context, logger interna
 		logger.ErrorM(fmt.Sprintf("Error writing output: %v", err), GCP_MONITORINGALERTS_MODULE_NAME)
 		m.CommandCounter.Error++
 	}
+}
+
+// extractChannelDestination extracts the destination info from channel labels
+func extractChannelDestination(channelType string, labels map[string]string) string {
+	if labels == nil {
+		return "-"
+	}
+
+	switch channelType {
+	case "email":
+		if email, ok := labels["email_address"]; ok {
+			return email
+		}
+	case "slack":
+		if channel, ok := labels["channel_name"]; ok {
+			return channel
+		}
+	case "pagerduty":
+		if key, ok := labels["service_key"]; ok {
+			// Truncate service key for display
+			if len(key) > 12 {
+				return key[:12] + "..."
+			}
+			return key
+		}
+	case "webhook_tokenauth", "webhook_basicauth":
+		if url, ok := labels["url"]; ok {
+			return url
+		}
+	case "pubsub":
+		if topic, ok := labels["topic"]; ok {
+			return topic
+		}
+	case "sms":
+		if number, ok := labels["number"]; ok {
+			return number
+		}
+	}
+
+	// Try common label keys
+	for _, key := range []string{"url", "address", "endpoint", "target"} {
+		if val, ok := labels[key]; ok {
+			return val
+		}
+	}
+
+	return "-"
 }

@@ -29,6 +29,12 @@ type ServiceAccountInfo struct {
 	Scopes []string `json:"scopes"`
 }
 
+// IAMBinding represents a single IAM role binding
+type IAMBinding struct {
+	Role   string `json:"role"`
+	Member string `json:"member"`
+}
+
 // ComputeEngineInfo contains instance metadata and security-relevant configuration
 type ComputeEngineInfo struct {
 	// Basic info
@@ -83,6 +89,9 @@ type ComputeEngineInfo struct {
 	// Timestamps
 	CreationTimestamp  string `json:"creationTimestamp"`
 	LastStartTimestamp string `json:"lastStartTimestamp"`
+
+	// IAM bindings
+	IAMBindings []IAMBinding `json:"iamBindings"`
 }
 
 // ProjectMetadataInfo contains project-level metadata security info
@@ -115,6 +124,31 @@ func (ces *ComputeEngineService) getService(ctx context.Context) (*compute.Servi
 		return compute.NewService(ctx, ces.session.GetClientOption())
 	}
 	return compute.NewService(ctx)
+}
+
+// getInstanceIAMBindings retrieves all IAM bindings for an instance
+func (ces *ComputeEngineService) getInstanceIAMBindings(service *compute.Service, projectID, zone, instanceName string) []IAMBinding {
+	ctx := context.Background()
+
+	policy, err := service.Instances.GetIamPolicy(projectID, zone, instanceName).Context(ctx).Do()
+	if err != nil {
+		return nil
+	}
+
+	var bindings []IAMBinding
+	for _, binding := range policy.Bindings {
+		if binding == nil {
+			continue
+		}
+		for _, member := range binding.Members {
+			bindings = append(bindings, IAMBinding{
+				Role:   binding.Role,
+				Member: member,
+			})
+		}
+	}
+
+	return bindings
 }
 
 // Retrieves instances from all regions and zones for a project without using concurrency.
@@ -192,6 +226,9 @@ func (ces *ComputeEngineService) Instances(projectID string) ([]ComputeEngineInf
 
 				// Parse boot disk encryption
 				info.BootDiskEncryption, info.BootDiskKMSKey = parseBootDiskEncryption(instance.Disks)
+
+				// Fetch IAM bindings for this instance
+				info.IAMBindings = ces.getInstanceIAMBindings(computeService, projectID, zone, instance.Name)
 
 				instanceInfos = append(instanceInfos, info)
 			}

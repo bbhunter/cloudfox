@@ -23,6 +23,12 @@ func NewWithSession(session *gcpinternal.SafeSession) *AssetService {
 	return &AssetService{session: session}
 }
 
+// IAMBinding represents an IAM binding
+type IAMBinding struct {
+	Role    string   `json:"role"`
+	Members []string `json:"members"`
+}
+
 // AssetInfo represents a Cloud Asset
 type AssetInfo struct {
 	Name         string            `json:"name"`
@@ -36,14 +42,11 @@ type AssetInfo struct {
 	CreateTime   string            `json:"createTime"`
 	UpdateTime   string            `json:"updateTime"`
 
-	// IAM Policy summary
-	HasIAMPolicy bool     `json:"hasIamPolicy"`
-	IAMBindings  int      `json:"iamBindings"`
-	PublicAccess bool     `json:"publicAccess"`
-
-	// Security analysis
-	RiskLevel   string   `json:"riskLevel"`
-	RiskReasons []string `json:"riskReasons"`
+	// IAM Policy details
+	HasIAMPolicy   bool         `json:"hasIamPolicy"`
+	IAMBindings    []IAMBinding `json:"iamBindings"`
+	IAMBindingCount int         `json:"iamBindingCount"`
+	PublicAccess   bool         `json:"publicAccess"`
 }
 
 // AssetTypeCount tracks count of assets by type
@@ -259,10 +262,8 @@ func (s *AssetService) SearchAllResources(scope string, query string) ([]AssetIn
 			State:       resource.State,
 			CreateTime:  resource.CreateTime.String(),
 			UpdateTime:  resource.UpdateTime.String(),
-			RiskReasons: []string{},
 		}
 
-		info.RiskLevel, info.RiskReasons = s.analyzeAssetRisk(info)
 		assets = append(assets, info)
 	}
 
@@ -271,85 +272,47 @@ func (s *AssetService) SearchAllResources(scope string, query string) ([]AssetIn
 
 func (s *AssetService) parseAsset(assetResult *assetpb.Asset, projectID string) AssetInfo {
 	info := AssetInfo{
-		Name:        extractAssetName(assetResult.Name),
-		AssetType:   assetResult.AssetType,
-		ProjectID:   projectID,
-		RiskReasons: []string{},
+		Name:      extractAssetName(assetResult.Name),
+		AssetType: assetResult.AssetType,
+		ProjectID: projectID,
 	}
 
 	if assetResult.Resource != nil {
 		info.Location = assetResult.Resource.Location
-		// Additional resource data parsing could be added here
 	}
-
-	info.RiskLevel, info.RiskReasons = s.analyzeAssetRisk(info)
 
 	return info
 }
 
 func (s *AssetService) parseAssetWithIAM(assetResult *assetpb.Asset, projectID string) AssetInfo {
 	info := AssetInfo{
-		Name:        extractAssetName(assetResult.Name),
-		AssetType:   assetResult.AssetType,
-		ProjectID:   projectID,
-		RiskReasons: []string{},
+		Name:      extractAssetName(assetResult.Name),
+		AssetType: assetResult.AssetType,
+		ProjectID: projectID,
 	}
 
 	if assetResult.IamPolicy != nil {
 		info.HasIAMPolicy = true
-		info.IAMBindings = len(assetResult.IamPolicy.Bindings)
+		info.IAMBindingCount = len(assetResult.IamPolicy.Bindings)
 
-		// Check for public access
+		// Store actual bindings and check for public access
 		for _, binding := range assetResult.IamPolicy.Bindings {
+			iamBinding := IAMBinding{
+				Role:    binding.Role,
+				Members: binding.Members,
+			}
+			info.IAMBindings = append(info.IAMBindings, iamBinding)
+
+			// Check for public access
 			for _, member := range binding.Members {
 				if member == "allUsers" || member == "allAuthenticatedUsers" {
 					info.PublicAccess = true
-					break
 				}
 			}
-			if info.PublicAccess {
-				break
-			}
 		}
 	}
-
-	info.RiskLevel, info.RiskReasons = s.analyzeAssetRisk(info)
 
 	return info
-}
-
-func (s *AssetService) analyzeAssetRisk(asset AssetInfo) (string, []string) {
-	var reasons []string
-	score := 0
-
-	// Public access
-	if asset.PublicAccess {
-		reasons = append(reasons, "Resource has public access (allUsers or allAuthenticatedUsers)")
-		score += 3
-	}
-
-	// Sensitive asset types
-	sensitiveTypes := []string{
-		"iam.googleapis.com/ServiceAccountKey",
-		"secretmanager.googleapis.com/Secret",
-		"cloudkms.googleapis.com/CryptoKey",
-	}
-	for _, sensitiveType := range sensitiveTypes {
-		if asset.AssetType == sensitiveType {
-			reasons = append(reasons, fmt.Sprintf("Sensitive asset type: %s", sensitiveType))
-			score += 1
-			break
-		}
-	}
-
-	if score >= 3 {
-		return "HIGH", reasons
-	} else if score >= 2 {
-		return "MEDIUM", reasons
-	} else if score >= 1 {
-		return "LOW", reasons
-	}
-	return "INFO", reasons
 }
 
 func extractAssetName(fullName string) string {

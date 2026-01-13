@@ -6,61 +6,91 @@ import (
 	"strings"
 	"sync"
 
-	networkservice "github.com/BishopFox/cloudfox/gcp/services/networkService"
 	"github.com/BishopFox/cloudfox/globals"
 	"github.com/BishopFox/cloudfox/internal"
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	"github.com/spf13/cobra"
+
 	compute "google.golang.org/api/compute/v1"
+	run "google.golang.org/api/run/v1"
 )
 
 var GCPEndpointsCommand = &cobra.Command{
-	Use:     globals.GCP_ENDPOINTS_MODULE_NAME,
-	Aliases: []string{"external", "public-ips", "ips"},
-	Short:   "Aggregate all public-facing endpoints in GCP",
-	Long: `Aggregate and analyze all public-facing endpoints across GCP resources.
+	Use:     "endpoints",
+	Aliases: []string{"exposure", "external", "public-ips", "internet-facing"},
+	Short:   "Enumerate all network endpoints (external and internal) with IPs, ports, and hostnames",
+	Long: `Enumerate all network endpoints in GCP with comprehensive analysis.
 
 Features:
 - Enumerates external IP addresses (static and ephemeral)
-- Lists load balancers (HTTP(S), TCP, UDP)
-- Shows Cloud NAT gateways
-- Identifies VPN gateways and Cloud Interconnect
-- Maps forwarding rules to backends
-- Lists Cloud Run, App Engine, and Cloud Functions URLs
-- Identifies public Cloud SQL instances
-- Shows GKE ingress endpoints`,
+- Enumerates internal IP addresses for instances
+- Lists load balancers (HTTP(S), TCP, UDP) - both external and internal
+- Shows instances with external and internal IPs
+- Lists Cloud Run and Cloud Functions URLs
+- Analyzes firewall rules to determine open ports
+- Generates nmap commands for penetration testing
+
+Output includes separate tables and loot files for external and internal endpoints.`,
 	Run: runGCPEndpointsCommand,
 }
 
-// EndpointInfo represents a public-facing endpoint
-type EndpointInfo struct {
-	Name         string `json:"name"`
-	Type         string `json:"type"` // IP, LoadBalancer, Function, CloudRun, etc.
-	Address      string `json:"address"`
-	Protocol     string `json:"protocol"`
-	Port         string `json:"port"`
-	Resource     string `json:"resource"`     // Associated resource
-	ResourceType string `json:"resourceType"` // Instance, ForwardingRule, etc.
-	Region       string `json:"region"`
-	ProjectID    string `json:"projectId"`
-	Status       string `json:"status"`
-	Description  string `json:"description"`
+// ------------------------------
+// Data Structures
+// ------------------------------
+
+type Endpoint struct {
+	ProjectID      string
+	Name           string
+	Type           string // Static IP, Instance IP, LoadBalancer, Cloud Run, etc.
+	Address        string
+	FQDN           string
+	Protocol       string
+	Port           string
+	Resource       string
+	ResourceType   string
+	Region         string
+	Status         string
+	ServiceAccount string
+	TLSEnabled     bool
+	RiskLevel      string
+	RiskReasons    []string
+	IsExternal     bool   // true for external IPs, false for internal
+	NetworkTags    []string // Tags for firewall rule matching
+	Network        string   // VPC network name
+}
+
+type FirewallRule struct {
+	ProjectID    string
+	RuleName     string
+	Network      string
+	Direction    string
+	SourceRanges []string
+	Ports        []string
+	Protocol     string
+	TargetTags   []string
+	RiskLevel    string
+	RiskReasons  []string
 }
 
 // ------------------------------
-// Module Struct with embedded BaseGCPModule
+// Module Struct
 // ------------------------------
 type EndpointsModule struct {
 	gcpinternal.BaseGCPModule
 
-	// Module-specific fields
-	Endpoints []EndpointInfo
-	LootMap   map[string]*internal.LootFile
-	mu        sync.Mutex
+	ExternalEndpoints []Endpoint
+	InternalEndpoints []Endpoint
+	FirewallRules     []FirewallRule
+	LootMap           map[string]*internal.LootFile
+	mu                sync.Mutex
+
+	// Firewall rule mapping: "network:tag1,tag2" -> allowed ports
+	// Key format: "network-name" for rules with no target tags, or "network-name:tag1,tag2" for tagged rules
+	firewallPortMap map[string][]string
 }
 
 // ------------------------------
-// Output Struct implementing CloudfoxOutput interface
+// Output Struct
 // ------------------------------
 type EndpointsOutput struct {
 	Table []internal.TableFile
@@ -74,23 +104,21 @@ func (o EndpointsOutput) LootFiles() []internal.LootFile   { return o.Loot }
 // Command Entry Point
 // ------------------------------
 func runGCPEndpointsCommand(cmd *cobra.Command, args []string) {
-	// Initialize command context
-	cmdCtx, err := gcpinternal.InitializeCommandContext(cmd, globals.GCP_ENDPOINTS_MODULE_NAME)
+	cmdCtx, err := gcpinternal.InitializeCommandContext(cmd, "endpoints")
 	if err != nil {
-		return // Error already logged
+		return
 	}
 
-	// Create module instance
 	module := &EndpointsModule{
-		BaseGCPModule: gcpinternal.NewBaseGCPModule(cmdCtx),
-		Endpoints:     []EndpointInfo{},
-		LootMap:       make(map[string]*internal.LootFile),
+		BaseGCPModule:     gcpinternal.NewBaseGCPModule(cmdCtx),
+		ExternalEndpoints: []Endpoint{},
+		InternalEndpoints: []Endpoint{},
+		FirewallRules:     []FirewallRule{},
+		LootMap:           make(map[string]*internal.LootFile),
+		firewallPortMap:   make(map[string][]string),
 	}
 
-	// Initialize loot files
 	module.initializeLootFiles()
-
-	// Execute enumeration
 	module.Execute(cmdCtx.Ctx, cmdCtx.Logger)
 }
 
@@ -98,120 +126,92 @@ func runGCPEndpointsCommand(cmd *cobra.Command, args []string) {
 // Module Execution
 // ------------------------------
 func (m *EndpointsModule) Execute(ctx context.Context, logger internal.Logger) {
-	// Run enumeration with concurrency
-	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_ENDPOINTS_MODULE_NAME, m.processProject)
+	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, "endpoints", m.processProject)
 
-	// Check results
-	if len(m.Endpoints) == 0 {
-		logger.InfoM("No public endpoints found", globals.GCP_ENDPOINTS_MODULE_NAME)
+	totalEndpoints := len(m.ExternalEndpoints) + len(m.InternalEndpoints)
+	if totalEndpoints == 0 && len(m.FirewallRules) == 0 {
+		logger.InfoM("No endpoints found", "endpoints")
 		return
 	}
 
-	// Count by type
-	typeCounts := make(map[string]int)
-	for _, ep := range m.Endpoints {
-		typeCounts[ep.Type]++
-	}
+	logger.SuccessM(fmt.Sprintf("Found %d external endpoint(s), %d internal endpoint(s), %d firewall rule(s)",
+		len(m.ExternalEndpoints), len(m.InternalEndpoints), len(m.FirewallRules)), "endpoints")
 
-	summary := []string{}
-	for t, c := range typeCounts {
-		summary = append(summary, fmt.Sprintf("%d %s", c, t))
-	}
-
-	logger.SuccessM(fmt.Sprintf("Found %d public endpoint(s): %s",
-		len(m.Endpoints), strings.Join(summary, ", ")), globals.GCP_ENDPOINTS_MODULE_NAME)
-
-	// Write output
 	m.writeOutput(ctx, logger)
 }
 
 // ------------------------------
-// Project Processor (called concurrently for each project)
+// Project Processor
 // ------------------------------
 func (m *EndpointsModule) processProject(ctx context.Context, projectID string, logger internal.Logger) {
 	if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-		logger.InfoM(fmt.Sprintf("Enumerating public endpoints in project: %s", projectID), globals.GCP_ENDPOINTS_MODULE_NAME)
+		logger.InfoM(fmt.Sprintf("Analyzing endpoints in project: %s", projectID), "endpoints")
 	}
 
-	var endpoints []EndpointInfo
-
-	// Create compute service
-	networkSvc := networkservice.New()
-	computeSvc, err := networkSvc.GetComputeService(ctx)
+	computeService, err := compute.NewService(ctx)
 	if err != nil {
 		m.CommandCounter.Error++
-		gcpinternal.HandleGCPError(err, logger, globals.GCP_ENDPOINTS_MODULE_NAME,
-			fmt.Sprintf("Could not create compute service in project %s", projectID))
+		gcpinternal.HandleGCPError(err, logger, "endpoints",
+			fmt.Sprintf("Could not create Compute service in project %s", projectID))
 		return
 	}
 
-	// 1. Get external IP addresses
-	ipEndpoints := m.getExternalIPs(ctx, computeSvc, projectID, logger)
-	endpoints = append(endpoints, ipEndpoints...)
+	// 1. Analyze firewall rules FIRST to build port mapping for instances
+	m.analyzeFirewallRules(ctx, computeService, projectID, logger)
 
-	// 2. Get forwarding rules (load balancers)
-	fwdEndpoints := m.getForwardingRules(ctx, computeSvc, projectID, logger)
-	endpoints = append(endpoints, fwdEndpoints...)
+	// 2. Get static external IPs
+	m.getStaticExternalIPs(ctx, computeService, projectID, logger)
 
-	// 3. Get global forwarding rules
-	globalFwdEndpoints := m.getGlobalForwardingRules(ctx, computeSvc, projectID, logger)
-	endpoints = append(endpoints, globalFwdEndpoints...)
+	// 3. Get instances (both external and internal IPs)
+	m.getInstanceIPs(ctx, computeService, projectID, logger)
 
-	// 4. Get instances with external IPs
-	instanceEndpoints := m.getInstanceExternalIPs(ctx, computeSvc, projectID, logger)
-	endpoints = append(endpoints, instanceEndpoints...)
+	// 4. Get load balancers (both external and internal)
+	m.getLoadBalancers(ctx, computeService, projectID, logger)
 
-	// Thread-safe append
-	m.mu.Lock()
-	m.Endpoints = append(m.Endpoints, endpoints...)
-
-	// Generate loot
-	for _, ep := range endpoints {
-		m.addEndpointToLoot(ep)
-	}
-	m.mu.Unlock()
-
-	if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-		logger.InfoM(fmt.Sprintf("Found %d public endpoint(s) in project %s", len(endpoints), projectID), globals.GCP_ENDPOINTS_MODULE_NAME)
-	}
+	// 5. Get Cloud Run services (always external)
+	m.getCloudRunServices(ctx, projectID, logger)
 }
 
-// getExternalIPs retrieves static external IP addresses
-func (m *EndpointsModule) getExternalIPs(ctx context.Context, svc *compute.Service, projectID string, logger internal.Logger) []EndpointInfo {
-	var endpoints []EndpointInfo
-
-	// Get global addresses
+// getStaticExternalIPs retrieves static external IP addresses
+func (m *EndpointsModule) getStaticExternalIPs(ctx context.Context, svc *compute.Service, projectID string, logger internal.Logger) {
+	// Global addresses
 	req := svc.GlobalAddresses.List(projectID)
 	err := req.Pages(ctx, func(page *compute.AddressList) error {
 		for _, addr := range page.Items {
 			if addr.AddressType == "EXTERNAL" {
-				user := "-"
+				user := ""
 				if len(addr.Users) > 0 {
 					user = extractResourceName(addr.Users[0])
 				}
-				ep := EndpointInfo{
+				ep := Endpoint{
+					ProjectID:    projectID,
 					Name:         addr.Name,
 					Type:         "Static IP",
 					Address:      addr.Address,
-					Protocol:     "-",
-					Port:         "-",
+					Protocol:     "TCP/UDP",
+					Port:         "ALL",
 					Resource:     user,
 					ResourceType: "Address",
 					Region:       "global",
-					ProjectID:    projectID,
 					Status:       addr.Status,
-					Description:  addr.Description,
+					RiskLevel:    "Medium",
+					RiskReasons:  []string{"Static external IP"},
+					IsExternal:   true,
 				}
-				endpoints = append(endpoints, ep)
+				if user == "" {
+					ep.RiskReasons = append(ep.RiskReasons, "Unused static IP")
+				}
+				m.addEndpoint(ep)
 			}
 		}
 		return nil
 	})
 	if err != nil {
-		logger.InfoM(fmt.Sprintf("Could not list global addresses: %v", err), globals.GCP_ENDPOINTS_MODULE_NAME)
+		gcpinternal.HandleGCPError(err, logger, "endpoints",
+			fmt.Sprintf("Could not list global addresses in project %s", projectID))
 	}
 
-	// Get regional addresses
+	// Regional addresses
 	regionsReq := svc.Regions.List(projectID)
 	err = regionsReq.Pages(ctx, func(page *compute.RegionList) error {
 		for _, region := range page.Items {
@@ -219,141 +219,48 @@ func (m *EndpointsModule) getExternalIPs(ctx context.Context, svc *compute.Servi
 			err := addrReq.Pages(ctx, func(addrPage *compute.AddressList) error {
 				for _, addr := range addrPage.Items {
 					if addr.AddressType == "EXTERNAL" {
-						user := "-"
+						user := ""
 						if len(addr.Users) > 0 {
 							user = extractResourceName(addr.Users[0])
 						}
-						ep := EndpointInfo{
+						ep := Endpoint{
+							ProjectID:    projectID,
 							Name:         addr.Name,
 							Type:         "Static IP",
 							Address:      addr.Address,
-							Protocol:     "-",
-							Port:         "-",
+							Protocol:     "TCP/UDP",
+							Port:         "ALL",
 							Resource:     user,
 							ResourceType: "Address",
 							Region:       region.Name,
-							ProjectID:    projectID,
 							Status:       addr.Status,
-							Description:  addr.Description,
+							RiskLevel:    "Medium",
+							RiskReasons:  []string{"Static external IP"},
+							IsExternal:   true,
 						}
-						endpoints = append(endpoints, ep)
+						if user == "" {
+							ep.RiskReasons = append(ep.RiskReasons, "Unused static IP")
+						}
+						m.addEndpoint(ep)
 					}
 				}
 				return nil
 			})
 			if err != nil {
-				logger.InfoM(fmt.Sprintf("Could not list addresses in region %s: %v", region.Name, err), globals.GCP_ENDPOINTS_MODULE_NAME)
+				gcpinternal.HandleGCPError(err, logger, "endpoints",
+					fmt.Sprintf("Could not list addresses in region %s", region.Name))
 			}
 		}
 		return nil
 	})
 	if err != nil {
-		logger.InfoM(fmt.Sprintf("Could not list regions: %v", err), globals.GCP_ENDPOINTS_MODULE_NAME)
+		gcpinternal.HandleGCPError(err, logger, "endpoints",
+			fmt.Sprintf("Could not list regions in project %s", projectID))
 	}
-
-	return endpoints
 }
 
-// getForwardingRules retrieves regional forwarding rules (load balancers)
-func (m *EndpointsModule) getForwardingRules(ctx context.Context, svc *compute.Service, projectID string, logger internal.Logger) []EndpointInfo {
-	var endpoints []EndpointInfo
-
-	// Aggregate across all regions
-	req := svc.ForwardingRules.AggregatedList(projectID)
-	err := req.Pages(ctx, func(page *compute.ForwardingRuleAggregatedList) error {
-		for region, scopedList := range page.Items {
-			if scopedList.ForwardingRules == nil {
-				continue
-			}
-			for _, rule := range scopedList.ForwardingRules {
-				// Only include external load balancers
-				if rule.LoadBalancingScheme == "EXTERNAL" || rule.LoadBalancingScheme == "EXTERNAL_MANAGED" {
-					ports := "-"
-					if rule.PortRange != "" {
-						ports = rule.PortRange
-					} else if len(rule.Ports) > 0 {
-						ports = strings.Join(rule.Ports, ",")
-					} else if rule.AllPorts {
-						ports = "ALL"
-					}
-
-					target := extractResourceName(rule.Target)
-					if target == "" && rule.BackendService != "" {
-						target = extractResourceName(rule.BackendService)
-					}
-
-					regionName := extractRegionFromScope(region)
-
-					ep := EndpointInfo{
-						Name:         rule.Name,
-						Type:         "LoadBalancer",
-						Address:      rule.IPAddress,
-						Protocol:     rule.IPProtocol,
-						Port:         ports,
-						Resource:     target,
-						ResourceType: "ForwardingRule",
-						Region:       regionName,
-						ProjectID:    projectID,
-						Status:       "-",
-						Description:  rule.Description,
-					}
-					endpoints = append(endpoints, ep)
-				}
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		logger.InfoM(fmt.Sprintf("Could not list forwarding rules: %v", err), globals.GCP_ENDPOINTS_MODULE_NAME)
-	}
-
-	return endpoints
-}
-
-// getGlobalForwardingRules retrieves global forwarding rules (global load balancers)
-func (m *EndpointsModule) getGlobalForwardingRules(ctx context.Context, svc *compute.Service, projectID string, logger internal.Logger) []EndpointInfo {
-	var endpoints []EndpointInfo
-
-	req := svc.GlobalForwardingRules.List(projectID)
-	err := req.Pages(ctx, func(page *compute.ForwardingRuleList) error {
-		for _, rule := range page.Items {
-			if rule.LoadBalancingScheme == "EXTERNAL" || rule.LoadBalancingScheme == "EXTERNAL_MANAGED" {
-				ports := "-"
-				if rule.PortRange != "" {
-					ports = rule.PortRange
-				}
-
-				target := extractResourceName(rule.Target)
-
-				ep := EndpointInfo{
-					Name:         rule.Name,
-					Type:         "Global LoadBalancer",
-					Address:      rule.IPAddress,
-					Protocol:     rule.IPProtocol,
-					Port:         ports,
-					Resource:     target,
-					ResourceType: "GlobalForwardingRule",
-					Region:       "global",
-					ProjectID:    projectID,
-					Status:       "-",
-					Description:  rule.Description,
-				}
-				endpoints = append(endpoints, ep)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		logger.InfoM(fmt.Sprintf("Could not list global forwarding rules: %v", err), globals.GCP_ENDPOINTS_MODULE_NAME)
-	}
-
-	return endpoints
-}
-
-// getInstanceExternalIPs retrieves instances with external IPs
-func (m *EndpointsModule) getInstanceExternalIPs(ctx context.Context, svc *compute.Service, projectID string, logger internal.Logger) []EndpointInfo {
-	var endpoints []EndpointInfo
-
+// getInstanceIPs retrieves instances with both external and internal IPs
+func (m *EndpointsModule) getInstanceIPs(ctx context.Context, svc *compute.Service, projectID string, logger internal.Logger) {
 	req := svc.Instances.AggregatedList(projectID)
 	err := req.Pages(ctx, func(page *compute.InstanceAggregatedList) error {
 		for zone, scopedList := range page.Items {
@@ -361,31 +268,68 @@ func (m *EndpointsModule) getInstanceExternalIPs(ctx context.Context, svc *compu
 				continue
 			}
 			for _, instance := range scopedList.Instances {
+				zoneName := extractZoneFromScope(zone)
+
+				// Get service account
+				var serviceAccount string
+				if len(instance.ServiceAccounts) > 0 {
+					serviceAccount = instance.ServiceAccounts[0].Email
+				}
+
 				for _, iface := range instance.NetworkInterfaces {
+					networkName := extractResourceName(iface.Network)
+
+					// Collect external IPs
 					for _, accessConfig := range iface.AccessConfigs {
 						if accessConfig.NatIP != "" {
-							zoneName := extractZoneFromScope(zone)
-
-							ipType := "Ephemeral IP"
-							if accessConfig.Type == "ONE_TO_ONE_NAT" {
-								ipType = "Instance IP"
+							ep := Endpoint{
+								ProjectID:      projectID,
+								Name:           instance.Name,
+								Type:           "Instance IP",
+								Address:        accessConfig.NatIP,
+								Protocol:       "TCP/UDP",
+								Port:           "ALL",
+								Resource:       instance.Name,
+								ResourceType:   "Instance",
+								Region:         zoneName,
+								Status:         instance.Status,
+								ServiceAccount: serviceAccount,
+								IsExternal:     true,
+								NetworkTags:    instance.Tags.Items,
+								Network:        networkName,
 							}
 
-							ep := EndpointInfo{
-								Name:         instance.Name,
-								Type:         ipType,
-								Address:      accessConfig.NatIP,
-								Protocol:     "TCP/UDP",
-								Port:         "ALL",
-								Resource:     instance.Name,
-								ResourceType: "Instance",
-								Region:       zoneName,
-								ProjectID:    projectID,
-								Status:       instance.Status,
-								Description:  instance.Description,
-							}
-							endpoints = append(endpoints, ep)
+							// Classify risk
+							ep.RiskLevel, ep.RiskReasons = m.classifyInstanceRisk(instance)
+
+							m.addEndpoint(ep)
 						}
+					}
+
+					// Collect internal IPs
+					if iface.NetworkIP != "" {
+						// Determine ports from firewall rules
+						ports := m.getPortsForInstance(networkName, instance.Tags)
+
+						ep := Endpoint{
+							ProjectID:      projectID,
+							Name:           instance.Name,
+							Type:           "Internal IP",
+							Address:        iface.NetworkIP,
+							Protocol:       "TCP/UDP",
+							Port:           ports,
+							Resource:       instance.Name,
+							ResourceType:   "Instance",
+							Region:         zoneName,
+							Status:         instance.Status,
+							ServiceAccount: serviceAccount,
+							IsExternal:     false,
+							NetworkTags:    instance.Tags.Items,
+							Network:        networkName,
+						}
+
+						ep.RiskLevel, ep.RiskReasons = m.classifyInternalInstanceRisk(instance, ports)
+						m.addEndpoint(ep)
 					}
 				}
 			}
@@ -393,16 +337,422 @@ func (m *EndpointsModule) getInstanceExternalIPs(ctx context.Context, svc *compu
 		return nil
 	})
 	if err != nil {
-		logger.InfoM(fmt.Sprintf("Could not list instances: %v", err), globals.GCP_ENDPOINTS_MODULE_NAME)
+		gcpinternal.HandleGCPError(err, logger, "endpoints",
+			fmt.Sprintf("Could not list instances in project %s", projectID))
 	}
-
-	return endpoints
 }
 
-// Helper functions
+// getPortsForInstance determines open ports for an instance based on firewall rules
+func (m *EndpointsModule) getPortsForInstance(network string, tags *compute.Tags) string {
+	var allPorts []string
+
+	// Check for rules with no target tags (apply to all instances in network)
+	if ports, ok := m.firewallPortMap[network]; ok {
+		allPorts = append(allPorts, ports...)
+	}
+
+	// Check for rules matching instance tags
+	if tags != nil {
+		for _, tag := range tags.Items {
+			key := fmt.Sprintf("%s:%s", network, tag)
+			if ports, ok := m.firewallPortMap[key]; ok {
+				allPorts = append(allPorts, ports...)
+			}
+		}
+	}
+
+	if len(allPorts) == 0 {
+		return "ALL" // Unknown, scan all ports
+	}
+
+	// Deduplicate ports
+	portSet := make(map[string]bool)
+	for _, p := range allPorts {
+		portSet[p] = true
+	}
+	var uniquePorts []string
+	for p := range portSet {
+		uniquePorts = append(uniquePorts, p)
+	}
+
+	return strings.Join(uniquePorts, ",")
+}
+
+// classifyInternalInstanceRisk determines risk for internal endpoints
+func (m *EndpointsModule) classifyInternalInstanceRisk(instance *compute.Instance, ports string) (string, []string) {
+	var reasons []string
+	score := 0
+
+	reasons = append(reasons, "Internal network access")
+
+	for _, sa := range instance.ServiceAccounts {
+		if strings.Contains(sa.Email, "-compute@developer.gserviceaccount.com") {
+			reasons = append(reasons, "Uses default Compute Engine SA")
+			score += 1
+		}
+
+		for _, scope := range sa.Scopes {
+			if scope == "https://www.googleapis.com/auth/cloud-platform" {
+				reasons = append(reasons, "Has cloud-platform scope")
+				score += 2
+			}
+		}
+	}
+
+	// Check for dangerous ports
+	dangerousPorts := []string{"22", "3389", "3306", "5432", "27017", "6379"}
+	for _, dp := range dangerousPorts {
+		if strings.Contains(ports, dp) {
+			score += 1
+			break
+		}
+	}
+
+	if score >= 3 {
+		return "High", reasons
+	} else if score >= 1 {
+		return "Medium", reasons
+	}
+	return "Low", reasons
+}
+
+// getLoadBalancers retrieves both external and internal load balancers
+func (m *EndpointsModule) getLoadBalancers(ctx context.Context, svc *compute.Service, projectID string, logger internal.Logger) {
+	// Regional forwarding rules
+	req := svc.ForwardingRules.AggregatedList(projectID)
+	err := req.Pages(ctx, func(page *compute.ForwardingRuleAggregatedList) error {
+		for region, scopedList := range page.Items {
+			if scopedList.ForwardingRules == nil {
+				continue
+			}
+			for _, rule := range scopedList.ForwardingRules {
+				ports := "ALL"
+				if rule.PortRange != "" {
+					ports = rule.PortRange
+				} else if len(rule.Ports) > 0 {
+					ports = strings.Join(rule.Ports, ",")
+				}
+
+				target := extractResourceName(rule.Target)
+				if target == "" && rule.BackendService != "" {
+					target = extractResourceName(rule.BackendService)
+				}
+
+				isExternal := rule.LoadBalancingScheme == "EXTERNAL" || rule.LoadBalancingScheme == "EXTERNAL_MANAGED"
+				isInternal := rule.LoadBalancingScheme == "INTERNAL" || rule.LoadBalancingScheme == "INTERNAL_MANAGED" || rule.LoadBalancingScheme == "INTERNAL_SELF_MANAGED"
+
+				if isExternal {
+					ep := Endpoint{
+						ProjectID:    projectID,
+						Name:         rule.Name,
+						Type:         "LoadBalancer",
+						Address:      rule.IPAddress,
+						Protocol:     rule.IPProtocol,
+						Port:         ports,
+						Resource:     target,
+						ResourceType: "ForwardingRule",
+						Region:       extractRegionFromScope(region),
+						TLSEnabled:   rule.PortRange == "443" || strings.Contains(strings.ToLower(rule.Name), "https"),
+						RiskLevel:    "Medium",
+						RiskReasons:  []string{"External load balancer"},
+						IsExternal:   true,
+						Network:      extractResourceName(rule.Network),
+					}
+
+					if !ep.TLSEnabled && ports != "443" {
+						ep.RiskLevel = "High"
+						ep.RiskReasons = append(ep.RiskReasons, "No TLS/HTTPS")
+					}
+
+					m.addEndpoint(ep)
+				} else if isInternal {
+					ep := Endpoint{
+						ProjectID:    projectID,
+						Name:         rule.Name,
+						Type:         "Internal LB",
+						Address:      rule.IPAddress,
+						Protocol:     rule.IPProtocol,
+						Port:         ports,
+						Resource:     target,
+						ResourceType: "ForwardingRule",
+						Region:       extractRegionFromScope(region),
+						TLSEnabled:   rule.PortRange == "443" || strings.Contains(strings.ToLower(rule.Name), "https"),
+						RiskLevel:    "Low",
+						RiskReasons:  []string{"Internal load balancer"},
+						IsExternal:   false,
+						Network:      extractResourceName(rule.Network),
+					}
+
+					m.addEndpoint(ep)
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		gcpinternal.HandleGCPError(err, logger, "endpoints",
+			fmt.Sprintf("Could not list forwarding rules in project %s", projectID))
+	}
+
+	// Global forwarding rules (external only - no internal global LBs)
+	globalReq := svc.GlobalForwardingRules.List(projectID)
+	err = globalReq.Pages(ctx, func(page *compute.ForwardingRuleList) error {
+		for _, rule := range page.Items {
+			if rule.LoadBalancingScheme == "EXTERNAL" || rule.LoadBalancingScheme == "EXTERNAL_MANAGED" {
+				ports := "ALL"
+				if rule.PortRange != "" {
+					ports = rule.PortRange
+				}
+
+				ep := Endpoint{
+					ProjectID:    projectID,
+					Name:         rule.Name,
+					Type:         "Global LoadBalancer",
+					Address:      rule.IPAddress,
+					Protocol:     rule.IPProtocol,
+					Port:         ports,
+					Resource:     extractResourceName(rule.Target),
+					ResourceType: "GlobalForwardingRule",
+					Region:       "global",
+					TLSEnabled:   rule.PortRange == "443" || strings.Contains(strings.ToLower(rule.Name), "https"),
+					RiskLevel:    "Medium",
+					RiskReasons:  []string{"External global load balancer"},
+					IsExternal:   true,
+				}
+
+				if !ep.TLSEnabled && ports != "443" {
+					ep.RiskLevel = "High"
+					ep.RiskReasons = append(ep.RiskReasons, "No TLS/HTTPS")
+				}
+
+				m.addEndpoint(ep)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		gcpinternal.HandleGCPError(err, logger, "endpoints",
+			fmt.Sprintf("Could not list global forwarding rules in project %s", projectID))
+	}
+}
+
+// getCloudRunServices retrieves Cloud Run services with public URLs
+func (m *EndpointsModule) getCloudRunServices(ctx context.Context, projectID string, logger internal.Logger) {
+	runService, err := run.NewService(ctx)
+	if err != nil {
+		gcpinternal.HandleGCPError(err, logger, "endpoints",
+			fmt.Sprintf("Could not create Cloud Run service in project %s", projectID))
+		return
+	}
+
+	parent := fmt.Sprintf("projects/%s/locations/-", projectID)
+	resp, err := runService.Projects.Locations.Services.List(parent).Do()
+	if err != nil {
+		gcpinternal.HandleGCPError(err, logger, "endpoints",
+			fmt.Sprintf("Could not list Cloud Run services in project %s", projectID))
+		return
+	}
+
+	for _, service := range resp.Items {
+		if service.Status != nil && service.Status.Url != "" {
+			ep := Endpoint{
+				ProjectID:    projectID,
+				Name:         service.Metadata.Name,
+				Type:         "Cloud Run",
+				FQDN:         service.Status.Url,
+				Protocol:     "HTTPS",
+				Port:         "443",
+				ResourceType: "CloudRun",
+				TLSEnabled:   true,
+				RiskLevel:    "Medium",
+				RiskReasons:  []string{"Public Cloud Run service"},
+				IsExternal:   true, // Cloud Run services are always external
+			}
+
+			// Extract region from metadata
+			if service.Metadata != nil && service.Metadata.Labels != nil {
+				if region, ok := service.Metadata.Labels["cloud.googleapis.com/location"]; ok {
+					ep.Region = region
+				}
+			}
+
+			// Get service account
+			if service.Spec != nil && service.Spec.Template != nil && service.Spec.Template.Spec != nil {
+				ep.ServiceAccount = service.Spec.Template.Spec.ServiceAccountName
+			}
+
+			m.addEndpoint(ep)
+		}
+	}
+}
+
+// analyzeFirewallRules analyzes firewall rules and builds port mapping for instances
+func (m *EndpointsModule) analyzeFirewallRules(ctx context.Context, svc *compute.Service, projectID string, logger internal.Logger) {
+	req := svc.Firewalls.List(projectID)
+	err := req.Pages(ctx, func(page *compute.FirewallList) error {
+		for _, fw := range page.Items {
+			if fw.Direction != "INGRESS" {
+				continue
+			}
+
+			networkName := extractResourceName(fw.Network)
+
+			// Collect all allowed ports for this rule
+			var rulePorts []string
+			for _, allowed := range fw.Allowed {
+				if len(allowed.Ports) == 0 {
+					// No specific ports means all ports for this protocol
+					rulePorts = append(rulePorts, "ALL")
+				} else {
+					rulePorts = append(rulePorts, allowed.Ports...)
+				}
+			}
+
+			// Build firewall port map for internal IP port determination
+			m.mu.Lock()
+			if len(fw.TargetTags) == 0 {
+				// Rule applies to all instances in network
+				m.firewallPortMap[networkName] = append(m.firewallPortMap[networkName], rulePorts...)
+			} else {
+				// Rule applies to instances with specific tags
+				for _, tag := range fw.TargetTags {
+					key := fmt.Sprintf("%s:%s", networkName, tag)
+					m.firewallPortMap[key] = append(m.firewallPortMap[key], rulePorts...)
+				}
+			}
+			m.mu.Unlock()
+
+			// Check if rule allows ingress from 0.0.0.0/0 (public access)
+			isPublic := false
+			for _, sr := range fw.SourceRanges {
+				if sr == "0.0.0.0/0" {
+					isPublic = true
+					break
+				}
+			}
+
+			if isPublic {
+				fwRule := FirewallRule{
+					ProjectID:    projectID,
+					RuleName:     fw.Name,
+					Network:      networkName,
+					Direction:    fw.Direction,
+					SourceRanges: fw.SourceRanges,
+					TargetTags:   fw.TargetTags,
+					Ports:        rulePorts,
+				}
+
+				// Get protocol
+				if len(fw.Allowed) > 0 {
+					fwRule.Protocol = fw.Allowed[0].IPProtocol
+				}
+
+				// Classify risk
+				fwRule.RiskLevel, fwRule.RiskReasons = m.classifyFirewallRisk(fwRule)
+
+				m.mu.Lock()
+				m.FirewallRules = append(m.FirewallRules, fwRule)
+				m.mu.Unlock()
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		gcpinternal.HandleGCPError(err, logger, "endpoints",
+			fmt.Sprintf("Could not list firewall rules in project %s", projectID))
+	}
+}
+
+// addEndpoint adds an endpoint thread-safely to appropriate list and to loot
+func (m *EndpointsModule) addEndpoint(ep Endpoint) {
+	m.mu.Lock()
+	if ep.IsExternal {
+		m.ExternalEndpoints = append(m.ExternalEndpoints, ep)
+	} else {
+		m.InternalEndpoints = append(m.InternalEndpoints, ep)
+	}
+	m.addEndpointToLoot(ep)
+	m.mu.Unlock()
+}
+
+// classifyInstanceRisk determines the risk level of an exposed instance
+func (m *EndpointsModule) classifyInstanceRisk(instance *compute.Instance) (string, []string) {
+	var reasons []string
+	score := 0
+
+	reasons = append(reasons, "Has external IP")
+	score += 1
+
+	for _, sa := range instance.ServiceAccounts {
+		if strings.Contains(sa.Email, "-compute@developer.gserviceaccount.com") {
+			reasons = append(reasons, "Uses default Compute Engine SA")
+			score += 2
+		}
+
+		for _, scope := range sa.Scopes {
+			if scope == "https://www.googleapis.com/auth/cloud-platform" {
+				reasons = append(reasons, "Has cloud-platform scope (full access)")
+				score += 3
+			}
+		}
+	}
+
+	if score >= 4 {
+		return "Critical", reasons
+	} else if score >= 2 {
+		return "High", reasons
+	}
+	return "Medium", reasons
+}
+
+// classifyFirewallRisk determines the risk level of a public firewall rule
+func (m *EndpointsModule) classifyFirewallRisk(rule FirewallRule) (string, []string) {
+	var reasons []string
+	score := 0
+
+	reasons = append(reasons, "Allows traffic from 0.0.0.0/0")
+	score += 1
+
+	dangerousPorts := map[string]string{
+		"22":    "SSH",
+		"3389":  "RDP",
+		"3306":  "MySQL",
+		"5432":  "PostgreSQL",
+		"27017": "MongoDB",
+		"6379":  "Redis",
+		"9200":  "Elasticsearch",
+	}
+
+	for _, port := range rule.Ports {
+		if name, ok := dangerousPorts[port]; ok {
+			reasons = append(reasons, fmt.Sprintf("Exposes %s (port %s)", name, port))
+			score += 3
+		}
+		if strings.Contains(port, "-") {
+			reasons = append(reasons, fmt.Sprintf("Wide port range: %s", port))
+			score += 2
+		}
+	}
+
+	if len(rule.TargetTags) == 0 {
+		reasons = append(reasons, "No target tags (applies to all instances)")
+		score += 2
+	}
+
+	if score >= 5 {
+		return "Critical", reasons
+	} else if score >= 3 {
+		return "High", reasons
+	}
+	return "Medium", reasons
+}
+
+// ------------------------------
+// Helper Functions
+// ------------------------------
 func extractResourceName(url string) string {
 	if url == "" {
-		return "-"
+		return ""
 	}
 	parts := strings.Split(url, "/")
 	if len(parts) > 0 {
@@ -429,64 +779,111 @@ func extractZoneFromScope(scope string) string {
 	return scope
 }
 
+// getIPAndHostname extracts IP address and hostname from an endpoint
+// Returns "-" for fields that are not applicable
+func getIPAndHostname(ep Endpoint) (ipAddr string, hostname string) {
+	ipAddr = "-"
+	hostname = "-"
+
+	// If we have an IP address (Address field)
+	if ep.Address != "" {
+		ipAddr = ep.Address
+	}
+
+	// If we have a FQDN/hostname
+	if ep.FQDN != "" {
+		// Strip protocol prefix
+		host := ep.FQDN
+		host = strings.TrimPrefix(host, "https://")
+		host = strings.TrimPrefix(host, "http://")
+		// Remove any trailing path
+		if idx := strings.Index(host, "/"); idx != -1 {
+			host = host[:idx]
+		}
+		hostname = host
+	}
+
+	return ipAddr, hostname
+}
+
 // ------------------------------
 // Loot File Management
 // ------------------------------
 func (m *EndpointsModule) initializeLootFiles() {
-	m.LootMap["endpoints-all-ips"] = &internal.LootFile{
-		Name:     "endpoints-all-ips",
-		Contents: "",
+	m.LootMap["endpoints-external-commands"] = &internal.LootFile{
+		Name: "endpoints-external-commands",
+		Contents: "# External Endpoints Scan Commands\n" +
+			"# Generated by CloudFox\n" +
+			"# Use these commands for authorized penetration testing of internet-facing resources\n\n",
 	}
-	m.LootMap["endpoints-load-balancers"] = &internal.LootFile{
-		Name:     "endpoints-load-balancers",
-		Contents: "# Load Balancer Endpoints\n# Generated by CloudFox\n\n",
-	}
-	m.LootMap["endpoints-instance-ips"] = &internal.LootFile{
-		Name:     "endpoints-instance-ips",
-		Contents: "# Instance External IPs\n# Generated by CloudFox\n\n",
-	}
-	m.LootMap["endpoints-nmap-targets"] = &internal.LootFile{
-		Name:     "endpoints-nmap-targets",
-		Contents: "# Nmap Targets\n# Generated by CloudFox\n# nmap -iL endpoints-nmap-targets.txt\n\n",
+	m.LootMap["endpoints-internal-commands"] = &internal.LootFile{
+		Name: "endpoints-internal-commands",
+		Contents: "# Internal Endpoints Scan Commands\n" +
+			"# Generated by CloudFox\n" +
+			"# Use these commands for authorized internal network penetration testing\n" +
+			"# Note: These targets require internal network access or VPN connection\n\n",
 	}
 }
 
-func (m *EndpointsModule) addEndpointToLoot(ep EndpointInfo) {
-	// All IPs (plain list for tools)
-	if ep.Address != "" && ep.Address != "-" {
-		m.LootMap["endpoints-all-ips"].Contents += ep.Address + "\n"
-		m.LootMap["endpoints-nmap-targets"].Contents += ep.Address + "\n"
+func (m *EndpointsModule) addEndpointToLoot(ep Endpoint) {
+	target := ep.Address
+	if target == "" {
+		target = ep.FQDN
+	}
+	if target == "" {
+		return
 	}
 
-	// Load balancers
-	if strings.Contains(ep.Type, "LoadBalancer") {
-		m.LootMap["endpoints-load-balancers"].Contents += fmt.Sprintf(
-			"# %s (%s)\n"+
-				"# Target: %s\n"+
-				"# Protocol: %s, Ports: %s\n"+
-				"IP=%s\n\n",
-			ep.Name,
-			ep.Type,
-			ep.Resource,
-			ep.Protocol,
-			ep.Port,
-			ep.Address,
-		)
+	// Strip protocol prefix for nmap (needs just hostname/IP)
+	hostname := target
+	hostname = strings.TrimPrefix(hostname, "https://")
+	hostname = strings.TrimPrefix(hostname, "http://")
+	// Remove any trailing path
+	if idx := strings.Index(hostname, "/"); idx != -1 {
+		hostname = hostname[:idx]
 	}
 
-	// Instance IPs
-	if ep.ResourceType == "Instance" {
-		m.LootMap["endpoints-instance-ips"].Contents += fmt.Sprintf(
-			"# Instance: %s (%s)\n"+
-				"# Zone: %s\n"+
-				"# Status: %s\n"+
-				"IP=%s\n\n",
-			ep.Name,
-			ep.ProjectID,
-			ep.Region,
-			ep.Status,
-			ep.Address,
-		)
+	// Build nmap command based on endpoint type and port info
+	var nmapCmd string
+	switch {
+	case ep.Port == "ALL" || ep.Port == "":
+		// Unknown ports - scan all common ports (or full range for internal)
+		if ep.IsExternal {
+			nmapCmd = fmt.Sprintf("nmap -sV -Pn %s", hostname)
+		} else {
+			// For internal, scan all ports since we don't know what's open
+			nmapCmd = fmt.Sprintf("nmap -sV -Pn -p- %s", hostname)
+		}
+	case strings.Contains(ep.Port, ","):
+		nmapCmd = fmt.Sprintf("nmap -sV -Pn -p %s %s", ep.Port, hostname)
+	case strings.Contains(ep.Port, "-"):
+		nmapCmd = fmt.Sprintf("nmap -sV -Pn -p %s %s", ep.Port, hostname)
+	default:
+		nmapCmd = fmt.Sprintf("nmap -sV -Pn -p %s %s", ep.Port, hostname)
+	}
+
+	// Select appropriate loot file
+	lootKey := "endpoints-external-commands"
+	if !ep.IsExternal {
+		lootKey = "endpoints-internal-commands"
+	}
+
+	m.LootMap[lootKey].Contents += fmt.Sprintf(
+		"# %s: %s (%s)\n"+
+			"# Project: %s | Region: %s | Network: %s\n"+
+			"%s\n\n",
+		ep.Type, ep.Name, ep.ResourceType,
+		ep.ProjectID, ep.Region, ep.Network,
+		nmapCmd,
+	)
+
+	// Add HTTP/HTTPS test for web-facing endpoints
+	if ep.Type == "LoadBalancer" || ep.Type == "Global LoadBalancer" || ep.Type == "Cloud Run" {
+		if ep.TLSEnabled || ep.Port == "443" {
+			m.LootMap[lootKey].Contents += fmt.Sprintf("curl -vk https://%s/\n\n", hostname)
+		} else {
+			m.LootMap[lootKey].Contents += fmt.Sprintf("curl -v http://%s/\n\n", hostname)
+		}
 	}
 }
 
@@ -494,110 +891,75 @@ func (m *EndpointsModule) addEndpointToLoot(ep EndpointInfo) {
 // Output Generation
 // ------------------------------
 func (m *EndpointsModule) writeOutput(ctx context.Context, logger internal.Logger) {
-	// Main endpoints table
-	endpointsHeader := []string{
-		"Address",
+	// Status column shows operational state: RUNNING, STOPPED, IN_USE, RESERVED, etc.
+	header := []string{
+		"Project ID",
+		"Project Name",
+		"Name",
 		"Type",
+		"IP Address",
+		"Hostname",
 		"Protocol",
 		"Port",
-		"Resource",
-		"Resource Type",
 		"Region",
-		"Project Name",
-		"Project",
+		"Network",
 		"Status",
 	}
 
-	var endpointsBody [][]string
-	for _, ep := range m.Endpoints {
-		endpointsBody = append(endpointsBody, []string{
-			ep.Address,
+	// External endpoints table
+	var externalBody [][]string
+	for _, ep := range m.ExternalEndpoints {
+		ipAddr, hostname := getIPAndHostname(ep)
+		externalBody = append(externalBody, []string{
+			ep.ProjectID,
+			m.GetProjectName(ep.ProjectID),
+			ep.Name,
 			ep.Type,
+			ipAddr,
+			hostname,
 			ep.Protocol,
 			ep.Port,
-			ep.Resource,
-			ep.ResourceType,
 			ep.Region,
-			m.GetProjectName(ep.ProjectID),
-			ep.ProjectID,
+			ep.Network,
 			ep.Status,
 		})
 	}
 
-	// Load balancers table
-	lbHeader := []string{
-		"Name",
-		"Address",
-		"Protocol",
-		"Ports",
-		"Target",
-		"Region",
-		"Project Name",
-		"Project",
+	// Internal endpoints table
+	var internalBody [][]string
+	for _, ep := range m.InternalEndpoints {
+		ipAddr, hostname := getIPAndHostname(ep)
+		internalBody = append(internalBody, []string{
+			ep.ProjectID,
+			m.GetProjectName(ep.ProjectID),
+			ep.Name,
+			ep.Type,
+			ipAddr,
+			hostname,
+			ep.Protocol,
+			ep.Port,
+			ep.Region,
+			ep.Network,
+			ep.Status,
+		})
 	}
 
-	var lbBody [][]string
-	for _, ep := range m.Endpoints {
-		if strings.Contains(ep.Type, "LoadBalancer") {
-			lbBody = append(lbBody, []string{
-				ep.Name,
-				ep.Address,
-				ep.Protocol,
-				ep.Port,
-				ep.Resource,
-				ep.Region,
-				m.GetProjectName(ep.ProjectID),
-				ep.ProjectID,
-			})
-		}
-	}
-
-	// Instance IPs table
-	instanceHeader := []string{
-		"Instance",
-		"Address",
-		"Zone",
-		"Status",
-		"Project Name",
-		"Project",
-	}
-
-	var instanceBody [][]string
-	for _, ep := range m.Endpoints {
-		if ep.ResourceType == "Instance" {
-			instanceBody = append(instanceBody, []string{
-				ep.Name,
-				ep.Address,
-				ep.Region,
-				ep.Status,
-				m.GetProjectName(ep.ProjectID),
-				ep.ProjectID,
-			})
-		}
-	}
-
-	// Static IPs table
-	staticHeader := []string{
-		"Name",
-		"Address",
-		"Used By",
-		"Region",
-		"Status",
-		"Project Name",
-		"Project",
-	}
-
-	var staticBody [][]string
-	for _, ep := range m.Endpoints {
-		if ep.Type == "Static IP" {
-			staticBody = append(staticBody, []string{
-				ep.Name,
-				ep.Address,
-				ep.Resource,
-				ep.Region,
-				ep.Status,
-				m.GetProjectName(ep.ProjectID),
-				ep.ProjectID,
+	// Firewall rules table (public 0.0.0.0/0 rules only)
+	var fwBody [][]string
+	if len(m.FirewallRules) > 0 {
+		for _, fw := range m.FirewallRules {
+			tags := strings.Join(fw.TargetTags, ",")
+			if tags == "" {
+				tags = "ALL"
+			}
+			fwBody = append(fwBody, []string{
+				fw.ProjectID,
+				m.GetProjectName(fw.ProjectID),
+				fw.RuleName,
+				fw.Network,
+				fw.Protocol,
+				strings.Join(fw.Ports, ","),
+				tags,
 			})
 		}
 	}
@@ -611,39 +973,37 @@ func (m *EndpointsModule) writeOutput(ctx context.Context, logger internal.Logge
 	}
 
 	// Build tables
-	tables := []internal.TableFile{
-		{
-			Name:   "endpoints",
-			Header: endpointsHeader,
-			Body:   endpointsBody,
-		},
-	}
+	var tables []internal.TableFile
 
-	// Add load balancers table if there are any
-	if len(lbBody) > 0 {
+	if len(externalBody) > 0 {
 		tables = append(tables, internal.TableFile{
-			Name:   "endpoints-loadbalancers",
-			Header: lbHeader,
-			Body:   lbBody,
+			Name:   "endpoints-external",
+			Header: header,
+			Body:   externalBody,
 		})
 	}
 
-	// Add instances table if there are any
-	if len(instanceBody) > 0 {
+	if len(internalBody) > 0 {
 		tables = append(tables, internal.TableFile{
-			Name:   "endpoints-instances",
-			Header: instanceHeader,
-			Body:   instanceBody,
+			Name:   "endpoints-internal",
+			Header: header,
+			Body:   internalBody,
 		})
-		logger.InfoM(fmt.Sprintf("[INFO] Found %d instance(s) with external IPs", len(instanceBody)), globals.GCP_ENDPOINTS_MODULE_NAME)
 	}
 
-	// Add static IPs table if there are any
-	if len(staticBody) > 0 {
+	if len(fwBody) > 0 {
 		tables = append(tables, internal.TableFile{
-			Name:   "endpoints-static-ips",
-			Header: staticHeader,
-			Body:   staticBody,
+			Name: "endpoints-firewall",
+			Header: []string{
+				"Project ID",
+				"Project Name",
+				"Rule",
+				"Network",
+				"Protocol",
+				"Ports",
+				"Target Tags",
+			},
+			Body: fwBody,
 		})
 	}
 
@@ -652,25 +1012,25 @@ func (m *EndpointsModule) writeOutput(ctx context.Context, logger internal.Logge
 		Loot:  lootFiles,
 	}
 
-	// Write output using HandleOutputSmart with scope support
 	scopeNames := make([]string, len(m.ProjectIDs))
 	for i, id := range m.ProjectIDs {
 		scopeNames[i] = m.GetProjectName(id)
 	}
+
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
 		m.OutputDirectory,
 		m.Verbosity,
 		m.WrapTable,
-		"project",           // scopeType
-		m.ProjectIDs,        // scopeIdentifiers
-		scopeNames,          // scopeNames
+		"project",
+		m.ProjectIDs,
+		scopeNames,
 		m.Account,
 		output,
 	)
 	if err != nil {
-		logger.ErrorM(fmt.Sprintf("Error writing output: %v", err), globals.GCP_ENDPOINTS_MODULE_NAME)
+		logger.ErrorM(fmt.Sprintf("Error writing output: %v", err), "exposure")
 		m.CommandCounter.Error++
 	}
 }

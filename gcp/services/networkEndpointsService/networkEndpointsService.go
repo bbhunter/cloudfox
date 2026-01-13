@@ -18,47 +18,47 @@ func New() *NetworkEndpointsService {
 
 // PrivateServiceConnectEndpoint represents a PSC endpoint
 type PrivateServiceConnectEndpoint struct {
-	Name            string   `json:"name"`
-	ProjectID       string   `json:"projectId"`
-	Region          string   `json:"region"`
-	Network         string   `json:"network"`
-	Subnetwork      string   `json:"subnetwork"`
-	IPAddress       string   `json:"ipAddress"`
-	Target          string   `json:"target"`         // Service attachment or API
-	TargetType      string   `json:"targetType"`     // google-apis, service-attachment
-	ConnectionState string   `json:"connectionState"`
-	RiskLevel       string   `json:"riskLevel"`
-	RiskReasons     []string `json:"riskReasons"`
-	ExploitCommands []string `json:"exploitCommands"`
+	Name            string `json:"name"`
+	ProjectID       string `json:"projectId"`
+	Region          string `json:"region"`
+	Network         string `json:"network"`
+	Subnetwork      string `json:"subnetwork"`
+	IPAddress       string `json:"ipAddress"`
+	Target          string `json:"target"`         // Service attachment or API
+	TargetType      string `json:"targetType"`     // google-apis, service-attachment
+	ConnectionState string `json:"connectionState"`
 }
 
 // PrivateConnection represents a private service connection (e.g., for Cloud SQL)
 type PrivateConnection struct {
-	Name              string   `json:"name"`
-	ProjectID         string   `json:"projectId"`
-	Network           string   `json:"network"`
-	Service           string   `json:"service"`
-	ReservedRanges    []string `json:"reservedRanges"`
-	PeeringName       string   `json:"peeringName"`
-	RiskLevel         string   `json:"riskLevel"`
-	RiskReasons       []string `json:"riskReasons"`
+	Name               string   `json:"name"`
+	ProjectID          string   `json:"projectId"`
+	Network            string   `json:"network"`
+	Service            string   `json:"service"`
+	ReservedRanges     []string `json:"reservedRanges"`
+	PeeringName        string   `json:"peeringName"`
 	AccessibleServices []string `json:"accessibleServices"`
+}
+
+// ServiceAttachmentIAMBinding represents an IAM binding for a service attachment
+type ServiceAttachmentIAMBinding struct {
+	Role   string `json:"role"`
+	Member string `json:"member"`
 }
 
 // ServiceAttachment represents a PSC service attachment (producer side)
 type ServiceAttachment struct {
-	Name                  string   `json:"name"`
-	ProjectID             string   `json:"projectId"`
-	Region                string   `json:"region"`
-	TargetService         string   `json:"targetService"`
-	ConnectionPreference  string   `json:"connectionPreference"` // ACCEPT_AUTOMATIC, ACCEPT_MANUAL
-	ConsumerAcceptLists   []string `json:"consumerAcceptLists"`
-	ConsumerRejectLists   []string `json:"consumerRejectLists"`
-	EnableProxyProtocol   bool     `json:"enableProxyProtocol"`
-	NatSubnets            []string `json:"natSubnets"`
-	ConnectedEndpoints    int      `json:"connectedEndpoints"`
-	RiskLevel             string   `json:"riskLevel"`
-	RiskReasons           []string `json:"riskReasons"`
+	Name                 string                        `json:"name"`
+	ProjectID            string                        `json:"projectId"`
+	Region               string                        `json:"region"`
+	TargetService        string                        `json:"targetService"`
+	ConnectionPreference string                        `json:"connectionPreference"` // ACCEPT_AUTOMATIC, ACCEPT_MANUAL
+	ConsumerAcceptLists  []string                      `json:"consumerAcceptLists"`
+	ConsumerRejectLists  []string                      `json:"consumerRejectLists"`
+	EnableProxyProtocol  bool                          `json:"enableProxyProtocol"`
+	NatSubnets           []string                      `json:"natSubnets"`
+	ConnectedEndpoints   int                           `json:"connectedEndpoints"`
+	IAMBindings          []ServiceAttachmentIAMBinding `json:"iamBindings"`
 }
 
 // GetPrivateServiceConnectEndpoints retrieves PSC forwarding rules
@@ -105,16 +105,14 @@ func (s *NetworkEndpointsService) GetPrivateServiceConnectEndpoints(projectID st
 				}
 
 				endpoint := PrivateServiceConnectEndpoint{
-					Name:            rule.Name,
-					ProjectID:       projectID,
-					Region:          regionName,
-					Network:         extractName(rule.Network),
-					Subnetwork:      extractName(rule.Subnetwork),
-					IPAddress:       rule.IPAddress,
-					Target:          rule.Target,
-					TargetType:      targetType,
-					RiskReasons:     []string{},
-					ExploitCommands: []string{},
+					Name:       rule.Name,
+					ProjectID:  projectID,
+					Region:     regionName,
+					Network:    extractName(rule.Network),
+					Subnetwork: extractName(rule.Subnetwork),
+					IPAddress:  rule.IPAddress,
+					Target:     rule.Target,
+					TargetType: targetType,
 				}
 
 				// Check connection state (for PSC endpoints to service attachments)
@@ -123,9 +121,6 @@ func (s *NetworkEndpointsService) GetPrivateServiceConnectEndpoints(projectID st
 				} else {
 					endpoint.ConnectionState = "ACTIVE"
 				}
-
-				endpoint.RiskLevel, endpoint.RiskReasons = s.analyzePSCRisk(endpoint)
-				endpoint.ExploitCommands = s.generatePSCExploitCommands(endpoint)
 
 				endpoints = append(endpoints, endpoint)
 			}
@@ -176,13 +171,10 @@ func (s *NetworkEndpointsService) GetPrivateConnections(projectID string) ([]Pri
 				Service:        conn.Service,
 				ReservedRanges: conn.ReservedPeeringRanges,
 				PeeringName:    conn.Peering,
-				RiskReasons:    []string{},
 			}
 
 			// Determine accessible services based on the connection
 			connection.AccessibleServices = s.determineAccessibleServices(conn.Service)
-
-			connection.RiskLevel, connection.RiskReasons = s.analyzeConnectionRisk(connection)
 
 			connections = append(connections, connection)
 		}
@@ -217,7 +209,6 @@ func (s *NetworkEndpointsService) GetServiceAttachments(projectID string) ([]Ser
 					TargetService:        extractName(attachment.TargetService),
 					ConnectionPreference: attachment.ConnectionPreference,
 					EnableProxyProtocol:  attachment.EnableProxyProtocol,
-					RiskReasons:          []string{},
 				}
 
 				// Extract NAT subnets
@@ -238,7 +229,8 @@ func (s *NetworkEndpointsService) GetServiceAttachments(projectID string) ([]Ser
 					sa.ConsumerRejectLists = append(sa.ConsumerRejectLists, reject)
 				}
 
-				sa.RiskLevel, sa.RiskReasons = s.analyzeAttachmentRisk(sa)
+				// Get IAM bindings for the service attachment
+				sa.IAMBindings = s.getServiceAttachmentIAMBindings(ctx, service, projectID, regionName, attachment.Name)
 
 				attachments = append(attachments, sa)
 			}
@@ -249,79 +241,26 @@ func (s *NetworkEndpointsService) GetServiceAttachments(projectID string) ([]Ser
 	return attachments, err
 }
 
-func (s *NetworkEndpointsService) analyzePSCRisk(endpoint PrivateServiceConnectEndpoint) (string, []string) {
-	var reasons []string
-	score := 0
-
-	if endpoint.TargetType == "google-apis" {
-		reasons = append(reasons, "PSC endpoint to Google APIs - internal access to GCP services")
-		score += 1
+// getServiceAttachmentIAMBindings retrieves IAM bindings for a service attachment
+func (s *NetworkEndpointsService) getServiceAttachmentIAMBindings(ctx context.Context, service *compute.Service, projectID, region, attachmentName string) []ServiceAttachmentIAMBinding {
+	policy, err := service.ServiceAttachments.GetIamPolicy(projectID, region, attachmentName).Context(ctx).Do()
+	if err != nil {
+		return nil
 	}
 
-	if endpoint.TargetType == "service-attachment" {
-		reasons = append(reasons, "PSC endpoint to service attachment - access to producer service")
-		score += 1
+	var bindings []ServiceAttachmentIAMBinding
+	for _, binding := range policy.Bindings {
+		if binding == nil {
+			continue
+		}
+		for _, member := range binding.Members {
+			bindings = append(bindings, ServiceAttachmentIAMBinding{
+				Role:   binding.Role,
+				Member: member,
+			})
+		}
 	}
-
-	if endpoint.ConnectionState == "ACCEPTED" || endpoint.ConnectionState == "ACTIVE" {
-		reasons = append(reasons, "Connection is active")
-		score += 1
-	}
-
-	if score >= 2 {
-		return "MEDIUM", reasons
-	} else if score >= 1 {
-		return "LOW", reasons
-	}
-	return "INFO", reasons
-}
-
-func (s *NetworkEndpointsService) generatePSCExploitCommands(endpoint PrivateServiceConnectEndpoint) []string {
-	var commands []string
-
-	commands = append(commands,
-		fmt.Sprintf("# PSC Endpoint: %s", endpoint.Name),
-		fmt.Sprintf("# IP Address: %s", endpoint.IPAddress),
-		fmt.Sprintf("# Network: %s", endpoint.Network),
-	)
-
-	if endpoint.TargetType == "google-apis" {
-		commands = append(commands,
-			"# This endpoint provides private access to Google APIs",
-			"# From instances in this VPC, access Google APIs via this IP:",
-			fmt.Sprintf("# curl -H 'Host: storage.googleapis.com' https://%s/storage/v1/b", endpoint.IPAddress),
-		)
-	} else if endpoint.TargetType == "service-attachment" {
-		commands = append(commands,
-			"# This endpoint connects to a producer service",
-			fmt.Sprintf("# Target: %s", endpoint.Target),
-			fmt.Sprintf("# Connect from VPC instance to: %s", endpoint.IPAddress),
-		)
-	}
-
-	return commands
-}
-
-func (s *NetworkEndpointsService) analyzeConnectionRisk(connection PrivateConnection) (string, []string) {
-	var reasons []string
-	score := 0
-
-	if len(connection.ReservedRanges) > 0 {
-		reasons = append(reasons, fmt.Sprintf("Has %d reserved IP range(s)", len(connection.ReservedRanges)))
-		score += 1
-	}
-
-	if len(connection.AccessibleServices) > 0 {
-		reasons = append(reasons, fmt.Sprintf("Provides access to: %s", strings.Join(connection.AccessibleServices, ", ")))
-		score += 1
-	}
-
-	if score >= 2 {
-		return "MEDIUM", reasons
-	} else if score >= 1 {
-		return "LOW", reasons
-	}
-	return "INFO", reasons
+	return bindings
 }
 
 func (s *NetworkEndpointsService) determineAccessibleServices(service string) []string {
@@ -334,35 +273,6 @@ func (s *NetworkEndpointsService) determineAccessibleServices(service string) []
 		return services
 	}
 	return []string{service}
-}
-
-func (s *NetworkEndpointsService) analyzeAttachmentRisk(attachment ServiceAttachment) (string, []string) {
-	var reasons []string
-	score := 0
-
-	if attachment.ConnectionPreference == "ACCEPT_AUTOMATIC" {
-		reasons = append(reasons, "Auto-accepts connections from any project")
-		score += 2
-	}
-
-	if len(attachment.ConsumerAcceptLists) == 0 && attachment.ConnectionPreference == "ACCEPT_MANUAL" {
-		reasons = append(reasons, "No explicit accept list - manual review required")
-		score += 1
-	}
-
-	if attachment.ConnectedEndpoints > 0 {
-		reasons = append(reasons, fmt.Sprintf("Has %d connected consumer endpoint(s)", attachment.ConnectedEndpoints))
-		score += 1
-	}
-
-	if score >= 3 {
-		return "HIGH", reasons
-	} else if score >= 2 {
-		return "MEDIUM", reasons
-	} else if score >= 1 {
-		return "LOW", reasons
-	}
-	return "INFO", reasons
 }
 
 func extractName(fullPath string) string {

@@ -9,6 +9,7 @@ import (
 	"cloud.google.com/go/bigquery"
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	"google.golang.org/api/iterator"
+	bqapi "google.golang.org/api/bigquery/v2"
 )
 
 // AccessEntry represents an access control entry on a dataset
@@ -79,12 +80,23 @@ type BigqueryTable struct {
 	PartitioningType string `json:"partitioningType"` // "TIME" or "RANGE"
 
 	// View info
-	IsView       bool `json:"isView"`
+	IsView       bool   `json:"isView"`
 	ViewQuery    string `json:"viewQuery"`
-	UseLegacySQL bool `json:"useLegacySQL"`
+	UseLegacySQL bool   `json:"useLegacySQL"`
 
 	// Streaming info
 	HasStreamingBuffer bool `json:"hasStreamingBuffer"`
+
+	// IAM bindings (table-level)
+	IAMBindings  []TableIAMBinding `json:"iamBindings"`
+	IsPublic     bool              `json:"isPublic"`
+	PublicAccess string            `json:"publicAccess"`
+}
+
+// TableIAMBinding represents an IAM binding on a table
+type TableIAMBinding struct {
+	Role    string   `json:"role"`
+	Members []string `json:"members"`
 }
 
 // CombinedBigqueryData represents both datasets and tables within a project
@@ -302,6 +314,18 @@ func (bq *BigQueryService) BigqueryTables(projectID string, datasetID string) ([
 	}
 	defer client.Close()
 
+	// Create API service for IAM calls
+	var apiService *bqapi.Service
+	if bq.session != nil {
+		apiService, err = bqapi.NewService(ctx, bq.session.GetClientOption())
+	} else {
+		apiService, err = bqapi.NewService(ctx)
+	}
+	if err != nil {
+		// Continue without IAM if service creation fails
+		apiService = nil
+	}
+
 	var tables []BigqueryTable
 	ds := client.Dataset(datasetID)
 	it := ds.Tables(ctx)
@@ -365,9 +389,64 @@ func (bq *BigQueryService) BigqueryTables(projectID string, datasetID string) ([
 			tbl.HasStreamingBuffer = true
 		}
 
+		// Get table-level IAM policy
+		if apiService != nil {
+			iamBindings, isPublic, publicAccess := bq.getTableIAMPolicy(ctx, apiService, projectID, datasetID, table.TableID)
+			tbl.IAMBindings = iamBindings
+			tbl.IsPublic = isPublic
+			tbl.PublicAccess = publicAccess
+		}
+
 		tables = append(tables, tbl)
 	}
 	return tables, nil
+}
+
+// getTableIAMPolicy retrieves IAM policy for a specific table
+func (bq *BigQueryService) getTableIAMPolicy(ctx context.Context, apiService *bqapi.Service, projectID, datasetID, tableID string) ([]TableIAMBinding, bool, string) {
+	var bindings []TableIAMBinding
+	isPublic := false
+	hasAllUsers := false
+	hasAllAuthenticatedUsers := false
+
+	resource := fmt.Sprintf("projects/%s/datasets/%s/tables/%s", projectID, datasetID, tableID)
+	policy, err := apiService.Tables.GetIamPolicy(resource, &bqapi.GetIamPolicyRequest{}).Context(ctx).Do()
+	if err != nil {
+		// IAM not available or permission denied - return empty
+		return bindings, false, "None"
+	}
+
+	for _, binding := range policy.Bindings {
+		iamBinding := TableIAMBinding{
+			Role:    binding.Role,
+			Members: binding.Members,
+		}
+		bindings = append(bindings, iamBinding)
+
+		// Check for public access
+		for _, member := range binding.Members {
+			if member == "allUsers" {
+				hasAllUsers = true
+				isPublic = true
+			}
+			if member == "allAuthenticatedUsers" {
+				hasAllAuthenticatedUsers = true
+				isPublic = true
+			}
+		}
+	}
+
+	// Determine public access level
+	publicAccess := "None"
+	if hasAllUsers && hasAllAuthenticatedUsers {
+		publicAccess = "allUsers + allAuthenticatedUsers"
+	} else if hasAllUsers {
+		publicAccess = "allUsers"
+	} else if hasAllAuthenticatedUsers {
+		publicAccess = "allAuthenticatedUsers"
+	}
+
+	return bindings, isPublic, publicAccess
 }
 
 // tableTypeToString converts BigQuery TableType to a readable string

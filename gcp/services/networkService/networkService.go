@@ -333,8 +333,7 @@ type FirewallRuleInfo struct {
 	IsPublicIngress   bool   // 0.0.0.0/0 in source ranges
 	IsPublicEgress    bool   // 0.0.0.0/0 in destination ranges
 	AllowsAllPorts    bool   // Empty ports = all ports
-	RiskLevel         string // HIGH, MEDIUM, LOW
-	SecurityIssues    []string
+	LoggingEnabled    bool   // Firewall logging enabled
 }
 
 // Networks retrieves all VPC networks in a project
@@ -487,89 +486,29 @@ func (ns *NetwworkService) FirewallRulesEnhanced(projectID string) ([]FirewallRu
 			info.DeniedProtocols[denied.IPProtocol] = denied.Ports
 		}
 
-		// Security analysis
-		analyzeFirewallRule(&info)
+		// Security analysis - check for public ingress/egress
+		for _, source := range fw.SourceRanges {
+			if source == "0.0.0.0/0" || source == "::/0" {
+				info.IsPublicIngress = true
+				break
+			}
+		}
+		for _, dest := range fw.DestinationRanges {
+			if dest == "0.0.0.0/0" || dest == "::/0" {
+				info.IsPublicEgress = true
+				break
+			}
+		}
+
+		// Check if logging is enabled
+		if fw.LogConfig != nil && fw.LogConfig.Enable {
+			info.LoggingEnabled = true
+		}
 
 		rules = append(rules, info)
 	}
 
 	return rules, nil
-}
-
-// analyzeFirewallRule performs security analysis on a firewall rule
-func analyzeFirewallRule(rule *FirewallRuleInfo) {
-	// Check for public ingress (0.0.0.0/0 in source ranges)
-	for _, source := range rule.SourceRanges {
-		if source == "0.0.0.0/0" || source == "::/0" {
-			rule.IsPublicIngress = true
-			break
-		}
-	}
-
-	// Check for public egress
-	for _, dest := range rule.DestinationRanges {
-		if dest == "0.0.0.0/0" || dest == "::/0" {
-			rule.IsPublicEgress = true
-			break
-		}
-	}
-
-	// Determine risk level and security issues
-	if rule.Direction == "INGRESS" && rule.IsPublicIngress && len(rule.AllowedProtocols) > 0 {
-		// Check for high-risk configurations
-		for proto, ports := range rule.AllowedProtocols {
-			if len(ports) == 0 {
-				// All ports allowed
-				rule.SecurityIssues = append(rule.SecurityIssues,
-					"Allows all "+proto+" ports from 0.0.0.0/0")
-				rule.RiskLevel = "HIGH"
-			} else {
-				// Check for sensitive ports
-				for _, port := range ports {
-					if isSensitivePort(port) {
-						rule.SecurityIssues = append(rule.SecurityIssues,
-							"Exposes sensitive port "+port+" ("+proto+") to internet")
-						if rule.RiskLevel != "HIGH" {
-							rule.RiskLevel = "HIGH"
-						}
-					}
-				}
-			}
-		}
-
-		if rule.RiskLevel == "" && rule.IsPublicIngress {
-			rule.RiskLevel = "MEDIUM"
-			rule.SecurityIssues = append(rule.SecurityIssues, "Allows ingress from 0.0.0.0/0")
-		}
-	}
-
-	if rule.RiskLevel == "" {
-		rule.RiskLevel = "LOW"
-	}
-
-	// Check if no target restrictions (applies to all instances)
-	if len(rule.TargetTags) == 0 && len(rule.TargetSAs) == 0 && rule.IsPublicIngress {
-		rule.SecurityIssues = append(rule.SecurityIssues, "No target restrictions - applies to ALL instances in network")
-	}
-}
-
-// isSensitivePort checks if a port is considered sensitive
-func isSensitivePort(port string) bool {
-	sensitivePorts := map[string]bool{
-		"22": true, "3389": true, "5985": true, "5986": true, // Remote access
-		"3306": true, "5432": true, "1433": true, "1521": true, "27017": true, // Databases
-		"6379": true, "11211": true, // Caches
-		"9200": true, "9300": true, // Elasticsearch
-		"2379": true, "2380": true, // etcd
-		"8080": true, "8443": true, // Common web
-		"23": true, // Telnet
-		"21": true, "20": true, // FTP
-		"25": true, "587": true, "465": true, // SMTP
-		"110": true, "143": true, // POP3/IMAP
-		"445": true, "139": true, // SMB
-		"135": true, // RPC
-	}
-	return sensitivePorts[port]
 }
 
 // Helper functions

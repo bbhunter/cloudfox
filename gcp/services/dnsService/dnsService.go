@@ -39,6 +39,15 @@ type ZoneInfo struct {
 
 	// Record count
 	RecordCount       int64
+
+	// IAM bindings
+	IAMBindings       []IAMBinding
+}
+
+// IAMBinding represents a single IAM role binding
+type IAMBinding struct {
+	Role   string
+	Member string
 }
 
 // RecordInfo holds DNS record details
@@ -66,6 +75,8 @@ func (ds *DNSService) Zones(projectID string) ([]ZoneInfo, error) {
 	err = call.Pages(ctx, func(page *dns.ManagedZonesListResponse) error {
 		for _, zone := range page.ManagedZones {
 			info := parseZoneInfo(zone, projectID)
+			// Get IAM bindings for the zone
+			info.IAMBindings = ds.getZoneIAMBindings(service, ctx, projectID, zone.Name)
 			zones = append(zones, info)
 		}
 		return nil
@@ -171,4 +182,27 @@ func extractNetworkName(networkURL string) string {
 		return parts[len(parts)-1]
 	}
 	return networkURL
+}
+
+// getZoneIAMBindings retrieves IAM bindings for a DNS managed zone
+func (ds *DNSService) getZoneIAMBindings(service *dns.Service, ctx context.Context, projectID, zoneName string) []IAMBinding {
+	var bindings []IAMBinding
+
+	resource := "projects/" + projectID + "/managedZones/" + zoneName
+	policy, err := service.ManagedZones.GetIamPolicy(resource, &dns.GoogleIamV1GetIamPolicyRequest{}).Context(ctx).Do()
+	if err != nil {
+		// Return empty bindings if we can't get IAM policy
+		return bindings
+	}
+
+	for _, binding := range policy.Bindings {
+		for _, member := range binding.Members {
+			bindings = append(bindings, IAMBinding{
+				Role:   binding.Role,
+				Member: member,
+			})
+		}
+	}
+
+	return bindings
 }

@@ -26,9 +26,7 @@ Features:
 - Identifies default service accounts (Compute, App Engine, etc.)
 - Detects disabled service accounts
 - Flags service accounts without key rotation
-- Shows service account roles and permissions
-- Identifies cross-project service account bindings
-- Generates exploitation commands for penetration testing`,
+- Identifies impersonation opportunities`,
 	Run: runGCPServiceAccountsCommand,
 }
 
@@ -39,11 +37,7 @@ type ServiceAccountAnalysis struct {
 	DefaultSAType     string // "compute", "appengine", "cloudbuild", etc.
 	OldestKeyAge      int    // Days
 	HasExpiredKeys    bool
-	HasOldKeys        bool   // Keys older than 90 days
-	KeyAgeWarning     string
-	RiskLevel         string // HIGH, MEDIUM, LOW
-	RiskReasons       []string
-	ImpersonationCmds []string
+	HasOldKeys        bool // Keys older than 90 days
 	// Pentest: Impersonation analysis
 	ImpersonationInfo *IAMService.SAImpersonationInfo
 }
@@ -110,22 +104,22 @@ func (m *ServiceAccountsModule) Execute(ctx context.Context, logger internal.Log
 
 	// Count findings
 	withKeys := 0
-	highRisk := 0
 	defaultSAs := 0
+	impersonatable := 0
 	for _, sa := range m.ServiceAccounts {
 		if sa.HasKeys {
 			withKeys++
 		}
-		if sa.RiskLevel == "HIGH" {
-			highRisk++
-		}
 		if sa.IsDefaultSA {
 			defaultSAs++
 		}
+		if sa.ImpersonationInfo != nil && (len(sa.ImpersonationInfo.TokenCreators) > 0 || len(sa.ImpersonationInfo.KeyCreators) > 0) {
+			impersonatable++
+		}
 	}
 
-	logger.SuccessM(fmt.Sprintf("Found %d service account(s) (%d with keys, %d high-risk, %d default)",
-		len(m.ServiceAccounts), withKeys, highRisk, defaultSAs), globals.GCP_SERVICEACCOUNTS_MODULE_NAME)
+	logger.SuccessM(fmt.Sprintf("Found %d service account(s) (%d with keys, %d default, %d impersonatable)",
+		len(m.ServiceAccounts), withKeys, defaultSAs, impersonatable), globals.GCP_SERVICEACCOUNTS_MODULE_NAME)
 
 	// Write output
 	m.writeOutput(ctx, logger)
@@ -192,8 +186,6 @@ func (m *ServiceAccountsModule) processProject(ctx context.Context, projectID st
 func (m *ServiceAccountsModule) analyzeServiceAccount(sa IAMService.ServiceAccountInfo, projectID string) ServiceAccountAnalysis {
 	analyzed := ServiceAccountAnalysis{
 		ServiceAccountInfo: sa,
-		RiskReasons:        []string{},
-		ImpersonationCmds:  []string{},
 	}
 
 	// Check if it's a default service account
@@ -225,21 +217,7 @@ func (m *ServiceAccountsModule) analyzeServiceAccount(sa IAMService.ServiceAccou
 		}
 
 		analyzed.OldestKeyAge = oldestAge
-		if oldestAge > 365 {
-			analyzed.KeyAgeWarning = fmt.Sprintf("%d days (>1 year)", oldestAge)
-		} else if oldestAge > 90 {
-			analyzed.KeyAgeWarning = fmt.Sprintf("%d days (>90 days)", oldestAge)
-		}
 	}
-
-	// Generate impersonation commands
-	analyzed.ImpersonationCmds = []string{
-		fmt.Sprintf("gcloud auth print-access-token --impersonate-service-account=%s", sa.Email),
-		fmt.Sprintf("gcloud iam service-accounts keys create key.json --iam-account=%s", sa.Email),
-	}
-
-	// Determine risk level
-	analyzed.RiskLevel, analyzed.RiskReasons = determineServiceAccountRisk(analyzed)
 
 	return analyzed
 }
@@ -272,7 +250,6 @@ func isDefaultServiceAccount(email, projectID string) (bool, string) {
 		return true, "Compute/Dataflow"
 	}
 
-	// Cloud Run service account (uses compute default)
 	// GKE service account
 	if strings.Contains(email, "@container-engine-robot.iam.gserviceaccount.com") {
 		return true, "GKE"
@@ -301,502 +278,269 @@ func isDefaultServiceAccount(email, projectID string) (bool, string) {
 	return false, ""
 }
 
-// determineServiceAccountRisk determines the risk level of a service account
-func determineServiceAccountRisk(sa ServiceAccountAnalysis) (string, []string) {
-	var reasons []string
-	score := 0
-
-	// High-risk indicators
-	if sa.HasKeys && sa.OldestKeyAge > 365 {
-		reasons = append(reasons, "Key older than 1 year without rotation")
-		score += 3
-	} else if sa.HasKeys && sa.OldestKeyAge > 90 {
-		reasons = append(reasons, "Key older than 90 days")
-		score += 2
-	}
-
-	if sa.HasExpiredKeys {
-		reasons = append(reasons, "Has expired keys (cleanup needed)")
-		score += 1
-	}
-
-	if sa.HasKeys && sa.KeyCount > 2 {
-		reasons = append(reasons, fmt.Sprintf("Multiple user-managed keys (%d)", sa.KeyCount))
-		score += 1
-	}
-
-	if sa.IsDefaultSA && sa.HasKeys {
-		reasons = append(reasons, fmt.Sprintf("Default SA (%s) with user-managed keys", sa.DefaultSAType))
-		score += 2
-	}
-
-	if sa.Disabled && sa.HasKeys {
-		reasons = append(reasons, "Disabled SA with active keys")
-		score += 2
-	}
-
-	// Determine risk level
-	if score >= 4 {
-		return "HIGH", reasons
-	} else if score >= 2 {
-		return "MEDIUM", reasons
-	} else if score >= 1 {
-		return "LOW", reasons
-	}
-
-	return "INFO", reasons
-}
-
 // ------------------------------
 // Loot File Management
 // ------------------------------
 func (m *ServiceAccountsModule) initializeLootFiles() {
-	m.LootMap["sa-impersonation-commands"] = &internal.LootFile{
-		Name:     "sa-impersonation-commands",
-		Contents: "# Service Account Impersonation Commands\n# Generated by CloudFox\n# WARNING: Only use with proper authorization\n\n",
-	}
-	m.LootMap["sa-key-creation-commands"] = &internal.LootFile{
-		Name:     "sa-key-creation-commands",
-		Contents: "# Service Account Key Creation Commands\n# Generated by CloudFox\n# WARNING: Only use with proper authorization\n\n",
-	}
-	m.LootMap["sa-high-risk"] = &internal.LootFile{
-		Name:     "sa-high-risk",
-		Contents: "# High-Risk Service Accounts\n# Generated by CloudFox\n\n",
-	}
-	m.LootMap["sa-old-keys"] = &internal.LootFile{
-		Name:     "sa-old-keys",
-		Contents: "# Service Accounts with Old Keys (>90 days)\n# Generated by CloudFox\n# Consider rotating these keys\n\n",
-	}
-	m.LootMap["sa-default-accounts"] = &internal.LootFile{
-		Name:     "sa-default-accounts",
-		Contents: "# Default Service Accounts\n# Generated by CloudFox\n# These often have broad permissions\n\n",
-	}
-	m.LootMap["sa-all-emails"] = &internal.LootFile{
-		Name:     "sa-all-emails",
-		Contents: "",
-	}
-	// Pentest: Impersonation-specific loot
-	m.LootMap["sa-impersonatable"] = &internal.LootFile{
-		Name:     "sa-impersonatable",
-		Contents: "# Service Accounts That Can Be Impersonated\n# Generated by CloudFox\n# These SAs have principals who can impersonate them\n\n",
-	}
-	m.LootMap["sa-token-creators"] = &internal.LootFile{
-		Name:     "sa-token-creators",
-		Contents: "# Principals Who Can Create Access Tokens (Impersonate)\n# Generated by CloudFox\n# Permission: iam.serviceAccounts.getAccessToken\n\n",
-	}
-	m.LootMap["sa-key-creators"] = &internal.LootFile{
-		Name:     "sa-key-creators",
-		Contents: "# Principals Who Can Create SA Keys (Persistent Access)\n# Generated by CloudFox\n# Permission: iam.serviceAccountKeys.create\n\n",
-	}
-	m.LootMap["sa-privesc-commands"] = &internal.LootFile{
-		Name:     "sa-privesc-commands",
-		Contents: "# Service Account Privilege Escalation Commands\n# Generated by CloudFox\n# WARNING: Only use with proper authorization\n\n",
+	m.LootMap["serviceaccounts-commands"] = &internal.LootFile{
+		Name:     "serviceaccounts-commands",
+		Contents: "# Service Account Commands\n# Generated by CloudFox\n# WARNING: Only use with proper authorization\n\n",
 	}
 }
 
 func (m *ServiceAccountsModule) addServiceAccountToLoot(sa ServiceAccountAnalysis, projectID string) {
-	// All service account emails
-	m.LootMap["sa-all-emails"].Contents += sa.Email + "\n"
+	keyFileName := strings.Split(sa.Email, "@")[0]
 
-	// Impersonation commands
-	m.LootMap["sa-impersonation-commands"].Contents += fmt.Sprintf(
-		"# Service Account: %s\n"+
+	m.LootMap["serviceaccounts-commands"].Contents += fmt.Sprintf(
+		"# ==========================================\n"+
+			"# SERVICE ACCOUNT: %s\n"+
+			"# ==========================================\n"+
 			"# Project: %s\n"+
-			"gcloud auth print-access-token --impersonate-service-account=%s\n"+
-			"gcloud auth print-identity-token --impersonate-service-account=%s\n\n",
+			"# Display Name: %s\n"+
+			"# Disabled: %v\n",
 		sa.Email,
 		projectID,
-		sa.Email,
-		sa.Email,
+		sa.DisplayName,
+		sa.Disabled,
 	)
 
-	// Key creation commands
-	m.LootMap["sa-key-creation-commands"].Contents += fmt.Sprintf(
-		"# Service Account: %s\n"+
-			"gcloud iam service-accounts keys create %s-key.json --iam-account=%s --project=%s\n\n",
-		sa.Email,
-		strings.Split(sa.Email, "@")[0],
-		sa.Email,
-		projectID,
-	)
-
-	// High-risk service accounts
-	if sa.RiskLevel == "HIGH" {
-		m.LootMap["sa-high-risk"].Contents += fmt.Sprintf(
-			"# Service Account: %s\n"+
-				"# Project: %s\n"+
-				"# Risk Level: %s\n"+
-				"# Reasons:\n",
-			sa.Email,
-			projectID,
-			sa.RiskLevel,
-		)
-		for _, reason := range sa.RiskReasons {
-			m.LootMap["sa-high-risk"].Contents += fmt.Sprintf("  - %s\n", reason)
-		}
-		m.LootMap["sa-high-risk"].Contents += "\n"
-	}
-
-	// Old keys
-	if sa.HasOldKeys {
-		m.LootMap["sa-old-keys"].Contents += fmt.Sprintf(
-			"# Service Account: %s\n"+
-				"# Project: %s\n"+
-				"# Oldest Key Age: %d days\n"+
-				"# List keys:\n"+
-				"gcloud iam service-accounts keys list --iam-account=%s --project=%s\n\n",
-			sa.Email,
-			projectID,
-			sa.OldestKeyAge,
-			sa.Email,
-			projectID,
-		)
-	}
-
-	// Default service accounts
-	if sa.IsDefaultSA {
-		keysInfo := "No user-managed keys"
-		if sa.HasKeys {
-			keysInfo = fmt.Sprintf("%d user-managed key(s)", sa.KeyCount)
-		}
-		m.LootMap["sa-default-accounts"].Contents += fmt.Sprintf(
-			"# Service Account: %s\n"+
-				"# Type: %s default\n"+
-				"# Project: %s\n"+
-				"# Keys: %s\n"+
-				"# Get IAM policy:\n"+
-				"gcloud iam service-accounts get-iam-policy %s --project=%s\n\n",
-			sa.Email,
-			sa.DefaultSAType,
-			projectID,
-			keysInfo,
-			sa.Email,
-			projectID,
-		)
-	}
-
-	// Pentest: Impersonation loot
+	// Add impersonation info if available
 	if sa.ImpersonationInfo != nil {
-		info := sa.ImpersonationInfo
-
-		// SAs that can be impersonated
-		if len(info.TokenCreators) > 0 || len(info.KeyCreators) > 0 || len(info.SAAdmins) > 0 {
-			m.LootMap["sa-impersonatable"].Contents += fmt.Sprintf(
-				"## Service Account: %s\n"+
-					"## Project: %s\n"+
-					"## Risk Level: %s\n",
-				sa.Email,
-				projectID,
-				info.RiskLevel,
-			)
-			if len(info.TokenCreators) > 0 {
-				m.LootMap["sa-impersonatable"].Contents += "# Token Creators (can impersonate):\n"
-				for _, tc := range info.TokenCreators {
-					m.LootMap["sa-impersonatable"].Contents += fmt.Sprintf("  - %s\n", tc)
-				}
-			}
-			if len(info.KeyCreators) > 0 {
-				m.LootMap["sa-impersonatable"].Contents += "# Key Creators (persistent access):\n"
-				for _, kc := range info.KeyCreators {
-					m.LootMap["sa-impersonatable"].Contents += fmt.Sprintf("  - %s\n", kc)
-				}
-			}
-			m.LootMap["sa-impersonatable"].Contents += "\n"
+		if len(sa.ImpersonationInfo.TokenCreators) > 0 {
+			m.LootMap["serviceaccounts-commands"].Contents += fmt.Sprintf("# Token Creators: %s\n", strings.Join(sa.ImpersonationInfo.TokenCreators, ", "))
 		}
-
-		// Token creators loot
-		if len(info.TokenCreators) > 0 {
-			for _, tc := range info.TokenCreators {
-				m.LootMap["sa-token-creators"].Contents += fmt.Sprintf(
-					"# %s can impersonate %s\n"+
-						"# As %s, run:\n"+
-						"gcloud auth print-access-token --impersonate-service-account=%s\n\n",
-					tc, sa.Email, tc, sa.Email,
-				)
-			}
+		if len(sa.ImpersonationInfo.KeyCreators) > 0 {
+			m.LootMap["serviceaccounts-commands"].Contents += fmt.Sprintf("# Key Creators: %s\n", strings.Join(sa.ImpersonationInfo.KeyCreators, ", "))
 		}
-
-		// Key creators loot
-		if len(info.KeyCreators) > 0 {
-			for _, kc := range info.KeyCreators {
-				m.LootMap["sa-key-creators"].Contents += fmt.Sprintf(
-					"# %s can create keys for %s\n"+
-						"# As %s, run:\n"+
-						"gcloud iam service-accounts keys create key.json --iam-account=%s\n\n",
-					kc, sa.Email, kc, sa.Email,
-				)
-			}
-		}
-
-		// Privesc commands
-		if info.RiskLevel == "CRITICAL" || info.RiskLevel == "HIGH" {
-			m.LootMap["sa-privesc-commands"].Contents += fmt.Sprintf(
-				"## Target SA: %s (Risk: %s)\n"+
-					"## Project: %s\n",
-				sa.Email,
-				info.RiskLevel,
-				projectID,
-			)
-			for _, reason := range info.RiskReasons {
-				m.LootMap["sa-privesc-commands"].Contents += fmt.Sprintf("# %s\n", reason)
-			}
-			m.LootMap["sa-privesc-commands"].Contents += fmt.Sprintf(
-				"\n# Step 1: Impersonate the SA\n"+
-					"gcloud auth print-access-token --impersonate-service-account=%s\n\n"+
-					"# Step 2: Or create a persistent key\n"+
-					"gcloud iam service-accounts keys create %s-key.json --iam-account=%s\n\n"+
-					"# Step 3: Activate the key\n"+
-					"gcloud auth activate-service-account --key-file=%s-key.json\n\n",
-				sa.Email,
-				strings.Split(sa.Email, "@")[0],
-				sa.Email,
-				strings.Split(sa.Email, "@")[0],
-			)
+		if len(sa.ImpersonationInfo.ActAsUsers) > 0 {
+			m.LootMap["serviceaccounts-commands"].Contents += fmt.Sprintf("# ActAs Users: %s\n", strings.Join(sa.ImpersonationInfo.ActAsUsers, ", "))
 		}
 	}
+
+	m.LootMap["serviceaccounts-commands"].Contents += fmt.Sprintf(
+		"\n# Impersonation commands:\n"+
+			"gcloud auth print-access-token --impersonate-service-account=%s\n"+
+			"gcloud auth print-identity-token --impersonate-service-account=%s\n\n"+
+			"# Key creation commands:\n"+
+			"gcloud iam service-accounts keys create %s-key.json --iam-account=%s --project=%s\n"+
+			"gcloud auth activate-service-account --key-file=%s-key.json\n\n"+
+			"# Describe service account:\n"+
+			"gcloud iam service-accounts describe %s --project=%s\n\n"+
+			"# Get IAM policy for this service account:\n"+
+			"gcloud iam service-accounts get-iam-policy %s --project=%s\n\n",
+		sa.Email,
+		sa.Email,
+		keyFileName,
+		sa.Email,
+		projectID,
+		keyFileName,
+		sa.Email,
+		projectID,
+		sa.Email,
+		projectID,
+	)
 }
 
 // ------------------------------
 // Output Generation
 // ------------------------------
 func (m *ServiceAccountsModule) writeOutput(ctx context.Context, logger internal.Logger) {
-	// Main service accounts table
+	// Service accounts table - one row per IAM binding (impersonation permission)
 	saHeader := []string{
+		"Project Name",
+		"Project ID",
 		"Email",
 		"Display Name",
-		"Project Name",
-		"Project",
 		"Disabled",
 		"Default SA",
-		"Keys",
-		"Key Age",
-		"Risk",
+		"DWD",
+		"Key Count",
+		"IAM Role",
+		"IAM Member",
 	}
 
 	var saBody [][]string
 	for _, sa := range m.ServiceAccounts {
-		disabled := ""
+		disabled := "No"
 		if sa.Disabled {
-			disabled = "YES"
+			disabled = "Yes"
 		}
 
-		defaultSA := ""
+		defaultSA := "-"
 		if sa.IsDefaultSA {
 			defaultSA = sa.DefaultSAType
 		}
 
-		keys := "-"
-		if sa.HasKeys {
-			keys = fmt.Sprintf("%d", sa.KeyCount)
+		// Check if DWD is enabled
+		dwd := "No"
+		if sa.OAuth2ClientID != "" {
+			dwd = "Yes"
 		}
 
-		keyAge := "-"
-		if sa.OldestKeyAge > 0 {
-			keyAge = fmt.Sprintf("%dd", sa.OldestKeyAge)
+		// Count user-managed keys
+		keyCount := "-"
+		userKeyCount := 0
+		for _, key := range sa.Keys {
+			if key.KeyType == "USER_MANAGED" {
+				userKeyCount++
+			}
+		}
+		if userKeyCount > 0 {
+			keyCount = fmt.Sprintf("%d", userKeyCount)
 		}
 
-		saBody = append(saBody, []string{
-			sa.Email,
-			sa.DisplayName,
-			m.GetProjectName(sa.ProjectID),
-			sa.ProjectID,
-			disabled,
-			defaultSA,
-			keys,
-			keyAge,
-			sa.RiskLevel,
-		})
-	}
-
-	// Service accounts with keys table
-	keysHeader := []string{
-		"Service Account",
-		"Project Name",
-		"Project",
-		"Key Count",
-		"Oldest Key Age",
-		"Has Old Keys",
-		"Has Expired",
-		"Risk",
-	}
-
-	var keysBody [][]string
-	for _, sa := range m.ServiceAccounts {
-		if sa.HasKeys {
-			hasOld := ""
-			if sa.HasOldKeys {
-				hasOld = "YES"
+		// Build IAM bindings from impersonation info
+		// One row per IAM binding (member + role type)
+		hasBindings := false
+		if sa.ImpersonationInfo != nil {
+			// Token creators can get access tokens
+			for _, member := range sa.ImpersonationInfo.TokenCreators {
+				email := extractEmailFromMember(member)
+				if email != sa.Email { // Skip self-reference
+					hasBindings = true
+					saBody = append(saBody, []string{
+						m.GetProjectName(sa.ProjectID),
+						sa.ProjectID,
+						sa.Email,
+						sa.DisplayName,
+						disabled,
+						defaultSA,
+						dwd,
+						keyCount,
+						"TokenCreator",
+						member,
+					})
+				}
 			}
-			hasExpired := ""
-			if sa.HasExpiredKeys {
-				hasExpired = "YES"
+			// Key creators can create keys
+			for _, member := range sa.ImpersonationInfo.KeyCreators {
+				email := extractEmailFromMember(member)
+				if email != sa.Email { // Skip self-reference
+					hasBindings = true
+					saBody = append(saBody, []string{
+						m.GetProjectName(sa.ProjectID),
+						sa.ProjectID,
+						sa.Email,
+						sa.DisplayName,
+						disabled,
+						defaultSA,
+						dwd,
+						keyCount,
+						"KeyAdmin",
+						member,
+					})
+				}
 			}
+			// ActAs users can impersonate
+			for _, member := range sa.ImpersonationInfo.ActAsUsers {
+				email := extractEmailFromMember(member)
+				if email != sa.Email { // Skip self-reference
+					hasBindings = true
+					saBody = append(saBody, []string{
+						m.GetProjectName(sa.ProjectID),
+						sa.ProjectID,
+						sa.Email,
+						sa.DisplayName,
+						disabled,
+						defaultSA,
+						dwd,
+						keyCount,
+						"ActAs",
+						member,
+					})
+				}
+			}
+			// SA Admins have full control
+			for _, member := range sa.ImpersonationInfo.SAAdmins {
+				email := extractEmailFromMember(member)
+				if email != sa.Email { // Skip self-reference
+					hasBindings = true
+					saBody = append(saBody, []string{
+						m.GetProjectName(sa.ProjectID),
+						sa.ProjectID,
+						sa.Email,
+						sa.DisplayName,
+						disabled,
+						defaultSA,
+						dwd,
+						keyCount,
+						"SAAdmin",
+						member,
+					})
+				}
+			}
+			// SignBlob users
+			for _, member := range sa.ImpersonationInfo.SignBlobUsers {
+				email := extractEmailFromMember(member)
+				if email != sa.Email { // Skip self-reference
+					hasBindings = true
+					saBody = append(saBody, []string{
+						m.GetProjectName(sa.ProjectID),
+						sa.ProjectID,
+						sa.Email,
+						sa.DisplayName,
+						disabled,
+						defaultSA,
+						dwd,
+						keyCount,
+						"SignBlob",
+						member,
+					})
+				}
+			}
+			// SignJwt users
+			for _, member := range sa.ImpersonationInfo.SignJwtUsers {
+				email := extractEmailFromMember(member)
+				if email != sa.Email { // Skip self-reference
+					hasBindings = true
+					saBody = append(saBody, []string{
+						m.GetProjectName(sa.ProjectID),
+						sa.ProjectID,
+						sa.Email,
+						sa.DisplayName,
+						disabled,
+						defaultSA,
+						dwd,
+						keyCount,
+						"SignJwt",
+						member,
+					})
+				}
+			}
+		}
 
-			keysBody = append(keysBody, []string{
-				sa.Email,
+		// If no IAM bindings, still show the SA with empty IAM columns
+		if !hasBindings {
+			saBody = append(saBody, []string{
 				m.GetProjectName(sa.ProjectID),
 				sa.ProjectID,
-				fmt.Sprintf("%d", sa.KeyCount),
-				fmt.Sprintf("%d days", sa.OldestKeyAge),
-				hasOld,
-				hasExpired,
-				sa.RiskLevel,
-			})
-		}
-	}
-
-	// High-risk service accounts table
-	highRiskHeader := []string{
-		"Service Account",
-		"Project Name",
-		"Project",
-		"Risk Level",
-		"Risk Reasons",
-	}
-
-	var highRiskBody [][]string
-	for _, sa := range m.ServiceAccounts {
-		if sa.RiskLevel == "HIGH" || sa.RiskLevel == "MEDIUM" {
-			highRiskBody = append(highRiskBody, []string{
 				sa.Email,
-				m.GetProjectName(sa.ProjectID),
-				sa.ProjectID,
-				sa.RiskLevel,
-				strings.Join(sa.RiskReasons, "; "),
-			})
-		}
-	}
-
-	// Default service accounts table
-	defaultHeader := []string{
-		"Service Account",
-		"Project Name",
-		"Project",
-		"Type",
-		"Has Keys",
-		"Disabled",
-	}
-
-	var defaultBody [][]string
-	for _, sa := range m.ServiceAccounts {
-		if sa.IsDefaultSA {
-			hasKeys := "No"
-			if sa.HasKeys {
-				hasKeys = fmt.Sprintf("Yes (%d)", sa.KeyCount)
-			}
-			disabled := "No"
-			if sa.Disabled {
-				disabled = "Yes"
-			}
-
-			defaultBody = append(defaultBody, []string{
-				sa.Email,
-				m.GetProjectName(sa.ProjectID),
-				sa.ProjectID,
-				sa.DefaultSAType,
-				hasKeys,
+				sa.DisplayName,
 				disabled,
+				defaultSA,
+				dwd,
+				keyCount,
+				"-",
+				"-",
 			})
 		}
 	}
 
-	// Collect loot files
+	// Collect loot files (only non-empty ones)
 	var lootFiles []internal.LootFile
 	for _, loot := range m.LootMap {
-		if loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# Generated by CloudFox\n\n") {
+		if loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# WARNING: Only use with proper authorization\n\n") {
 			lootFiles = append(lootFiles, *loot)
 		}
 	}
 
-	// Build tables
+	// Build tables - just one table now
 	tables := []internal.TableFile{
 		{
 			Name:   "serviceaccounts",
 			Header: saHeader,
 			Body:   saBody,
 		},
-	}
-
-	// Add keys table if there are any
-	if len(keysBody) > 0 {
-		tables = append(tables, internal.TableFile{
-			Name:   "serviceaccounts-keys",
-			Header: keysHeader,
-			Body:   keysBody,
-		})
-		logger.InfoM(fmt.Sprintf("[FINDING] Found %d service account(s) with user-managed keys", len(keysBody)), globals.GCP_SERVICEACCOUNTS_MODULE_NAME)
-	}
-
-	// Add high-risk table if there are any
-	if len(highRiskBody) > 0 {
-		tables = append(tables, internal.TableFile{
-			Name:   "serviceaccounts-high-risk",
-			Header: highRiskHeader,
-			Body:   highRiskBody,
-		})
-		logger.InfoM(fmt.Sprintf("[FINDING] Found %d high/medium risk service account(s)", len(highRiskBody)), globals.GCP_SERVICEACCOUNTS_MODULE_NAME)
-	}
-
-	// Add default service accounts table if there are any
-	if len(defaultBody) > 0 {
-		tables = append(tables, internal.TableFile{
-			Name:   "serviceaccounts-default",
-			Header: defaultHeader,
-			Body:   defaultBody,
-		})
-	}
-
-	// Pentest: Impersonation table
-	impersonationHeader := []string{
-		"Service Account",
-		"Project Name",
-		"Project",
-		"Token Creators",
-		"Key Creators",
-		"ActAs Users",
-		"Risk",
-	}
-
-	var impersonationBody [][]string
-	impersonatableCount := 0
-	for _, sa := range m.ServiceAccounts {
-		if sa.ImpersonationInfo != nil {
-			info := sa.ImpersonationInfo
-			if len(info.TokenCreators) > 0 || len(info.KeyCreators) > 0 || len(info.ActAsUsers) > 0 {
-				impersonatableCount++
-				tokenCreators := "-"
-				if len(info.TokenCreators) > 0 {
-					tokenCreators = fmt.Sprintf("%d", len(info.TokenCreators))
-				}
-				keyCreators := "-"
-				if len(info.KeyCreators) > 0 {
-					keyCreators = fmt.Sprintf("%d", len(info.KeyCreators))
-				}
-				actAsUsers := "-"
-				if len(info.ActAsUsers) > 0 {
-					actAsUsers = fmt.Sprintf("%d", len(info.ActAsUsers))
-				}
-
-				impersonationBody = append(impersonationBody, []string{
-					sa.Email,
-					m.GetProjectName(sa.ProjectID),
-					sa.ProjectID,
-					tokenCreators,
-					keyCreators,
-					actAsUsers,
-					info.RiskLevel,
-				})
-			}
-		}
-	}
-
-	if len(impersonationBody) > 0 {
-		tables = append(tables, internal.TableFile{
-			Name:   "serviceaccounts-impersonation",
-			Header: impersonationHeader,
-			Body:   impersonationBody,
-		})
-		logger.InfoM(fmt.Sprintf("[PENTEST] Found %d service account(s) with impersonation risks", impersonatableCount), globals.GCP_SERVICEACCOUNTS_MODULE_NAME)
 	}
 
 	output := ServiceAccountsOutput{
@@ -815,9 +559,9 @@ func (m *ServiceAccountsModule) writeOutput(ctx context.Context, logger internal
 		m.OutputDirectory,
 		m.Verbosity,
 		m.WrapTable,
-		"project",           // scopeType
-		m.ProjectIDs,        // scopeIdentifiers
-		scopeNames,          // scopeNames
+		"project",    // scopeType
+		m.ProjectIDs, // scopeIdentifiers
+		scopeNames,   // scopeNames
 		m.Account,
 		output,
 	)
@@ -825,4 +569,14 @@ func (m *ServiceAccountsModule) writeOutput(ctx context.Context, logger internal
 		logger.ErrorM(fmt.Sprintf("Error writing output: %v", err), globals.GCP_SERVICEACCOUNTS_MODULE_NAME)
 		m.CommandCounter.Error++
 	}
+}
+
+// extractEmailFromMember extracts the email/identity from an IAM member string
+// e.g., "user:alice@example.com" -> "alice@example.com"
+// e.g., "serviceAccount:sa@project.iam.gserviceaccount.com" -> "sa@project.iam..."
+func extractEmailFromMember(member string) string {
+	if idx := strings.Index(member, ":"); idx != -1 {
+		return member[idx+1:]
+	}
+	return member
 }

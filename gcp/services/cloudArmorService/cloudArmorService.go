@@ -17,18 +17,16 @@ func New() *CloudArmorService {
 
 // SecurityPolicy represents a Cloud Armor security policy
 type SecurityPolicy struct {
-	Name              string              `json:"name"`
-	ProjectID         string              `json:"projectId"`
-	Description       string              `json:"description"`
-	Type              string              `json:"type"` // CLOUD_ARMOR, CLOUD_ARMOR_EDGE, CLOUD_ARMOR_NETWORK
-	RuleCount         int                 `json:"ruleCount"`
-	Rules             []SecurityRule      `json:"rules"`
-	AdaptiveProtection bool               `json:"adaptiveProtection"`
-	DDOSProtection    string              `json:"ddosProtection"`
-	AttachedResources []string            `json:"attachedResources"`
-	RiskLevel         string              `json:"riskLevel"`
-	RiskReasons       []string            `json:"riskReasons"`
-	Weaknesses        []string            `json:"weaknesses"`
+	Name               string         `json:"name"`
+	ProjectID          string         `json:"projectId"`
+	Description        string         `json:"description"`
+	Type               string         `json:"type"` // CLOUD_ARMOR, CLOUD_ARMOR_EDGE, CLOUD_ARMOR_NETWORK
+	RuleCount          int            `json:"ruleCount"`
+	Rules              []SecurityRule `json:"rules"`
+	AdaptiveProtection bool           `json:"adaptiveProtection"`
+	DDOSProtection     string         `json:"ddosProtection"`
+	AttachedResources  []string       `json:"attachedResources"`
+	Weaknesses         []string       `json:"weaknesses"`
 }
 
 // SecurityRule represents a rule within a security policy
@@ -73,7 +71,6 @@ func (s *CloudArmorService) GetSecurityPolicies(projectID string) ([]SecurityPol
 			RuleCount:         len(policy.Rules),
 			Rules:             []SecurityRule{},
 			AttachedResources: []string{},
-			RiskReasons:       []string{},
 			Weaknesses:        []string{},
 		}
 
@@ -129,7 +126,7 @@ func (s *CloudArmorService) GetSecurityPolicies(projectID string) ([]SecurityPol
 		sp.AttachedResources = s.findAttachedResources(ctx, service, projectID, policy.Name)
 
 		// Analyze for weaknesses
-		sp.RiskLevel, sp.RiskReasons, sp.Weaknesses = s.analyzePolicy(sp)
+		sp.Weaknesses = s.analyzePolicy(sp)
 
 		policies = append(policies, sp)
 	}
@@ -155,17 +152,12 @@ func (s *CloudArmorService) findAttachedResources(ctx context.Context, service *
 }
 
 // analyzePolicy checks for security weaknesses in the policy
-func (s *CloudArmorService) analyzePolicy(policy SecurityPolicy) (string, []string, []string) {
-	var reasons []string
+func (s *CloudArmorService) analyzePolicy(policy SecurityPolicy) []string {
 	var weaknesses []string
-	score := 0
 
 	// Check if policy is attached to anything
 	if len(policy.AttachedResources) == 0 {
-		weaknesses = append(weaknesses, "Policy not attached to any backend service - not protecting anything")
-		score += 1
-	} else {
-		reasons = append(reasons, fmt.Sprintf("Protecting %d resource(s)", len(policy.AttachedResources)))
+		weaknesses = append(weaknesses, "Policy not attached to any backend service")
 	}
 
 	// Check for overly permissive rules
@@ -186,79 +178,44 @@ func (s *CloudArmorService) analyzePolicy(policy SecurityPolicy) (string, []stri
 		}
 		// Check for allow rules that match all IPs
 		if rule.Action == "allow" && (rule.Match == "*" || rule.Match == "srcIpRanges: *" ||
-		   strings.Contains(rule.Match, "0.0.0.0/0") || rule.Match == "true") {
+			strings.Contains(rule.Match, "0.0.0.0/0") || rule.Match == "true") {
 			allowAllIPsCount++
 		}
 	}
 
 	if hasDefaultAllow && !hasDenyRules {
-		weaknesses = append(weaknesses, "Default allow rule with no deny rules - policy does nothing useful")
-		score += 2
+		weaknesses = append(weaknesses, "Default allow rule with no deny rules")
 	}
 
 	if previewOnlyCount > 0 {
-		weaknesses = append(weaknesses, fmt.Sprintf("%d rule(s) in preview mode - not actively blocking", previewOnlyCount))
-		score += 1
+		weaknesses = append(weaknesses, fmt.Sprintf("%d rule(s) in preview mode", previewOnlyCount))
 	}
 
 	if allowAllIPsCount > 0 && !hasDenyRules {
-		weaknesses = append(weaknesses, "Has allow-all rules without deny rules - effectively no protection")
-		score += 2
+		weaknesses = append(weaknesses, "Has allow-all rules without deny rules")
 	}
 
 	// Check adaptive protection
 	if !policy.AdaptiveProtection {
-		weaknesses = append(weaknesses, "Adaptive protection not enabled - reduced DDoS defense")
-		score += 1
-	} else {
-		reasons = append(reasons, "Adaptive protection enabled")
+		weaknesses = append(weaknesses, "Adaptive protection not enabled")
 	}
 
-	// Check for common WAF bypass patterns
+	// Check for common WAF rules
 	hasOWASPRules := false
-	hasGeoRules := false
-	hasBotRules := false
-
 	for _, rule := range policy.Rules {
 		matchLower := strings.ToLower(rule.Match)
 		if strings.Contains(matchLower, "sqli") || strings.Contains(matchLower, "xss") ||
-		   strings.Contains(matchLower, "rce") || strings.Contains(matchLower, "lfi") {
+			strings.Contains(matchLower, "rce") || strings.Contains(matchLower, "lfi") {
 			hasOWASPRules = true
-		}
-		if strings.Contains(matchLower, "origin.region_code") {
-			hasGeoRules = true
-		}
-		if strings.Contains(matchLower, "request.headers") &&
-		   (strings.Contains(matchLower, "user-agent") || strings.Contains(matchLower, "bot")) {
-			hasBotRules = true
+			break
 		}
 	}
 
 	if !hasOWASPRules {
-		weaknesses = append(weaknesses, "No OWASP/WAF rules detected (SQLi, XSS, RCE, LFI)")
+		weaknesses = append(weaknesses, "No OWASP/WAF rules detected")
 	}
 
-	if len(policy.Rules) > 0 {
-		reasons = append(reasons, fmt.Sprintf("Has %d rule(s)", len(policy.Rules)))
-	}
-
-	if hasGeoRules {
-		reasons = append(reasons, "Has geo-blocking rules")
-	}
-
-	if hasBotRules {
-		reasons = append(reasons, "Has bot protection rules")
-	}
-
-	// Determine risk level based on weaknesses
-	if score >= 4 {
-		return "HIGH", reasons, weaknesses
-	} else if score >= 2 {
-		return "MEDIUM", reasons, weaknesses
-	} else if score >= 1 {
-		return "LOW", reasons, weaknesses
-	}
-	return "INFO", reasons, weaknesses
+	return weaknesses
 }
 
 // GetUnprotectedLoadBalancers finds load balancers without Cloud Armor protection

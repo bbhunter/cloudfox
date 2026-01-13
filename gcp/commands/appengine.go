@@ -3,7 +3,6 @@ package commands
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strings"
 	"sync"
 
@@ -31,18 +30,7 @@ Features:
 - Detects environment variable secrets
 - Reviews service account configurations
 - Identifies deprecated runtimes
-- Analyzes traffic splitting configurations
-
-Security Checks:
-- Public endpoints without IAP/authentication
-- Secrets in environment variables
-- Deprecated/vulnerable runtimes
-- Over-permissioned service accounts
-- Missing firewall rules
-
-Requires appropriate IAM permissions:
-- roles/appengine.appViewer
-- roles/appengine.serviceAdmin`,
+- Analyzes traffic splitting configurations`,
 	Run: runGCPAppEngineCommand,
 }
 
@@ -51,8 +39,8 @@ Requires appropriate IAM permissions:
 // ------------------------------
 
 type AppEngineApp struct {
-	ID              string
 	ProjectID       string
+	ID              string
 	LocationID      string
 	AuthDomain      string
 	DefaultHostname string
@@ -64,22 +52,22 @@ type AppEngineApp struct {
 }
 
 type AppEngineService struct {
+	ProjectID     string
 	ID            string
 	AppID         string
-	ProjectID     string
-	Split         map[string]float64 // version -> traffic allocation
+	Split         map[string]float64
 	DefaultURL    string
 	VersionCount  int
 	LatestVersion string
 }
 
 type AppEngineVersion struct {
-	ID                string
-	ServiceID         string
-	AppID             string
 	ProjectID         string
+	ServiceID         string
+	ID                string
+	AppID             string
 	Runtime           string
-	Environment       string // standard, flexible
+	Environment       string
 	ServingStatus     string
 	CreateTime        string
 	InstanceClass     string
@@ -90,30 +78,18 @@ type AppEngineVersion struct {
 	EnvVarCount       int
 	SecretEnvVars     int
 	ServiceAccount    string
-	BasicScaling      string
-	AutomaticScaling  string
-	ManualScaling     string
 	URL               string
-	RiskLevel         string
 	DeprecatedRuntime bool
+	DefaultSA         bool
+	Public            bool
 }
 
 type AppEngineFirewallRule struct {
+	ProjectID   string
 	Priority    int64
-	Action      string // ALLOW, DENY
+	Action      string
 	SourceRange string
 	Description string
-	ProjectID   string
-}
-
-type AppEngineSecurityIssue struct {
-	ServiceID   string
-	VersionID   string
-	ProjectID   string
-	IssueType   string
-	Severity    string
-	Description string
-	Remediation string
 }
 
 // ------------------------------
@@ -122,16 +98,13 @@ type AppEngineSecurityIssue struct {
 type AppEngineModule struct {
 	gcpinternal.BaseGCPModule
 
-	// Module-specific fields
-	Apps           []AppEngineApp
-	Services       []AppEngineService
-	Versions       []AppEngineVersion
-	FirewallRules  []AppEngineFirewallRule
-	SecurityIssues []AppEngineSecurityIssue
-	LootMap        map[string]*internal.LootFile
-	mu             sync.Mutex
+	Apps          []AppEngineApp
+	Services      []AppEngineService
+	Versions      []AppEngineVersion
+	FirewallRules []AppEngineFirewallRule
+	LootMap       map[string]*internal.LootFile
+	mu            sync.Mutex
 
-	// Tracking
 	totalApps     int
 	totalServices int
 	publicCount   int
@@ -153,27 +126,21 @@ func (o AppEngineOutput) LootFiles() []internal.LootFile   { return o.Loot }
 // Command Entry Point
 // ------------------------------
 func runGCPAppEngineCommand(cmd *cobra.Command, args []string) {
-	// Initialize command context
 	cmdCtx, err := gcpinternal.InitializeCommandContext(cmd, GCP_APPENGINE_MODULE_NAME)
 	if err != nil {
 		return
 	}
 
-	// Create module instance
 	module := &AppEngineModule{
-		BaseGCPModule:  gcpinternal.NewBaseGCPModule(cmdCtx),
-		Apps:           []AppEngineApp{},
-		Services:       []AppEngineService{},
-		Versions:       []AppEngineVersion{},
-		FirewallRules:  []AppEngineFirewallRule{},
-		SecurityIssues: []AppEngineSecurityIssue{},
-		LootMap:        make(map[string]*internal.LootFile),
+		BaseGCPModule: gcpinternal.NewBaseGCPModule(cmdCtx),
+		Apps:          []AppEngineApp{},
+		Services:      []AppEngineService{},
+		Versions:      []AppEngineVersion{},
+		FirewallRules: []AppEngineFirewallRule{},
+		LootMap:       make(map[string]*internal.LootFile),
 	}
 
-	// Initialize loot files
 	module.initializeLootFiles()
-
-	// Execute enumeration
 	module.Execute(cmdCtx.Ctx, cmdCtx.Logger)
 }
 
@@ -181,16 +148,14 @@ func runGCPAppEngineCommand(cmd *cobra.Command, args []string) {
 // Module Execution
 // ------------------------------
 func (m *AppEngineModule) Execute(ctx context.Context, logger internal.Logger) {
-	logger.InfoM("Enumerating App Engine applications and security configurations...", GCP_APPENGINE_MODULE_NAME)
+	logger.InfoM("Enumerating App Engine applications...", GCP_APPENGINE_MODULE_NAME)
 
-	// Create App Engine client
 	aeService, err := appengine.NewService(ctx)
 	if err != nil {
 		logger.ErrorM(fmt.Sprintf("Failed to create App Engine service: %v", err), GCP_APPENGINE_MODULE_NAME)
 		return
 	}
 
-	// Process each project
 	var wg sync.WaitGroup
 	for _, projectID := range m.ProjectIDs {
 		wg.Add(1)
@@ -201,7 +166,6 @@ func (m *AppEngineModule) Execute(ctx context.Context, logger internal.Logger) {
 	}
 	wg.Wait()
 
-	// Check results
 	if m.totalApps == 0 {
 		logger.InfoM("No App Engine applications found", GCP_APPENGINE_MODULE_NAME)
 		return
@@ -211,14 +175,13 @@ func (m *AppEngineModule) Execute(ctx context.Context, logger internal.Logger) {
 		m.totalApps, m.totalServices, len(m.Versions)), GCP_APPENGINE_MODULE_NAME)
 
 	if m.publicCount > 0 {
-		logger.InfoM(fmt.Sprintf("[HIGH] Found %d public service(s) without authentication", m.publicCount), GCP_APPENGINE_MODULE_NAME)
+		logger.InfoM(fmt.Sprintf("Found %d public service(s) without authentication", m.publicCount), GCP_APPENGINE_MODULE_NAME)
 	}
 
 	if m.secretsFound > 0 {
-		logger.InfoM(fmt.Sprintf("[CRITICAL] Found %d potential secret(s) in environment variables", m.secretsFound), GCP_APPENGINE_MODULE_NAME)
+		logger.InfoM(fmt.Sprintf("Found %d potential secret(s) in environment variables", m.secretsFound), GCP_APPENGINE_MODULE_NAME)
 	}
 
-	// Write output
 	m.writeOutput(ctx, logger)
 }
 
@@ -230,10 +193,8 @@ func (m *AppEngineModule) processProject(ctx context.Context, projectID string, 
 		logger.InfoM(fmt.Sprintf("Enumerating App Engine for project: %s", projectID), GCP_APPENGINE_MODULE_NAME)
 	}
 
-	// Get App Engine application
 	app, err := aeService.Apps.Get(projectID).Do()
 	if err != nil {
-		// App Engine not enabled is common, don't show as error
 		if !strings.Contains(err.Error(), "404") {
 			m.CommandCounter.Error++
 			gcpinternal.HandleGCPError(err, logger, GCP_APPENGINE_MODULE_NAME,
@@ -246,10 +207,9 @@ func (m *AppEngineModule) processProject(ctx context.Context, projectID string, 
 	m.totalApps++
 	m.mu.Unlock()
 
-	// Create app record
 	appRecord := AppEngineApp{
-		ID:              app.Id,
 		ProjectID:       projectID,
+		ID:              app.Id,
 		LocationID:      app.LocationId,
 		AuthDomain:      app.AuthDomain,
 		DefaultHostname: app.DefaultHostname,
@@ -266,10 +226,7 @@ func (m *AppEngineModule) processProject(ctx context.Context, projectID string, 
 	m.Apps = append(m.Apps, appRecord)
 	m.mu.Unlock()
 
-	// Get services
 	m.enumerateServices(ctx, projectID, aeService, logger)
-
-	// Get firewall rules
 	m.enumerateFirewallRules(ctx, projectID, aeService, logger)
 }
 
@@ -288,12 +245,11 @@ func (m *AppEngineModule) enumerateServices(ctx context.Context, projectID strin
 		m.mu.Unlock()
 
 		serviceRecord := AppEngineService{
+			ProjectID: projectID,
 			ID:        svc.Id,
 			AppID:     projectID,
-			ProjectID: projectID,
 		}
 
-		// Parse traffic split
 		if svc.Split != nil {
 			serviceRecord.Split = svc.Split.Allocations
 		}
@@ -302,13 +258,11 @@ func (m *AppEngineModule) enumerateServices(ctx context.Context, projectID strin
 		m.Services = append(m.Services, serviceRecord)
 		m.mu.Unlock()
 
-		// Get ingress settings from service (applies to all versions)
-		ingressSettings := "all" // Default
+		ingressSettings := "all"
 		if svc.NetworkSettings != nil && svc.NetworkSettings.IngressTrafficAllowed != "" {
 			ingressSettings = svc.NetworkSettings.IngressTrafficAllowed
 		}
 
-		// Get versions for this service
 		m.enumerateVersions(ctx, projectID, svc.Id, ingressSettings, aeService, logger)
 	}
 }
@@ -324,115 +278,61 @@ func (m *AppEngineModule) enumerateVersions(ctx context.Context, projectID, serv
 
 	for _, ver := range versions.Versions {
 		versionRecord := AppEngineVersion{
-			ID:            ver.Id,
-			ServiceID:     serviceID,
-			AppID:         projectID,
-			ProjectID:     projectID,
-			Runtime:       ver.Runtime,
-			Environment:   ver.Env,
-			ServingStatus: ver.ServingStatus,
-			CreateTime:    ver.CreateTime,
-			RiskLevel:     "LOW",
+			ProjectID:       projectID,
+			ServiceID:       serviceID,
+			ID:              ver.Id,
+			AppID:           projectID,
+			Runtime:         ver.Runtime,
+			Environment:     ver.Env,
+			ServingStatus:   ver.ServingStatus,
+			CreateTime:      ver.CreateTime,
+			IngressSettings: ingressSettings,
+			ServiceAccount:  ver.ServiceAccount,
+			URL:             ver.VersionUrl,
 		}
 
-		// Instance class
 		if ver.InstanceClass != "" {
 			versionRecord.InstanceClass = ver.InstanceClass
 		}
 
-		// Network settings
 		if ver.Network != nil {
 			versionRecord.Network = ver.Network.Name
 		}
 
-		// VPC connector
 		if ver.VpcAccessConnector != nil {
 			versionRecord.VPCConnector = ver.VpcAccessConnector.Name
 		}
 
-		// Ingress settings (from service level)
-		versionRecord.IngressSettings = ingressSettings
-
-		// Service account
-		versionRecord.ServiceAccount = ver.ServiceAccount
-
 		// Scaling type
 		if ver.AutomaticScaling != nil {
 			versionRecord.Scaling = "automatic"
-			if ver.AutomaticScaling.MaxConcurrentRequests > 0 {
-				versionRecord.AutomaticScaling = fmt.Sprintf("max_concurrent: %d", ver.AutomaticScaling.MaxConcurrentRequests)
-			}
 		} else if ver.BasicScaling != nil {
 			versionRecord.Scaling = "basic"
-			versionRecord.BasicScaling = fmt.Sprintf("max_instances: %d", ver.BasicScaling.MaxInstances)
 		} else if ver.ManualScaling != nil {
 			versionRecord.Scaling = "manual"
-			versionRecord.ManualScaling = fmt.Sprintf("instances: %d", ver.ManualScaling.Instances)
 		}
-
-		// URL
-		versionRecord.URL = ver.VersionUrl
 
 		// Check for deprecated runtime
 		versionRecord.DeprecatedRuntime = m.isDeprecatedRuntime(ver.Runtime)
-		if versionRecord.DeprecatedRuntime {
-			versionRecord.RiskLevel = "MEDIUM"
-
-			m.mu.Lock()
-			m.SecurityIssues = append(m.SecurityIssues, AppEngineSecurityIssue{
-				ServiceID:   serviceID,
-				VersionID:   ver.Id,
-				ProjectID:   projectID,
-				IssueType:   "deprecated-runtime",
-				Severity:    "MEDIUM",
-				Description: fmt.Sprintf("Runtime %s is deprecated and may have security vulnerabilities", ver.Runtime),
-				Remediation: "Migrate to a supported runtime version",
-			})
-			m.mu.Unlock()
-		}
 
 		// Check environment variables for secrets
 		if ver.EnvVariables != nil {
 			versionRecord.EnvVarCount = len(ver.EnvVariables)
 			secretCount := m.analyzeEnvVars(ver.EnvVariables, serviceID, ver.Id, projectID)
 			versionRecord.SecretEnvVars = secretCount
-			if secretCount > 0 {
-				versionRecord.RiskLevel = "CRITICAL"
-			}
 		}
 
 		// Check ingress settings for public access
-		if versionRecord.IngressSettings == "all" {
+		if versionRecord.IngressSettings == "all" || versionRecord.IngressSettings == "INGRESS_TRAFFIC_ALLOWED_ALL" {
+			versionRecord.Public = true
 			m.mu.Lock()
 			m.publicCount++
-			if versionRecord.RiskLevel == "LOW" {
-				versionRecord.RiskLevel = "MEDIUM"
-			}
-			m.SecurityIssues = append(m.SecurityIssues, AppEngineSecurityIssue{
-				ServiceID:   serviceID,
-				VersionID:   ver.Id,
-				ProjectID:   projectID,
-				IssueType:   "public-ingress",
-				Severity:    "MEDIUM",
-				Description: "Service accepts traffic from all sources",
-				Remediation: "Consider using 'internal-only' or 'internal-and-cloud-load-balancing' ingress",
-			})
 			m.mu.Unlock()
 		}
 
 		// Check for default service account
 		if versionRecord.ServiceAccount == "" || strings.Contains(versionRecord.ServiceAccount, "@appspot.gserviceaccount.com") {
-			m.mu.Lock()
-			m.SecurityIssues = append(m.SecurityIssues, AppEngineSecurityIssue{
-				ServiceID:   serviceID,
-				VersionID:   ver.Id,
-				ProjectID:   projectID,
-				IssueType:   "default-service-account",
-				Severity:    "LOW",
-				Description: "Using default App Engine service account",
-				Remediation: "Create a dedicated service account with minimal permissions",
-			})
-			m.mu.Unlock()
+			versionRecord.DefaultSA = true
 		}
 
 		m.mu.Lock()
@@ -452,34 +352,18 @@ func (m *AppEngineModule) enumerateFirewallRules(ctx context.Context, projectID 
 
 	for _, rule := range rules.IngressRules {
 		fwRule := AppEngineFirewallRule{
+			ProjectID:   projectID,
 			Priority:    rule.Priority,
 			Action:      rule.Action,
 			SourceRange: rule.SourceRange,
 			Description: rule.Description,
-			ProjectID:   projectID,
 		}
 
 		m.mu.Lock()
 		m.FirewallRules = append(m.FirewallRules, fwRule)
 		m.mu.Unlock()
-
-		// Check for overly permissive rules
-		if rule.Action == "ALLOW" && rule.SourceRange == "*" {
-			m.mu.Lock()
-			m.SecurityIssues = append(m.SecurityIssues, AppEngineSecurityIssue{
-				ServiceID:   "all",
-				VersionID:   "all",
-				ProjectID:   projectID,
-				IssueType:   "permissive-firewall",
-				Severity:    "HIGH",
-				Description: fmt.Sprintf("Firewall rule (priority %d) allows all traffic", rule.Priority),
-				Remediation: "Restrict source ranges to known IP addresses",
-			})
-			m.mu.Unlock()
-		}
 	}
 
-	// Update app record with firewall count
 	m.mu.Lock()
 	for i := range m.Apps {
 		if m.Apps[i].ProjectID == projectID {
@@ -491,47 +375,28 @@ func (m *AppEngineModule) enumerateFirewallRules(ctx context.Context, projectID 
 }
 
 func (m *AppEngineModule) analyzeEnvVars(envVars map[string]string, serviceID, versionID, projectID string) int {
-	secretPatterns := map[string]string{
-		"PASSWORD":          "password",
-		"SECRET":            "secret",
-		"API_KEY":           "api-key",
-		"TOKEN":             "token",
-		"PRIVATE_KEY":       "credential",
-		"DATABASE_URL":      "connection-string",
-		"DB_PASSWORD":       "password",
-		"MYSQL_PASSWORD":    "password",
-		"POSTGRES_PASSWORD": "password",
-		"MONGODB_URI":       "connection-string",
-		"AWS_SECRET":        "credential",
-		"ENCRYPTION_KEY":    "credential",
-		"JWT_SECRET":        "credential",
-		"SESSION_SECRET":    "credential",
+	secretPatterns := []string{
+		"PASSWORD", "SECRET", "API_KEY", "TOKEN", "PRIVATE_KEY",
+		"DATABASE_URL", "DB_PASSWORD", "MYSQL_PASSWORD", "POSTGRES_PASSWORD",
+		"MONGODB_URI", "AWS_SECRET", "ENCRYPTION_KEY", "JWT_SECRET", "SESSION_SECRET",
 	}
 
 	secretCount := 0
 
 	for name := range envVars {
 		nameUpper := strings.ToUpper(name)
-		for pattern, secretType := range secretPatterns {
+		for _, pattern := range secretPatterns {
 			if strings.Contains(nameUpper, pattern) {
 				secretCount++
 				m.mu.Lock()
 				m.secretsFound++
 
-				m.SecurityIssues = append(m.SecurityIssues, AppEngineSecurityIssue{
-					ServiceID:   serviceID,
-					VersionID:   versionID,
-					ProjectID:   projectID,
-					IssueType:   "secret-in-env",
-					Severity:    "CRITICAL",
-					Description: fmt.Sprintf("Potential %s found in environment variable: %s", secretType, name),
-					Remediation: "Use Secret Manager instead of environment variables for secrets",
-				})
-
-				// Add to loot
-				m.LootMap["secrets-exposure"].Contents += fmt.Sprintf(
-					"Service: %s, Version: %s, Env Var: %s (%s)\n",
-					serviceID, versionID, name, secretType,
+				m.LootMap["appengine-commands"].Contents += fmt.Sprintf(
+					"# Potential secret in env var: %s (service: %s, version: %s)\n"+
+						"# Recommendation: Migrate to Secret Manager\n"+
+						"gcloud app versions describe %s --service=%s --project=%s\n\n",
+					name, serviceID, versionID,
+					versionID, serviceID, projectID,
 				)
 				m.mu.Unlock()
 				break
@@ -544,17 +409,8 @@ func (m *AppEngineModule) analyzeEnvVars(envVars map[string]string, serviceID, v
 
 func (m *AppEngineModule) isDeprecatedRuntime(runtime string) bool {
 	deprecatedRuntimes := []string{
-		"python27",
-		"go111",
-		"go112",
-		"go113",
-		"java8",
-		"java11",
-		"nodejs10",
-		"nodejs12",
-		"php55",
-		"php72",
-		"ruby25",
+		"python27", "go111", "go112", "go113", "java8", "java11",
+		"nodejs10", "nodejs12", "php55", "php72", "ruby25",
 	}
 
 	for _, deprecated := range deprecatedRuntimes {
@@ -569,17 +425,10 @@ func (m *AppEngineModule) isDeprecatedRuntime(runtime string) bool {
 // Loot File Management
 // ------------------------------
 func (m *AppEngineModule) initializeLootFiles() {
-	m.LootMap["app-engine-commands"] = &internal.LootFile{
-		Name:     "app-engine-commands",
-		Contents: "# App Engine Security Commands\n# Generated by CloudFox\n\n",
-	}
-	m.LootMap["public-services"] = &internal.LootFile{
-		Name:     "public-services",
-		Contents: "# Public App Engine Services\n# Generated by CloudFox\n\n",
-	}
-	m.LootMap["secrets-exposure"] = &internal.LootFile{
-		Name:     "secrets-exposure",
-		Contents: "# Secrets Exposed in Environment Variables\n# Generated by CloudFox\n# CRITICAL: Migrate these to Secret Manager!\n\n",
+	m.LootMap["appengine-commands"] = &internal.LootFile{
+		Name: "appengine-commands",
+		Contents: "# App Engine Commands\n" +
+			"# Generated by CloudFox\n\n",
 	}
 }
 
@@ -587,139 +436,149 @@ func (m *AppEngineModule) initializeLootFiles() {
 // Output Generation
 // ------------------------------
 func (m *AppEngineModule) writeOutput(ctx context.Context, logger internal.Logger) {
-	// Sort versions by risk level
-	sort.Slice(m.Versions, func(i, j int) bool {
-		riskOrder := map[string]int{"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
-		return riskOrder[m.Versions[i].RiskLevel] < riskOrder[m.Versions[j].RiskLevel]
-	})
+	var tables []internal.TableFile
 
-	// App Engine Apps table
-	appsHeader := []string{
-		"App ID",
-		"Project Name",
+	// Unified table with all columns
+	header := []string{
 		"Project ID",
+		"Project Name",
+		"App ID",
 		"Location",
 		"Status",
 		"Hostname",
-		"FW Rules",
-	}
-
-	var appsBody [][]string
-	for _, app := range m.Apps {
-		appsBody = append(appsBody, []string{
-			app.ID,
-			m.GetProjectName(app.ProjectID),
-			app.ProjectID,
-			app.LocationID,
-			app.ServingStatus,
-			truncateString(app.DefaultHostname, 40),
-			fmt.Sprintf("%d", app.FirewallRules),
-		})
-	}
-
-	// App Engine Services table
-	servicesHeader := []string{
-		"Service",
-		"Project Name",
-		"Project ID",
-		"Versions",
-	}
-
-	var servicesBody [][]string
-	for _, svc := range m.Services {
-		versionsCount := 0
-		for _, ver := range m.Versions {
-			if ver.ServiceID == svc.ID && ver.ProjectID == svc.ProjectID {
-				versionsCount++
-			}
-		}
-
-		servicesBody = append(servicesBody, []string{
-			svc.ID,
-			m.GetProjectName(svc.ProjectID),
-			svc.ProjectID,
-			fmt.Sprintf("%d", versionsCount),
-		})
-	}
-
-	// App Engine Versions table
-	versionsHeader := []string{
 		"Service",
 		"Version",
 		"Runtime",
-		"Env",
+		"Environment",
 		"Ingress",
-		"Scaling",
-		"Risk",
+		"Public",
+		"Service Account",
+		"Default SA",
+		"Deprecated",
+		"Env Vars",
+		"Secrets",
+		"VPC Connector",
+		"URL",
 	}
 
-	var versionsBody [][]string
-	for _, ver := range m.Versions {
-		versionsBody = append(versionsBody, []string{
-			ver.ServiceID,
-			ver.ID,
-			ver.Runtime,
-			ver.Environment,
-			ver.IngressSettings,
-			ver.Scaling,
-			ver.RiskLevel,
-		})
+	var body [][]string
 
-		// Add public services to loot
-		if ver.IngressSettings == "all" {
-			m.LootMap["public-services"].Contents += fmt.Sprintf(
-				"Service: %s, Version: %s, URL: %s\n",
-				ver.ServiceID, ver.ID, ver.URL,
-			)
+	if len(m.Versions) > 0 {
+		// We have versions - show full details for each version
+		for _, ver := range m.Versions {
+			// Find the corresponding app for this version
+			var app AppEngineApp
+			for _, a := range m.Apps {
+				if a.ProjectID == ver.ProjectID {
+					app = a
+					break
+				}
+			}
+
+			publicStr := "No"
+			if ver.Public {
+				publicStr = "Yes"
+			}
+
+			defaultSAStr := "No"
+			if ver.DefaultSA {
+				defaultSAStr = "Yes"
+			}
+
+			deprecatedStr := "No"
+			if ver.DeprecatedRuntime {
+				deprecatedStr = "Yes"
+			}
+
+			body = append(body, []string{
+				ver.ProjectID,
+				m.GetProjectName(ver.ProjectID),
+				app.ID,
+				app.LocationID,
+				app.ServingStatus,
+				app.DefaultHostname,
+				ver.ServiceID,
+				ver.ID,
+				ver.Runtime,
+				ver.Environment,
+				ver.IngressSettings,
+				publicStr,
+				ver.ServiceAccount,
+				defaultSAStr,
+				deprecatedStr,
+				fmt.Sprintf("%d", ver.EnvVarCount),
+				fmt.Sprintf("%d", ver.SecretEnvVars),
+				ver.VPCConnector,
+				ver.URL,
+			})
+
+			// Add to loot
+			if ver.Public {
+				m.LootMap["appengine-commands"].Contents += fmt.Sprintf(
+					"# Public App Engine service: %s/%s\n"+
+						"curl %s\n\n",
+					ver.ServiceID, ver.ID, ver.URL,
+				)
+			}
+		}
+	} else {
+		// No versions - show app info with "No services deployed" for version columns
+		for _, app := range m.Apps {
+			body = append(body, []string{
+				app.ProjectID,
+				m.GetProjectName(app.ProjectID),
+				app.ID,
+				app.LocationID,
+				app.ServingStatus,
+				app.DefaultHostname,
+				"No services deployed",
+				"",
+				"",
+				"",
+				"",
+				"",
+				app.ServiceAccount,
+				"",
+				"",
+				"",
+				"",
+				"",
+				"",
+			})
 		}
 	}
 
-	// Security Issues table
-	issuesHeader := []string{
-		"Service",
-		"Version",
-		"Issue",
-		"Severity",
-		"Description",
-	}
+	tables = append(tables, internal.TableFile{
+		Name:   "appengine",
+		Header: header,
+		Body:   body,
+	})
 
-	var issuesBody [][]string
-	for _, issue := range m.SecurityIssues {
-		issuesBody = append(issuesBody, []string{
-			issue.ServiceID,
-			issue.VersionID,
-			issue.IssueType,
-			issue.Severity,
-			truncateString(issue.Description, 40),
-		})
+	// Firewall rules table
+	if len(m.FirewallRules) > 0 {
+		var fwBody [][]string
+		for _, rule := range m.FirewallRules {
+			fwBody = append(fwBody, []string{
+				rule.ProjectID,
+				m.GetProjectName(rule.ProjectID),
+				fmt.Sprintf("%d", rule.Priority),
+				rule.Action,
+				rule.SourceRange,
+				rule.Description,
+			})
+		}
 
-		// Add remediation commands
-		m.LootMap["app-engine-commands"].Contents += fmt.Sprintf(
-			"# %s - %s (%s)\n# %s\n# Remediation: %s\n\n",
-			issue.ServiceID, issue.VersionID, issue.IssueType,
-			issue.Description, issue.Remediation,
-		)
-	}
-
-	// Firewall Rules table
-	firewallHeader := []string{
-		"Priority",
-		"Action",
-		"Source Range",
-		"Project Name",
-		"Project ID",
-		"Description",
-	}
-
-	var firewallBody [][]string
-	for _, rule := range m.FirewallRules {
-		firewallBody = append(firewallBody, []string{
-			fmt.Sprintf("%d", rule.Priority),
-			rule.Action,
-			rule.SourceRange,
-			m.GetProjectName(rule.ProjectID),
-			rule.ProjectID,
-			truncateString(rule.Description, 30),
+		tables = append(tables, internal.TableFile{
+			Name: "appengine-firewall",
+			Header: []string{
+				"Project ID",
+				"Project Name",
+				"Priority",
+				"Action",
+				"Source Range",
+				"Description",
+			},
+			Body: fwBody,
 		})
 	}
 
@@ -731,61 +590,16 @@ func (m *AppEngineModule) writeOutput(ctx context.Context, logger internal.Logge
 		}
 	}
 
-	// Build tables
-	tables := []internal.TableFile{}
-
-	if len(appsBody) > 0 {
-		tables = append(tables, internal.TableFile{
-			Name:   "app-engine-apps",
-			Header: appsHeader,
-			Body:   appsBody,
-		})
-	}
-
-	if len(servicesBody) > 0 {
-		tables = append(tables, internal.TableFile{
-			Name:   "app-engine-services",
-			Header: servicesHeader,
-			Body:   servicesBody,
-		})
-	}
-
-	if len(versionsBody) > 0 {
-		tables = append(tables, internal.TableFile{
-			Name:   "app-engine-versions",
-			Header: versionsHeader,
-			Body:   versionsBody,
-		})
-	}
-
-	if len(issuesBody) > 0 {
-		tables = append(tables, internal.TableFile{
-			Name:   "security-issues",
-			Header: issuesHeader,
-			Body:   issuesBody,
-		})
-	}
-
-	if len(firewallBody) > 0 {
-		tables = append(tables, internal.TableFile{
-			Name:   "firewall-rules",
-			Header: firewallHeader,
-			Body:   firewallBody,
-		})
-	}
-
 	output := AppEngineOutput{
 		Table: tables,
 		Loot:  lootFiles,
 	}
 
-	// Build scope names using project names
 	scopeNames := make([]string, len(m.ProjectIDs))
 	for i, projectID := range m.ProjectIDs {
 		scopeNames[i] = m.GetProjectName(projectID)
 	}
 
-	// Write output
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
@@ -793,8 +607,8 @@ func (m *AppEngineModule) writeOutput(ctx context.Context, logger internal.Logge
 		m.Verbosity,
 		m.WrapTable,
 		"project",
-		scopeNames,
 		m.ProjectIDs,
+		scopeNames,
 		m.Account,
 		output,
 	)

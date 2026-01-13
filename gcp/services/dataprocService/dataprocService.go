@@ -37,9 +37,10 @@ type ClusterInfo struct {
 	ServiceAccount   string   `json:"serviceAccount"`
 
 	// Master config
-	MasterMachineType string  `json:"masterMachineType"`
-	MasterCount       int64   `json:"masterCount"`
-	MasterDiskSizeGB  int64   `json:"masterDiskSizeGb"`
+	MasterMachineType  string   `json:"masterMachineType"`
+	MasterCount        int64    `json:"masterCount"`
+	MasterDiskSizeGB   int64    `json:"masterDiskSizeGb"`
+	MasterInstanceNames []string `json:"masterInstanceNames"`
 
 	// Worker config
 	WorkerMachineType string  `json:"workerMachineType"`
@@ -56,9 +57,14 @@ type ClusterInfo struct {
 	KerberosEnabled   bool     `json:"kerberosEnabled"`
 	SecureBoot        bool     `json:"secureBoot"`
 
-	// Security analysis
-	RiskLevel         string   `json:"riskLevel"`
-	RiskReasons       []string `json:"riskReasons"`
+	// IAM bindings
+	IAMBindings       []IAMBinding `json:"iamBindings"`
+}
+
+// IAMBinding represents a single IAM role binding
+type IAMBinding struct {
+	Role   string `json:"role"`
+	Member string `json:"member"`
 }
 
 // JobInfo represents a Dataproc job
@@ -108,7 +114,7 @@ func (s *DataprocService) ListClusters(projectID string) ([]ClusterInfo, error) 
 		}
 
 		for _, cluster := range regionClusters.Clusters {
-			info := s.parseCluster(cluster, projectID, region)
+			info := s.parseCluster(cluster, projectID, region, service, ctx)
 			clusters = append(clusters, info)
 		}
 	}
@@ -146,13 +152,13 @@ func (s *DataprocService) ListJobs(projectID, region string) ([]JobInfo, error) 
 	return jobs, nil
 }
 
-func (s *DataprocService) parseCluster(cluster *dataproc.Cluster, projectID, region string) ClusterInfo {
+func (s *DataprocService) parseCluster(cluster *dataproc.Cluster, projectID, region string, service *dataproc.Service, ctx context.Context) ClusterInfo {
 	info := ClusterInfo{
 		Name:        cluster.ClusterName,
 		ProjectID:   projectID,
 		Region:      region,
 		ClusterUUID: cluster.ClusterUuid,
-		RiskReasons: []string{},
+		IAMBindings: []IAMBinding{},
 	}
 
 	if cluster.Status != nil {
@@ -188,6 +194,7 @@ func (s *DataprocService) parseCluster(cluster *dataproc.Cluster, projectID, reg
 			mc := cluster.Config.MasterConfig
 			info.MasterMachineType = extractName(mc.MachineTypeUri)
 			info.MasterCount = mc.NumInstances
+			info.MasterInstanceNames = mc.InstanceNames
 			if mc.DiskConfig != nil {
 				info.MasterDiskSizeGB = mc.DiskConfig.BootDiskSizeGb
 			}
@@ -209,7 +216,8 @@ func (s *DataprocService) parseCluster(cluster *dataproc.Cluster, projectID, reg
 		}
 	}
 
-	info.RiskLevel, info.RiskReasons = s.analyzeClusterRisk(info)
+	// Get IAM policy for the cluster
+	info.IAMBindings = s.getClusterIAMBindings(service, ctx, projectID, region, cluster.ClusterName)
 
 	return info
 }
@@ -260,48 +268,27 @@ func (s *DataprocService) parseJob(job *dataproc.Job, projectID, region string) 
 	return info
 }
 
-func (s *DataprocService) analyzeClusterRisk(cluster ClusterInfo) (string, []string) {
-	var reasons []string
-	score := 0
+// getClusterIAMBindings retrieves IAM bindings for a Dataproc cluster
+func (s *DataprocService) getClusterIAMBindings(service *dataproc.Service, ctx context.Context, projectID, region, clusterName string) []IAMBinding {
+	var bindings []IAMBinding
 
-	// Public IPs
-	if !cluster.InternalIPOnly {
-		reasons = append(reasons, "Cluster nodes have public IP addresses")
-		score += 2
+	resource := fmt.Sprintf("projects/%s/regions/%s/clusters/%s", projectID, region, clusterName)
+	policy, err := service.Projects.Regions.Clusters.GetIamPolicy(resource, &dataproc.GetIamPolicyRequest{}).Context(ctx).Do()
+	if err != nil {
+		// Return empty bindings if we can't get IAM policy
+		return bindings
 	}
 
-	// Default service account
-	if cluster.ServiceAccount == "" || strings.Contains(cluster.ServiceAccount, "compute@developer.gserviceaccount.com") {
-		reasons = append(reasons, "Uses default Compute Engine service account")
-		score += 2
+	for _, binding := range policy.Bindings {
+		for _, member := range binding.Members {
+			bindings = append(bindings, IAMBinding{
+				Role:   binding.Role,
+				Member: member,
+			})
+		}
 	}
 
-	// No Kerberos
-	if !cluster.KerberosEnabled {
-		reasons = append(reasons, "Kerberos authentication not enabled")
-		score += 1
-	}
-
-	// No secure boot
-	if !cluster.SecureBoot {
-		reasons = append(reasons, "Secure Boot not enabled")
-		score += 1
-	}
-
-	// Old image version (simplified check)
-	if cluster.ImageVersion != "" && strings.HasPrefix(cluster.ImageVersion, "1.") {
-		reasons = append(reasons, fmt.Sprintf("Using older image version: %s", cluster.ImageVersion))
-		score += 1
-	}
-
-	if score >= 4 {
-		return "HIGH", reasons
-	} else if score >= 2 {
-		return "MEDIUM", reasons
-	} else if score >= 1 {
-		return "LOW", reasons
-	}
-	return "INFO", reasons
+	return bindings
 }
 
 func extractName(fullPath string) string {

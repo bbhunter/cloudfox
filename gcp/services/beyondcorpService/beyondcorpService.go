@@ -21,36 +21,44 @@ func NewWithSession(session *gcpinternal.SafeSession) *BeyondCorpService {
 	return &BeyondCorpService{session: session}
 }
 
+// IAMBinding represents an IAM binding
+type IAMBinding struct {
+	Role    string   `json:"role"`
+	Members []string `json:"members"`
+}
+
 // AppConnectorInfo represents a BeyondCorp app connector
 type AppConnectorInfo struct {
-	Name          string   `json:"name"`
-	ProjectID     string   `json:"projectId"`
-	Location      string   `json:"location"`
-	DisplayName   string   `json:"displayName"`
-	State         string   `json:"state"`
-	CreateTime    string   `json:"createTime"`
-	UpdateTime    string   `json:"updateTime"`
-	PrincipalInfo string   `json:"principalInfo"`
-	ResourceInfo  string   `json:"resourceInfo"`
-	RiskLevel     string   `json:"riskLevel"`
-	RiskReasons   []string `json:"riskReasons"`
+	Name          string       `json:"name"`
+	FullName      string       `json:"fullName"`
+	ProjectID     string       `json:"projectId"`
+	Location      string       `json:"location"`
+	DisplayName   string       `json:"displayName"`
+	State         string       `json:"state"`
+	CreateTime    string       `json:"createTime"`
+	UpdateTime    string       `json:"updateTime"`
+	PrincipalInfo string       `json:"principalInfo"`
+	ResourceInfo  string       `json:"resourceInfo"`
+	IAMBindings   []IAMBinding `json:"iamBindings"`
+	PublicAccess  bool         `json:"publicAccess"`
 }
 
 // AppConnectionInfo represents a BeyondCorp app connection
 type AppConnectionInfo struct {
-	Name                string   `json:"name"`
-	ProjectID           string   `json:"projectId"`
-	Location            string   `json:"location"`
-	DisplayName         string   `json:"displayName"`
-	State               string   `json:"state"`
-	Type                string   `json:"type"`
-	ApplicationEndpoint string   `json:"applicationEndpoint"`
-	Connectors          []string `json:"connectors"`
-	Gateway             string   `json:"gateway"`
-	CreateTime          string   `json:"createTime"`
-	UpdateTime          string   `json:"updateTime"`
-	RiskLevel           string   `json:"riskLevel"`
-	RiskReasons         []string `json:"riskReasons"`
+	Name                string       `json:"name"`
+	FullName            string       `json:"fullName"`
+	ProjectID           string       `json:"projectId"`
+	Location            string       `json:"location"`
+	DisplayName         string       `json:"displayName"`
+	State               string       `json:"state"`
+	Type                string       `json:"type"`
+	ApplicationEndpoint string       `json:"applicationEndpoint"`
+	Connectors          []string     `json:"connectors"`
+	Gateway             string       `json:"gateway"`
+	CreateTime          string       `json:"createTime"`
+	UpdateTime          string       `json:"updateTime"`
+	IAMBindings         []IAMBinding `json:"iamBindings"`
+	PublicAccess        bool         `json:"publicAccess"`
 }
 
 // ListAppConnectors retrieves all BeyondCorp app connectors
@@ -76,6 +84,24 @@ func (s *BeyondCorpService) ListAppConnectors(projectID string) ([]AppConnectorI
 	err = req.Pages(ctx, func(page *beyondcorp.GoogleCloudBeyondcorpAppconnectorsV1ListAppConnectorsResponse) error {
 		for _, connector := range page.AppConnectors {
 			info := s.parseAppConnector(connector, projectID)
+
+			// Get IAM policy for this connector
+			iamPolicy, iamErr := service.Projects.Locations.AppConnectors.GetIamPolicy(connector.Name).Context(ctx).Do()
+			if iamErr == nil && iamPolicy != nil {
+				for _, binding := range iamPolicy.Bindings {
+					info.IAMBindings = append(info.IAMBindings, IAMBinding{
+						Role:    binding.Role,
+						Members: binding.Members,
+					})
+					// Check for public access
+					for _, member := range binding.Members {
+						if member == "allUsers" || member == "allAuthenticatedUsers" {
+							info.PublicAccess = true
+						}
+					}
+				}
+			}
+
 			connectors = append(connectors, info)
 		}
 		return nil
@@ -109,6 +135,24 @@ func (s *BeyondCorpService) ListAppConnections(projectID string) ([]AppConnectio
 	err = req.Pages(ctx, func(page *beyondcorp.GoogleCloudBeyondcorpAppconnectionsV1ListAppConnectionsResponse) error {
 		for _, conn := range page.AppConnections {
 			info := s.parseAppConnection(conn, projectID)
+
+			// Get IAM policy for this connection
+			iamPolicy, iamErr := service.Projects.Locations.AppConnections.GetIamPolicy(conn.Name).Context(ctx).Do()
+			if iamErr == nil && iamPolicy != nil {
+				for _, binding := range iamPolicy.Bindings {
+					info.IAMBindings = append(info.IAMBindings, IAMBinding{
+						Role:    binding.Role,
+						Members: binding.Members,
+					})
+					// Check for public access
+					for _, member := range binding.Members {
+						if member == "allUsers" || member == "allAuthenticatedUsers" {
+							info.PublicAccess = true
+						}
+					}
+				}
+			}
+
 			connections = append(connections, info)
 		}
 		return nil
@@ -123,13 +167,13 @@ func (s *BeyondCorpService) ListAppConnections(projectID string) ([]AppConnectio
 func (s *BeyondCorpService) parseAppConnector(connector *beyondcorp.GoogleCloudBeyondcorpAppconnectorsV1AppConnector, projectID string) AppConnectorInfo {
 	info := AppConnectorInfo{
 		Name:        extractName(connector.Name),
+		FullName:    connector.Name,
 		ProjectID:   projectID,
 		Location:    extractLocation(connector.Name),
 		DisplayName: connector.DisplayName,
 		State:       connector.State,
 		CreateTime:  connector.CreateTime,
 		UpdateTime:  connector.UpdateTime,
-		RiskReasons: []string{},
 	}
 
 	if connector.PrincipalInfo != nil && connector.PrincipalInfo.ServiceAccount != nil {
@@ -140,14 +184,13 @@ func (s *BeyondCorpService) parseAppConnector(connector *beyondcorp.GoogleCloudB
 		info.ResourceInfo = connector.ResourceInfo.Id
 	}
 
-	info.RiskLevel, info.RiskReasons = s.analyzeConnectorRisk(info)
-
 	return info
 }
 
 func (s *BeyondCorpService) parseAppConnection(conn *beyondcorp.GoogleCloudBeyondcorpAppconnectionsV1AppConnection, projectID string) AppConnectionInfo {
 	info := AppConnectionInfo{
 		Name:        extractName(conn.Name),
+		FullName:    conn.Name,
 		ProjectID:   projectID,
 		Location:    extractLocation(conn.Name),
 		DisplayName: conn.DisplayName,
@@ -155,7 +198,6 @@ func (s *BeyondCorpService) parseAppConnection(conn *beyondcorp.GoogleCloudBeyon
 		Type:        conn.Type,
 		CreateTime:  conn.CreateTime,
 		UpdateTime:  conn.UpdateTime,
-		RiskReasons: []string{},
 	}
 
 	if conn.ApplicationEndpoint != nil {
@@ -170,48 +212,7 @@ func (s *BeyondCorpService) parseAppConnection(conn *beyondcorp.GoogleCloudBeyon
 		info.Gateway = extractName(conn.Gateway.AppGateway)
 	}
 
-	info.RiskLevel, info.RiskReasons = s.analyzeConnectionRisk(info)
-
 	return info
-}
-
-func (s *BeyondCorpService) analyzeConnectorRisk(connector AppConnectorInfo) (string, []string) {
-	var reasons []string
-	score := 0
-
-	if connector.State != "RUNNING" {
-		reasons = append(reasons, fmt.Sprintf("Connector not running: %s", connector.State))
-		score += 1
-	}
-
-	if score >= 2 {
-		return "MEDIUM", reasons
-	} else if score >= 1 {
-		return "LOW", reasons
-	}
-	return "INFO", reasons
-}
-
-func (s *BeyondCorpService) analyzeConnectionRisk(conn AppConnectionInfo) (string, []string) {
-	var reasons []string
-	score := 0
-
-	// Connection to sensitive ports
-	if strings.Contains(conn.ApplicationEndpoint, ":22") {
-		reasons = append(reasons, "Connection to SSH port (22)")
-		score += 1
-	}
-	if strings.Contains(conn.ApplicationEndpoint, ":3389") {
-		reasons = append(reasons, "Connection to RDP port (3389)")
-		score += 1
-	}
-
-	if score >= 2 {
-		return "MEDIUM", reasons
-	} else if score >= 1 {
-		return "LOW", reasons
-	}
-	return "INFO", reasons
 }
 
 func extractName(fullPath string) string {

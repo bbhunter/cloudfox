@@ -52,9 +52,42 @@ type ServiceInfo struct {
 	SecretEnvVarCount       int
 	SecretVolumeCount       int
 
+	// Security analysis
+	HardcodedSecrets        []HardcodedSecret // Potential secrets in env vars (not using Secret Manager)
+	UsesDefaultSA           bool              // Uses default compute service account
+
+	// Detailed env var and secret info
+	EnvVars    []EnvVarInfo    // All environment variables
+	SecretRefs []SecretRefInfo // All Secret Manager references
+
 	// IAM
 	InvokerMembers          []string
 	IsPublic                bool
+}
+
+// HardcodedSecret represents a potential secret found in environment variables
+type HardcodedSecret struct {
+	EnvVarName string
+	SecretType string // password, api-key, token, credential, connection-string
+}
+
+// EnvVarInfo represents an environment variable configuration
+type EnvVarInfo struct {
+	Name   string
+	Value  string // Direct value (may be empty if using secret ref)
+	Source string // "direct", "secret-manager", or "config-map"
+	// For Secret Manager references
+	SecretName    string
+	SecretVersion string
+}
+
+// SecretRefInfo represents a Secret Manager reference used by the service
+type SecretRefInfo struct {
+	EnvVarName    string // The env var name that references this secret
+	SecretName    string // Secret Manager secret name
+	SecretVersion string // Version (e.g., "latest", "1")
+	MountPath     string // For volume mounts, the path where it's mounted
+	Type          string // "env" or "volume"
 }
 
 // JobInfo holds Cloud Run job details
@@ -78,6 +111,14 @@ type JobInfo struct {
 	EnvVarCount       int
 	SecretEnvVarCount int
 	SecretVolumeCount int
+
+	// Security analysis
+	HardcodedSecrets []HardcodedSecret
+	UsesDefaultSA    bool
+
+	// Detailed env var and secret info
+	EnvVars    []EnvVarInfo
+	SecretRefs []SecretRefInfo
 }
 
 // Services retrieves all Cloud Run services in a project across all regions
@@ -229,14 +270,36 @@ func parseServiceInfo(svc *run.GoogleCloudRunV2Service, projectID string) Servic
 				}
 			}
 
-			// Environment variables (count only)
+			// Environment variables
 			info.EnvVarCount = len(container.Env)
 
-			// Count secret environment variables
+			// Process each environment variable
 			for _, env := range container.Env {
-				if env.ValueSource != nil && env.ValueSource.SecretKeyRef != nil {
-					info.SecretEnvVarCount++
+				envInfo := EnvVarInfo{
+					Name: env.Name,
 				}
+
+				if env.ValueSource != nil && env.ValueSource.SecretKeyRef != nil {
+					// Secret Manager reference
+					info.SecretEnvVarCount++
+					envInfo.Source = "secret-manager"
+					envInfo.SecretName = env.ValueSource.SecretKeyRef.Secret
+					envInfo.SecretVersion = env.ValueSource.SecretKeyRef.Version
+
+					// Also add to SecretRefs
+					info.SecretRefs = append(info.SecretRefs, SecretRefInfo{
+						EnvVarName:    env.Name,
+						SecretName:    env.ValueSource.SecretKeyRef.Secret,
+						SecretVersion: env.ValueSource.SecretKeyRef.Version,
+						Type:          "env",
+					})
+				} else {
+					// Direct value
+					envInfo.Source = "direct"
+					envInfo.Value = env.Value
+				}
+
+				info.EnvVars = append(info.EnvVars, envInfo)
 			}
 
 			// Count secret volumes
@@ -245,11 +308,23 @@ func parseServiceInfo(svc *run.GoogleCloudRunV2Service, projectID string) Servic
 				for _, svcVol := range svc.Template.Volumes {
 					if svcVol.Name == vol.Name && svcVol.Secret != nil {
 						info.SecretVolumeCount++
+						info.SecretRefs = append(info.SecretRefs, SecretRefInfo{
+							SecretName:    svcVol.Secret.Secret,
+							SecretVersion: "latest",
+							MountPath:     vol.MountPath,
+							Type:          "volume",
+						})
 						break
 					}
 				}
 			}
+
+			// Detect hardcoded secrets in env vars
+			info.HardcodedSecrets = detectHardcodedSecrets(container.Env)
 		}
+
+		// Check for default service account
+		info.UsesDefaultSA = isDefaultServiceAccount(info.ServiceAccount, projectID)
 	}
 
 	return info
@@ -290,14 +365,36 @@ func parseJobInfo(job *run.GoogleCloudRunV2Job, projectID string) JobInfo {
 				container := job.Template.Template.Containers[0]
 				info.ContainerImage = container.Image
 
-				// Environment variables (count only)
+				// Environment variables
 				info.EnvVarCount = len(container.Env)
 
-				// Count secret environment variables
+				// Process each environment variable
 				for _, env := range container.Env {
-					if env.ValueSource != nil && env.ValueSource.SecretKeyRef != nil {
-						info.SecretEnvVarCount++
+					envInfo := EnvVarInfo{
+						Name: env.Name,
 					}
+
+					if env.ValueSource != nil && env.ValueSource.SecretKeyRef != nil {
+						// Secret Manager reference
+						info.SecretEnvVarCount++
+						envInfo.Source = "secret-manager"
+						envInfo.SecretName = env.ValueSource.SecretKeyRef.Secret
+						envInfo.SecretVersion = env.ValueSource.SecretKeyRef.Version
+
+						// Also add to SecretRefs
+						info.SecretRefs = append(info.SecretRefs, SecretRefInfo{
+							EnvVarName:    env.Name,
+							SecretName:    env.ValueSource.SecretKeyRef.Secret,
+							SecretVersion: env.ValueSource.SecretKeyRef.Version,
+							Type:          "env",
+						})
+					} else {
+						// Direct value
+						envInfo.Source = "direct"
+						envInfo.Value = env.Value
+					}
+
+					info.EnvVars = append(info.EnvVars, envInfo)
 				}
 
 				// Count secret volumes
@@ -305,11 +402,23 @@ func parseJobInfo(job *run.GoogleCloudRunV2Job, projectID string) JobInfo {
 					for _, jobVol := range job.Template.Template.Volumes {
 						if jobVol.Name == vol.Name && jobVol.Secret != nil {
 							info.SecretVolumeCount++
+							info.SecretRefs = append(info.SecretRefs, SecretRefInfo{
+								SecretName:    jobVol.Secret.Secret,
+								SecretVersion: "latest",
+								MountPath:     vol.MountPath,
+								Type:          "volume",
+							})
 							break
 						}
 					}
 				}
+
+				// Detect hardcoded secrets in env vars
+				info.HardcodedSecrets = detectHardcodedSecrets(container.Env)
 			}
+
+			// Check for default service account
+			info.UsesDefaultSA = isDefaultServiceAccount(info.ServiceAccount, projectID)
 		}
 	}
 
@@ -357,4 +466,84 @@ func extractName(fullName string) string {
 		return parts[len(parts)-1]
 	}
 	return fullName
+}
+
+// secretPatterns maps env var name patterns to secret types
+var secretPatterns = map[string]string{
+	"PASSWORD":          "password",
+	"PASSWD":            "password",
+	"SECRET":            "secret",
+	"API_KEY":           "api-key",
+	"APIKEY":            "api-key",
+	"API-KEY":           "api-key",
+	"TOKEN":             "token",
+	"ACCESS_TOKEN":      "token",
+	"AUTH_TOKEN":        "token",
+	"BEARER":            "token",
+	"CREDENTIAL":        "credential",
+	"PRIVATE_KEY":       "credential",
+	"PRIVATEKEY":        "credential",
+	"CONNECTION_STRING": "connection-string",
+	"CONN_STR":          "connection-string",
+	"DATABASE_URL":      "connection-string",
+	"DB_PASSWORD":       "password",
+	"DB_PASS":           "password",
+	"MYSQL_PASSWORD":    "password",
+	"POSTGRES_PASSWORD": "password",
+	"REDIS_PASSWORD":    "password",
+	"MONGODB_URI":       "connection-string",
+	"AWS_ACCESS_KEY":    "credential",
+	"AWS_SECRET":        "credential",
+	"AZURE_KEY":         "credential",
+	"GCP_KEY":           "credential",
+	"ENCRYPTION_KEY":    "credential",
+	"SIGNING_KEY":       "credential",
+	"JWT_SECRET":        "credential",
+	"SESSION_SECRET":    "credential",
+	"OAUTH":             "credential",
+	"CLIENT_SECRET":     "credential",
+}
+
+// detectHardcodedSecrets analyzes env vars to find potential hardcoded secrets
+func detectHardcodedSecrets(envVars []*run.GoogleCloudRunV2EnvVar) []HardcodedSecret {
+	var secrets []HardcodedSecret
+
+	for _, env := range envVars {
+		if env == nil {
+			continue
+		}
+
+		// Skip if using Secret Manager reference
+		if env.ValueSource != nil && env.ValueSource.SecretKeyRef != nil {
+			continue
+		}
+
+		// Only flag if there's a direct value (not empty)
+		if env.Value == "" {
+			continue
+		}
+
+		envNameUpper := strings.ToUpper(env.Name)
+
+		for pattern, secretType := range secretPatterns {
+			if strings.Contains(envNameUpper, pattern) {
+				secrets = append(secrets, HardcodedSecret{
+					EnvVarName: env.Name,
+					SecretType: secretType,
+				})
+				break
+			}
+		}
+	}
+
+	return secrets
+}
+
+// isDefaultServiceAccount checks if the service account is a default compute SA
+func isDefaultServiceAccount(sa, projectID string) bool {
+	if sa == "" {
+		return true // Empty means using default
+	}
+	// Default compute SA pattern: {project-number}-compute@developer.gserviceaccount.com
+	return strings.Contains(sa, "-compute@developer.gserviceaccount.com")
 }

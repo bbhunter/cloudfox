@@ -1035,7 +1035,7 @@ func (m *WhoAmIModule) writeOutput(ctx context.Context, logger internal.Logger) 
 					path.Name,
 					path.Risk,
 					path.Description,
-					truncateString(path.Command, 50),
+					path.Command,
 				})
 			}
 

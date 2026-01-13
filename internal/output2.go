@@ -246,8 +246,21 @@ func HandleStreamingOutput(
 		return fmt.Errorf("failed to finalize tables: %w", err)
 	}
 
-	if verbosity >= 2 {
-		logger.InfoM(fmt.Sprintf("Output written to %s", outDirectoryPath), baseCloudfoxModule)
+	// Log individual output files like the non-streaming output does
+	for _, t := range dataToOutput.TableFiles() {
+		safeName := sanitizeFileName(t.Name)
+		if format == "all" || format == "table" {
+			logger.InfoM(fmt.Sprintf("Output written to %s", filepath.Join(outDirectoryPath, "table", safeName+".txt")), baseCloudfoxModule)
+		}
+		if format == "all" || format == "csv" {
+			logger.InfoM(fmt.Sprintf("Output written to %s", filepath.Join(outDirectoryPath, "csv", safeName+".csv")), baseCloudfoxModule)
+		}
+		if format == "all" || format == "json" {
+			logger.InfoM(fmt.Sprintf("Output written to %s", filepath.Join(outDirectoryPath, "json", safeName+".jsonl")), baseCloudfoxModule)
+		}
+	}
+	for _, l := range dataToOutput.LootFiles() {
+		logger.InfoM(fmt.Sprintf("Output written to %s", filepath.Join(outDirectoryPath, "loot", l.Name+".txt")), baseCloudfoxModule)
 	}
 
 	return nil

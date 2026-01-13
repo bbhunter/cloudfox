@@ -23,24 +23,22 @@ func NewWithSession(session *gcpinternal.SafeSession) *MemorystoreService {
 
 // RedisInstanceInfo represents a Redis instance
 type RedisInstanceInfo struct {
-	Name               string   `json:"name"`
-	ProjectID          string   `json:"projectId"`
-	Location           string   `json:"location"`
-	DisplayName        string   `json:"displayName"`
-	Tier               string   `json:"tier"`           // BASIC or STANDARD_HA
-	MemorySizeGB       int64    `json:"memorySizeGb"`
-	RedisVersion       string   `json:"redisVersion"`
-	Host               string   `json:"host"`
-	Port               int64    `json:"port"`
-	State              string   `json:"state"`
-	AuthEnabled        bool     `json:"authEnabled"`
-	TransitEncryption  string   `json:"transitEncryption"` // DISABLED, SERVER_AUTHENTICATION
-	ConnectMode        string   `json:"connectMode"`       // DIRECT_PEERING or PRIVATE_SERVICE_ACCESS
-	AuthorizedNetwork  string   `json:"authorizedNetwork"`
-	ReservedIPRange    string   `json:"reservedIpRange"`
-	CreateTime         string   `json:"createTime"`
-	RiskLevel          string   `json:"riskLevel"`
-	RiskReasons        []string `json:"riskReasons"`
+	Name              string `json:"name"`
+	ProjectID         string `json:"projectId"`
+	Location          string `json:"location"`
+	DisplayName       string `json:"displayName"`
+	Tier              string `json:"tier"`           // BASIC or STANDARD_HA
+	MemorySizeGB      int64  `json:"memorySizeGb"`
+	RedisVersion      string `json:"redisVersion"`
+	Host              string `json:"host"`
+	Port              int64  `json:"port"`
+	State             string `json:"state"`
+	AuthEnabled       bool   `json:"authEnabled"`
+	TransitEncryption string `json:"transitEncryption"` // DISABLED, SERVER_AUTHENTICATION
+	ConnectMode       string `json:"connectMode"`       // DIRECT_PEERING or PRIVATE_SERVICE_ACCESS
+	AuthorizedNetwork string `json:"authorizedNetwork"`
+	ReservedIPRange   string `json:"reservedIpRange"`
+	CreateTime        string `json:"createTime"`
 }
 
 // ListRedisInstances retrieves all Redis instances in a project
@@ -77,7 +75,7 @@ func (s *MemorystoreService) ListRedisInstances(projectID string) ([]RedisInstan
 }
 
 func (s *MemorystoreService) parseRedisInstance(instance *redis.Instance, projectID string) RedisInstanceInfo {
-	info := RedisInstanceInfo{
+	return RedisInstanceInfo{
 		Name:              extractName(instance.Name),
 		ProjectID:         projectID,
 		Location:          instance.LocationId,
@@ -94,41 +92,7 @@ func (s *MemorystoreService) parseRedisInstance(instance *redis.Instance, projec
 		AuthorizedNetwork: instance.AuthorizedNetwork,
 		ReservedIPRange:   instance.ReservedIpRange,
 		CreateTime:        instance.CreateTime,
-		RiskReasons:       []string{},
 	}
-
-	// Security analysis
-	info.RiskLevel, info.RiskReasons = s.analyzeRedisRisk(info)
-	return info
-}
-
-func (s *MemorystoreService) analyzeRedisRisk(instance RedisInstanceInfo) (string, []string) {
-	var reasons []string
-	score := 0
-
-	if !instance.AuthEnabled {
-		reasons = append(reasons, "Authentication not enabled")
-		score += 3
-	}
-
-	if instance.TransitEncryption == "DISABLED" || instance.TransitEncryption == "" {
-		reasons = append(reasons, "Transit encryption disabled")
-		score += 2
-	}
-
-	if instance.Tier == "BASIC" {
-		reasons = append(reasons, "Basic tier (no HA)")
-		score += 1
-	}
-
-	if score >= 4 {
-		return "HIGH", reasons
-	} else if score >= 2 {
-		return "MEDIUM", reasons
-	} else if score >= 1 {
-		return "LOW", reasons
-	}
-	return "INFO", reasons
 }
 
 func extractName(fullName string) string {

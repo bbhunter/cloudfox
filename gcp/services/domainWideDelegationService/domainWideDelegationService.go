@@ -17,19 +17,27 @@ func New() *DomainWideDelegationService {
 
 // DWDServiceAccount represents a service account with domain-wide delegation
 type DWDServiceAccount struct {
-	Email              string   `json:"email"`
-	ProjectID          string   `json:"projectId"`
-	UniqueID           string   `json:"uniqueId"`
-	DisplayName        string   `json:"displayName"`
-	OAuth2ClientID     string   `json:"oauth2ClientId"`
-	DWDEnabled         bool     `json:"dwdEnabled"`
-	HasKeys            bool     `json:"hasKeys"`
-	KeyCount           int      `json:"keyCount"`
-	Description        string   `json:"description"`
-	RiskLevel          string   `json:"riskLevel"`
-	RiskReasons        []string `json:"riskReasons"`
-	ExploitCommands    []string `json:"exploitCommands"`
-	WorkspaceScopes    []string `json:"workspaceScopes"` // Common Workspace scopes to try
+	Email           string        `json:"email"`
+	ProjectID       string        `json:"projectId"`
+	UniqueID        string        `json:"uniqueId"`
+	DisplayName     string        `json:"displayName"`
+	OAuth2ClientID  string        `json:"oauth2ClientId"`
+	DWDEnabled      bool          `json:"dwdEnabled"`
+	Keys            []KeyInfo     `json:"keys"`
+	Description     string        `json:"description"`
+	RiskLevel       string        `json:"riskLevel"`
+	RiskReasons     []string      `json:"riskReasons"`
+	ExploitCommands []string      `json:"exploitCommands"`
+	WorkspaceScopes []string      `json:"workspaceScopes"` // Common Workspace scopes to try
+}
+
+// KeyInfo represents a service account key
+type KeyInfo struct {
+	KeyID           string `json:"keyId"`
+	CreatedAt       string `json:"createdAt"`
+	ExpiresAt       string `json:"expiresAt"`
+	KeyAlgorithm    string `json:"keyAlgorithm"`
+	KeyType         string `json:"keyType"`
 }
 
 // Common Google Workspace OAuth scopes that DWD service accounts might have
@@ -71,14 +79,15 @@ func (s *DomainWideDelegationService) GetDWDServiceAccounts(projectID string) ([
 		dwdEnabled := sa.Oauth2ClientId != ""
 
 		account := DWDServiceAccount{
-			Email:          sa.Email,
-			ProjectID:      projectID,
-			UniqueID:       sa.UniqueId,
-			DisplayName:    sa.DisplayName,
-			OAuth2ClientID: sa.Oauth2ClientId,
-			DWDEnabled:     dwdEnabled,
-			Description:    sa.Description,
-			RiskReasons:    []string{},
+			Email:           sa.Email,
+			ProjectID:       projectID,
+			UniqueID:        sa.UniqueId,
+			DisplayName:     sa.DisplayName,
+			OAuth2ClientID:  sa.Oauth2ClientId,
+			DWDEnabled:      dwdEnabled,
+			Description:     sa.Description,
+			Keys:            []KeyInfo{},
+			RiskReasons:     []string{},
 			ExploitCommands: []string{},
 			WorkspaceScopes: CommonWorkspaceScopes,
 		}
@@ -88,15 +97,23 @@ func (s *DomainWideDelegationService) GetDWDServiceAccounts(projectID string) ([
 			fmt.Sprintf("projects/%s/serviceAccounts/%s", projectID, sa.Email),
 		).Context(ctx).Do()
 		if err == nil {
-			// Count user-managed keys (not system-managed)
-			userKeyCount := 0
+			// Collect user-managed keys (not system-managed)
 			for _, key := range keysResp.Keys {
 				if key.KeyType == "USER_MANAGED" {
-					userKeyCount++
+					// Extract key ID from full name (projects/.../keys/KEY_ID)
+					keyID := key.Name
+					if parts := strings.Split(key.Name, "/"); len(parts) > 0 {
+						keyID = parts[len(parts)-1]
+					}
+					account.Keys = append(account.Keys, KeyInfo{
+						KeyID:        keyID,
+						CreatedAt:    key.ValidAfterTime,
+						ExpiresAt:    key.ValidBeforeTime,
+						KeyAlgorithm: key.KeyAlgorithm,
+						KeyType:      key.KeyType,
+					})
 				}
 			}
-			account.HasKeys = userKeyCount > 0
-			account.KeyCount = userKeyCount
 		}
 
 		// Analyze risk
@@ -146,12 +163,13 @@ func (s *DomainWideDelegationService) analyzeRisk(account DWDServiceAccount) (st
 		score += 3
 	}
 
-	if account.HasKeys {
-		reasons = append(reasons, fmt.Sprintf("Has %d user-managed key(s) - can be used for impersonation", account.KeyCount))
+	hasKeys := len(account.Keys) > 0
+	if hasKeys {
+		reasons = append(reasons, fmt.Sprintf("Has %d user-managed key(s) - can be used for impersonation", len(account.Keys)))
 		score += 2
 	}
 
-	if account.DWDEnabled && account.HasKeys {
+	if account.DWDEnabled && hasKeys {
 		reasons = append(reasons, "CRITICAL: DWD enabled + keys exist = can impersonate any Workspace user!")
 		score += 2
 	}
@@ -196,9 +214,9 @@ func (s *DomainWideDelegationService) generateExploitCommands(account DWDService
 		"",
 	)
 
-	if account.HasKeys {
+	if len(account.Keys) > 0 {
 		commands = append(commands,
-			"# Download existing key (if you have iam.serviceAccountKeys.create permission):",
+			"# Create a new key (if you have iam.serviceAccountKeys.create permission):",
 			fmt.Sprintf("gcloud iam service-accounts keys create /tmp/key.json --iam-account=%s", account.Email),
 			"",
 		)

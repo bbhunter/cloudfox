@@ -34,29 +34,22 @@ type IAPSettingsInfo struct {
 	CORSAllowedOrigins      []string `json:"corsAllowedOrigins"`
 	GCIPTenantIDs           []string `json:"gcipTenantIds"`
 	ReauthPolicy            string   `json:"reauthPolicy"`
-	RiskLevel               string   `json:"riskLevel"`
-	RiskReasons             []string `json:"riskReasons"`
 }
 
 // TunnelDestGroup represents an IAP tunnel destination group
 type TunnelDestGroup struct {
-	Name        string   `json:"name"`
-	ProjectID   string   `json:"projectId"`
-	Region      string   `json:"region"`
-	CIDRs       []string `json:"cidrs"`
-	FQDNs       []string `json:"fqdns"`
-	RiskLevel   string   `json:"riskLevel"`
-	RiskReasons []string `json:"riskReasons"`
+	Name        string       `json:"name"`
+	ProjectID   string       `json:"projectId"`
+	Region      string       `json:"region"`
+	CIDRs       []string     `json:"cidrs"`
+	FQDNs       []string     `json:"fqdns"`
+	IAMBindings []IAMBinding `json:"iamBindings"`
 }
 
-// IAPBinding represents an IAM binding for IAP
-type IAPBinding struct {
-	Resource    string   `json:"resource"`
-	ProjectID   string   `json:"projectId"`
-	Role        string   `json:"role"`
-	Members     []string `json:"members"`
-	RiskLevel   string   `json:"riskLevel"`
-	RiskReasons []string `json:"riskReasons"`
+// IAMBinding represents a single IAM role binding
+type IAMBinding struct {
+	Role   string `json:"role"`
+	Member string `json:"member"`
 }
 
 // ListTunnelDestGroups retrieves tunnel destination groups
@@ -88,19 +81,43 @@ func (s *IAPService) ListTunnelDestGroups(projectID string) ([]TunnelDestGroup, 
 
 		for _, group := range resp.TunnelDestGroups {
 			info := TunnelDestGroup{
-				Name:        extractName(group.Name),
-				ProjectID:   projectID,
-				Region:      region,
-				CIDRs:       group.Cidrs,
-				FQDNs:       group.Fqdns,
-				RiskReasons: []string{},
+				Name:      extractName(group.Name),
+				ProjectID: projectID,
+				Region:    region,
+				CIDRs:     group.Cidrs,
+				FQDNs:     group.Fqdns,
 			}
-			info.RiskLevel, info.RiskReasons = s.analyzeDestGroupRisk(info)
+
+			// Fetch IAM bindings for this tunnel dest group
+			info.IAMBindings = s.getTunnelDestGroupIAMBindings(service, group.Name)
+
 			groups = append(groups, info)
 		}
 	}
 
 	return groups, nil
+}
+
+// getTunnelDestGroupIAMBindings retrieves IAM bindings for a tunnel destination group
+func (s *IAPService) getTunnelDestGroupIAMBindings(service *iap.Service, resourceName string) []IAMBinding {
+	ctx := context.Background()
+
+	policy, err := service.V1.GetIamPolicy(resourceName, &iap.GetIamPolicyRequest{}).Context(ctx).Do()
+	if err != nil {
+		return nil
+	}
+
+	var bindings []IAMBinding
+	for _, binding := range policy.Bindings {
+		for _, member := range binding.Members {
+			bindings = append(bindings, IAMBinding{
+				Role:   binding.Role,
+				Member: member,
+			})
+		}
+	}
+
+	return bindings
 }
 
 // GetIAPSettings retrieves IAP settings for a resource
@@ -127,7 +144,6 @@ func (s *IAPService) GetIAPSettings(projectID, resourcePath string) (*IAPSetting
 		Name:         settings.Name,
 		ProjectID:    projectID,
 		ResourceName: resourcePath,
-		RiskReasons:  []string{},
 	}
 
 	if settings.AccessSettings != nil {
@@ -144,137 +160,7 @@ func (s *IAPService) GetIAPSettings(projectID, resourcePath string) (*IAPSetting
 		}
 	}
 
-	info.RiskLevel, info.RiskReasons = s.analyzeSettingsRisk(*info)
-
 	return info, nil
-}
-
-// GetIAPBindings retrieves IAM bindings for an IAP-protected resource
-func (s *IAPService) GetIAPBindings(projectID, resourcePath string) ([]IAPBinding, error) {
-	ctx := context.Background()
-	var service *iap.Service
-	var err error
-
-	if s.session != nil {
-		service, err = iap.NewService(ctx, s.session.GetClientOption())
-	} else {
-		service, err = iap.NewService(ctx)
-	}
-	if err != nil {
-		return nil, gcpinternal.ParseGCPError(err, "iap.googleapis.com")
-	}
-
-	policy, err := service.V1.GetIamPolicy(resourcePath, &iap.GetIamPolicyRequest{}).Context(ctx).Do()
-	if err != nil {
-		return nil, gcpinternal.ParseGCPError(err, "iap.googleapis.com")
-	}
-
-	var bindings []IAPBinding
-	for _, binding := range policy.Bindings {
-		info := IAPBinding{
-			Resource:    resourcePath,
-			ProjectID:   projectID,
-			Role:        binding.Role,
-			Members:     binding.Members,
-			RiskReasons: []string{},
-		}
-		info.RiskLevel, info.RiskReasons = s.analyzeBindingRisk(info)
-		bindings = append(bindings, info)
-	}
-
-	return bindings, nil
-}
-
-func (s *IAPService) analyzeDestGroupRisk(group TunnelDestGroup) (string, []string) {
-	var reasons []string
-	score := 0
-
-	// Wide CIDR ranges
-	for _, cidr := range group.CIDRs {
-		if cidr == "0.0.0.0/0" || cidr == "::/0" {
-			reasons = append(reasons, "Allows tunneling to any IP (0.0.0.0/0)")
-			score += 3
-			break
-		}
-		// Check for /8 or larger
-		if strings.HasSuffix(cidr, "/8") || strings.HasSuffix(cidr, "/0") {
-			reasons = append(reasons, fmt.Sprintf("Very broad CIDR range: %s", cidr))
-			score += 2
-		}
-	}
-
-	// Many FQDNs
-	if len(group.FQDNs) > 10 {
-		reasons = append(reasons, fmt.Sprintf("Large number of FQDNs: %d", len(group.FQDNs)))
-		score += 1
-	}
-
-	if score >= 3 {
-		return "HIGH", reasons
-	} else if score >= 2 {
-		return "MEDIUM", reasons
-	} else if score >= 1 {
-		return "LOW", reasons
-	}
-	return "INFO", reasons
-}
-
-func (s *IAPService) analyzeSettingsRisk(settings IAPSettingsInfo) (string, []string) {
-	var reasons []string
-	score := 0
-
-	// No reauth policy
-	if settings.ReauthPolicy == "" || settings.ReauthPolicy == "DISABLED" {
-		reasons = append(reasons, "No reauthentication policy configured")
-		score += 1
-	}
-
-	// Wide CORS
-	for _, origin := range settings.CORSAllowedOrigins {
-		if origin == "*" {
-			reasons = append(reasons, "CORS allows all origins")
-			score += 2
-			break
-		}
-	}
-
-	if score >= 2 {
-		return "MEDIUM", reasons
-	} else if score >= 1 {
-		return "LOW", reasons
-	}
-	return "INFO", reasons
-}
-
-func (s *IAPService) analyzeBindingRisk(binding IAPBinding) (string, []string) {
-	var reasons []string
-	score := 0
-
-	// Check for public access
-	for _, member := range binding.Members {
-		if member == "allUsers" {
-			reasons = append(reasons, "IAP resource allows allUsers")
-			score += 3
-		} else if member == "allAuthenticatedUsers" {
-			reasons = append(reasons, "IAP resource allows allAuthenticatedUsers")
-			score += 2
-		}
-	}
-
-	// Sensitive roles
-	if strings.Contains(binding.Role, "admin") || strings.Contains(binding.Role, "Admin") {
-		reasons = append(reasons, fmt.Sprintf("Admin role granted: %s", binding.Role))
-		score += 1
-	}
-
-	if score >= 3 {
-		return "HIGH", reasons
-	} else if score >= 2 {
-		return "MEDIUM", reasons
-	} else if score >= 1 {
-		return "LOW", reasons
-	}
-	return "INFO", reasons
 }
 
 func extractName(fullPath string) string {

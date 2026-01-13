@@ -21,20 +21,18 @@ func NewWithSession(session *gcpinternal.SafeSession) *OrgPolicyService {
 	return &OrgPolicyService{session: session}
 }
 
-// OrgPolicyInfo represents an organization policy with security analysis
+// OrgPolicyInfo represents an organization policy
 type OrgPolicyInfo struct {
-	Name           string   `json:"name"`
-	Constraint     string   `json:"constraint"`
-	ProjectID      string   `json:"projectId"`
-	Enforced       bool     `json:"enforced"`
-	AllowAll       bool     `json:"allowAll"`
-	DenyAll        bool     `json:"denyAll"`
-	AllowedValues  []string `json:"allowedValues"`
-	DeniedValues   []string `json:"deniedValues"`
-	InheritParent  bool     `json:"inheritFromParent"`
-	RiskLevel      string   `json:"riskLevel"`
-	RiskReasons    []string `json:"riskReasons"`
-	SecurityImpact string   `json:"securityImpact"`
+	Name          string   `json:"name"`
+	Constraint    string   `json:"constraint"`
+	ProjectID     string   `json:"projectId"`
+	Enforced      bool     `json:"enforced"`
+	AllowAll      bool     `json:"allowAll"`
+	DenyAll       bool     `json:"denyAll"`
+	AllowedValues []string `json:"allowedValues"`
+	DeniedValues  []string `json:"deniedValues"`
+	InheritParent bool     `json:"inheritFromParent"`
+	Description   string   `json:"description"`
 }
 
 // SecurityRelevantConstraints maps constraint names to their security implications
@@ -194,6 +192,11 @@ func (s *OrgPolicyService) parsePolicyInfo(policy *orgpolicy.GoogleCloudOrgpolic
 		info.Constraint = "constraints/" + parts[1]
 	}
 
+	// Get description from SecurityRelevantConstraints if available
+	if secInfo, ok := SecurityRelevantConstraints[info.Constraint]; ok {
+		info.Description = secInfo.Description
+	}
+
 	// Parse the spec
 	if policy.Spec != nil {
 		info.InheritParent = policy.Spec.InheritFromParent
@@ -215,68 +218,6 @@ func (s *OrgPolicyService) parsePolicyInfo(policy *orgpolicy.GoogleCloudOrgpolic
 		}
 	}
 
-	// Analyze risk
-	info.RiskLevel, info.RiskReasons, info.SecurityImpact = s.analyzePolicy(info)
-
 	return info
 }
 
-func (s *OrgPolicyService) analyzePolicy(policy OrgPolicyInfo) (string, []string, string) {
-	var reasons []string
-	var impact string
-	riskScore := 0
-
-	// Get security context for this constraint
-	secInfo, isSecurityRelevant := SecurityRelevantConstraints[policy.Constraint]
-
-	if isSecurityRelevant {
-		impact = secInfo.RiskWhenWeak
-
-		// Check if policy is weakened
-		if policy.AllowAll {
-			reasons = append(reasons, fmt.Sprintf("Policy allows ALL values - %s", secInfo.Description))
-			riskScore += 3
-		}
-
-		// Check for overly permissive allowed values
-		if len(policy.AllowedValues) > 0 {
-			if containsWildcard(policy.AllowedValues) {
-				reasons = append(reasons, "Allowed values contains wildcard pattern")
-				riskScore += 2
-			}
-		}
-
-		// Check if important security constraint is not enforced
-		if !policy.Enforced && secInfo.DefaultSecure {
-			reasons = append(reasons, fmt.Sprintf("Security constraint not enforced: %s", secInfo.Description))
-			riskScore += 2
-		}
-
-		// Check for inheritance issues
-		if policy.InheritParent && policy.AllowAll {
-			reasons = append(reasons, "Inherits from parent but also allows all - may override parent restrictions")
-			riskScore += 1
-		}
-	} else {
-		impact = "Custom or less common constraint"
-	}
-
-	// Determine risk level
-	if riskScore >= 3 {
-		return "HIGH", reasons, impact
-	} else if riskScore >= 2 {
-		return "MEDIUM", reasons, impact
-	} else if riskScore >= 1 {
-		return "LOW", reasons, impact
-	}
-	return "INFO", reasons, impact
-}
-
-func containsWildcard(values []string) bool {
-	for _, v := range values {
-		if v == "*" || strings.Contains(v, "/*") || v == "under:*" {
-			return true
-		}
-	}
-	return false
-}

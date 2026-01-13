@@ -36,6 +36,7 @@ type SensitiveFileInfo struct {
 	DownloadCmd  string `json:"downloadCmd"`  // gsutil command to download
 	Updated      string `json:"updated"`
 	StorageClass string `json:"storageClass"`
+	IsPublic     bool   `json:"isPublic"`     // Whether the object has public access
 }
 
 // SensitivePatterns defines patterns to search for sensitive files
@@ -191,6 +192,9 @@ func (s *BucketEnumService) checkObjectSensitivity(obj *storage.Object, bucketNa
 				continue
 			}
 
+			// Check if object has public access via ACLs
+			isPublic := s.isObjectPublic(obj)
+
 			return &SensitiveFileInfo{
 				BucketName:   bucketName,
 				ObjectName:   obj.Name,
@@ -203,11 +207,28 @@ func (s *BucketEnumService) checkObjectSensitivity(obj *storage.Object, bucketNa
 				DownloadCmd:  fmt.Sprintf("gsutil cp gs://%s/%s .", bucketName, obj.Name),
 				Updated:      obj.Updated,
 				StorageClass: obj.StorageClass,
+				IsPublic:     isPublic,
 			}
 		}
 	}
 
 	return nil
+}
+
+// isObjectPublic checks if an object has public access via ACLs
+func (s *BucketEnumService) isObjectPublic(obj *storage.Object) bool {
+	if obj == nil || obj.Acl == nil {
+		return false
+	}
+
+	for _, acl := range obj.Acl {
+		// Check for public access entities
+		if acl.Entity == "allUsers" || acl.Entity == "allAuthenticatedUsers" {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (s *BucketEnumService) isFalsePositive(objectName string, pattern SensitivePattern) bool {

@@ -7,26 +7,27 @@ import (
 	"sync"
 
 	IAMService "github.com/BishopFox/cloudfox/gcp/services/iamService"
-	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	"github.com/BishopFox/cloudfox/globals"
 	"github.com/BishopFox/cloudfox/internal"
+	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	"github.com/spf13/cobra"
 )
 
 var GCPIAMCommand = &cobra.Command{
 	Use:     globals.GCP_IAM_MODULE_NAME,
-	Aliases: []string{"roles", "permissions"},
-	Short:   "Enumerate GCP IAM principals, service accounts, groups, and custom roles",
-	Long: `Enumerate GCP IAM principals and their role bindings with security-focused analysis.
+	Aliases: []string{"roles"},
+	Short:   "Enumerate GCP IAM principals across organizations, folders, and projects",
+	Long: `Enumerate GCP IAM principals and their role bindings across the entire hierarchy.
 
 Features:
-- Lists all IAM principals (users, service accounts, groups, domains)
-- Shows role assignments per principal with inheritance tracking
+- Enumerates IAM bindings at organization, folder, and project levels
+- Shows role assignments per principal with scope information
 - Enumerates service accounts with key information
 - Lists custom roles with their permissions
 - Identifies groups and their role assignments
 - Detects high-privilege roles and public access
-- Shows inherited roles from folders and organization
+- Shows conditional IAM policies with details
+- Attempts to retrieve MFA status for users (requires Admin SDK)
 - Generates gcloud commands for privilege escalation testing`,
 	Run: runGCPIAMCommand,
 }
@@ -45,10 +46,10 @@ var highPrivilegeRoles = map[string]bool{
 	"roles/iam.workloadIdentityUser":       true,
 	"roles/iam.roleAdmin":                  true,
 	// Resource Manager roles
-	"roles/resourcemanager.projectIamAdmin":    true,
-	"roles/resourcemanager.folderAdmin":        true,
-	"roles/resourcemanager.folderIamAdmin":     true,
-	"roles/resourcemanager.organizationAdmin":  true,
+	"roles/resourcemanager.projectIamAdmin":   true,
+	"roles/resourcemanager.folderAdmin":       true,
+	"roles/resourcemanager.folderIamAdmin":    true,
+	"roles/resourcemanager.organizationAdmin": true,
 	// Compute roles
 	"roles/compute.admin":         true,
 	"roles/compute.instanceAdmin": true,
@@ -56,10 +57,10 @@ var highPrivilegeRoles = map[string]bool{
 	// Storage roles
 	"roles/storage.admin": true,
 	// Functions/Run roles
-	"roles/cloudfunctions.admin":   true,
+	"roles/cloudfunctions.admin":     true,
 	"roles/cloudfunctions.developer": true,
-	"roles/run.admin":              true,
-	"roles/run.developer":          true,
+	"roles/run.admin":                true,
+	"roles/run.developer":            true,
 	// Secret Manager
 	"roles/secretmanager.admin": true,
 	// Container/Kubernetes
@@ -83,13 +84,21 @@ var highPrivilegeRoles = map[string]bool{
 type IAMModule struct {
 	gcpinternal.BaseGCPModule
 
-	// Module-specific fields
-	Principals      []IAMService.PrincipalWithRoles
+	// Module-specific fields - using enhanced data
+	ScopeBindings   []IAMService.ScopeBinding
 	ServiceAccounts []IAMService.ServiceAccountInfo
 	CustomRoles     []IAMService.CustomRole
 	Groups          []IAMService.GroupInfo
+	MFAStatus       map[string]*IAMService.MFAStatus
 	LootMap         map[string]*internal.LootFile
 	mu              sync.Mutex
+
+	// Member to groups mapping (email -> list of group emails)
+	MemberToGroups map[string][]string
+
+	// Organization info for output path
+	OrgIDs   []string
+	OrgNames map[string]string
 }
 
 // ------------------------------
@@ -116,11 +125,15 @@ func runGCPIAMCommand(cmd *cobra.Command, args []string) {
 	// Create module instance
 	module := &IAMModule{
 		BaseGCPModule:   gcpinternal.NewBaseGCPModule(cmdCtx),
-		Principals:      []IAMService.PrincipalWithRoles{},
+		ScopeBindings:   []IAMService.ScopeBinding{},
 		ServiceAccounts: []IAMService.ServiceAccountInfo{},
 		CustomRoles:     []IAMService.CustomRole{},
 		Groups:          []IAMService.GroupInfo{},
+		MFAStatus:       make(map[string]*IAMService.MFAStatus),
 		LootMap:         make(map[string]*internal.LootFile),
+		MemberToGroups:  make(map[string][]string),
+		OrgIDs:          []string{},
+		OrgNames:        make(map[string]string),
 	}
 
 	// Initialize loot files
@@ -134,264 +147,147 @@ func runGCPIAMCommand(cmd *cobra.Command, args []string) {
 // Module Execution
 // ------------------------------
 func (m *IAMModule) Execute(ctx context.Context, logger internal.Logger) {
-	// Run enumeration with concurrency
-	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_IAM_MODULE_NAME, m.processProject)
+	logger.InfoM("Enumerating IAM across organizations, folders, and projects...", globals.GCP_IAM_MODULE_NAME)
 
-	// Check results
-	if len(m.Principals) == 0 {
-		logger.InfoM("No IAM principals found", globals.GCP_IAM_MODULE_NAME)
+	// Use the enhanced IAM enumeration
+	iamService := IAMService.New()
+	iamData, err := iamService.CombinedIAMEnhanced(ctx, m.ProjectIDs, m.ProjectNames)
+	if err != nil {
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_IAM_MODULE_NAME, "Failed to enumerate IAM")
 		return
 	}
 
-	logger.SuccessM(fmt.Sprintf("Found %d principal(s), %d service account(s), %d custom role(s), %d group(s)",
-		len(m.Principals), len(m.ServiceAccounts), len(m.CustomRoles), len(m.Groups)), globals.GCP_IAM_MODULE_NAME)
+	m.ScopeBindings = iamData.ScopeBindings
+	m.ServiceAccounts = iamData.ServiceAccounts
+	m.CustomRoles = iamData.CustomRoles
+	m.Groups = iamData.Groups
+	m.MFAStatus = iamData.MFAStatus
+
+	// Try to enumerate group memberships to build reverse lookup
+	enrichedGroups := iamService.GetGroupMemberships(ctx, m.Groups)
+	m.Groups = enrichedGroups
+
+	// Build member-to-groups reverse mapping
+	for _, group := range enrichedGroups {
+		if group.MembershipEnumerated {
+			for _, member := range group.Members {
+				if member.Email != "" {
+					m.MemberToGroups[member.Email] = append(m.MemberToGroups[member.Email], group.Email)
+				}
+			}
+		}
+	}
+
+	// Generate loot
+	m.generateLoot()
+
+	// Count scopes and track org IDs
+	orgCount, folderCount, projectCount := 0, 0, 0
+	scopeSeen := make(map[string]bool)
+	for _, sb := range m.ScopeBindings {
+		key := sb.ScopeType + ":" + sb.ScopeID
+		if !scopeSeen[key] {
+			scopeSeen[key] = true
+			switch sb.ScopeType {
+			case "organization":
+				orgCount++
+				m.OrgIDs = append(m.OrgIDs, sb.ScopeID)
+				m.OrgNames[sb.ScopeID] = sb.ScopeName
+			case "folder":
+				folderCount++
+			case "project":
+				projectCount++
+			}
+		}
+	}
+
+	logger.SuccessM(fmt.Sprintf("Found %d binding(s) across %d org(s), %d folder(s), %d project(s); %d SA(s), %d custom role(s), %d group(s)",
+		len(m.ScopeBindings), orgCount, folderCount, projectCount,
+		len(m.ServiceAccounts), len(m.CustomRoles), len(m.Groups)), globals.GCP_IAM_MODULE_NAME)
 
 	// Write output
 	m.writeOutput(ctx, logger)
 }
 
 // ------------------------------
-// Project Processor (called concurrently for each project)
-// ------------------------------
-func (m *IAMModule) processProject(ctx context.Context, projectID string, logger internal.Logger) {
-	if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-		logger.InfoM(fmt.Sprintf("Enumerating IAM in project: %s", projectID), globals.GCP_IAM_MODULE_NAME)
-	}
-
-	// Create service and fetch combined IAM data
-	iamService := IAMService.New()
-	iamData, err := iamService.CombinedIAM(projectID)
-	if err != nil {
-		m.CommandCounter.Error++
-		gcpinternal.HandleGCPError(err, logger, globals.GCP_IAM_MODULE_NAME,
-			fmt.Sprintf("Could not enumerate IAM in project %s", projectID))
-		return
-	}
-
-	// Thread-safe append
-	m.mu.Lock()
-	m.Principals = append(m.Principals, iamData.Principals...)
-	m.ServiceAccounts = append(m.ServiceAccounts, iamData.ServiceAccounts...)
-	m.CustomRoles = append(m.CustomRoles, iamData.CustomRoles...)
-	m.Groups = append(m.Groups, iamData.Groups...)
-
-	// Generate loot for each principal
-	for _, principal := range iamData.Principals {
-		m.addPrincipalToLoot(principal, projectID)
-	}
-
-	// Generate loot for service accounts
-	for _, sa := range iamData.ServiceAccounts {
-		m.addServiceAccountToLoot(sa, projectID)
-	}
-
-	// Generate loot for custom roles
-	for _, role := range iamData.CustomRoles {
-		m.addCustomRoleToLoot(role)
-	}
-	m.mu.Unlock()
-
-	if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-		logger.InfoM(fmt.Sprintf("Found %d principal(s), %d SA(s), %d custom role(s), %d group(s) in project %s",
-			len(iamData.Principals), len(iamData.ServiceAccounts), len(iamData.CustomRoles), len(iamData.Groups), projectID), globals.GCP_IAM_MODULE_NAME)
-	}
-}
-
-// ------------------------------
 // Loot File Management
 // ------------------------------
 func (m *IAMModule) initializeLootFiles() {
-	m.LootMap["iam-gcloud-commands"] = &internal.LootFile{
-		Name:     "iam-gcloud-commands",
-		Contents: "# GCP IAM Enumeration Commands\n# Generated by CloudFox\n\n",
-	}
-	m.LootMap["iam-high-privilege"] = &internal.LootFile{
-		Name:     "iam-high-privilege",
-		Contents: "# GCP High-Privilege Principals\n# Generated by CloudFox\n# These principals have elevated permissions\n\n",
-	}
-	m.LootMap["iam-service-accounts"] = &internal.LootFile{
-		Name:     "iam-service-accounts",
-		Contents: "# GCP Service Account Exploitation Commands\n# Generated by CloudFox\n# WARNING: Only use with proper authorization\n\n",
-	}
-	m.LootMap["iam-privilege-escalation"] = &internal.LootFile{
-		Name:     "iam-privilege-escalation",
-		Contents: "# GCP Privilege Escalation Paths\n# Generated by CloudFox\n# WARNING: Only use with proper authorization\n\n",
-	}
-	m.LootMap["iam-custom-roles"] = &internal.LootFile{
-		Name:     "iam-custom-roles",
-		Contents: "# GCP Custom Roles\n# Generated by CloudFox\n# Review these for overly permissive custom roles\n\n",
-	}
-	m.LootMap["iam-service-account-keys"] = &internal.LootFile{
-		Name:     "iam-service-account-keys",
-		Contents: "# GCP Service Account Keys\n# Generated by CloudFox\n# User-managed keys are potential security risks\n\n",
-	}
-	m.LootMap["iam-groups"] = &internal.LootFile{
-		Name:     "iam-groups",
-		Contents: "# GCP Groups with IAM Permissions\n# Generated by CloudFox\n# Consider reviewing group membership for high-privilege roles\n\n",
-	}
-	m.LootMap["iam-inherited-roles"] = &internal.LootFile{
-		Name:     "iam-inherited-roles",
-		Contents: "# GCP Inherited IAM Roles\n# Generated by CloudFox\n# These roles are inherited from folders or organization\n\n",
+	m.LootMap["iam-commands"] = &internal.LootFile{
+		Name:     "iam-commands",
+		Contents: "# GCP IAM Commands\n# Generated by CloudFox\n\n",
 	}
 }
 
-func (m *IAMModule) addPrincipalToLoot(principal IAMService.PrincipalWithRoles, projectID string) {
-	hasHighPrivilege := false
-	var highPrivRoles []string
-	var inheritedRoles []string
+func (m *IAMModule) generateLoot() {
+	// Track unique service accounts we've seen
+	sasSeen := make(map[string]bool)
 
-	for _, binding := range principal.PolicyBindings {
-		if highPrivilegeRoles[binding.Role] {
-			hasHighPrivilege = true
-			highPrivRoles = append(highPrivRoles, binding.Role)
+	for _, sb := range m.ScopeBindings {
+		if sb.MemberType != "ServiceAccount" {
+			continue
 		}
-		if binding.IsInherited {
-			inheritedRoles = append(inheritedRoles, fmt.Sprintf("%s (from %s)", binding.Role, binding.InheritedFrom))
+		if sasSeen[sb.MemberEmail] {
+			continue
 		}
-	}
+		sasSeen[sb.MemberEmail] = true
 
-	// Track inherited roles
-	if len(inheritedRoles) > 0 {
-		m.LootMap["iam-inherited-roles"].Contents += fmt.Sprintf(
-			"# Principal: %s (Type: %s)\n"+
-				"# Inherited Roles:\n",
-			principal.Name, principal.Type,
-		)
-		for _, role := range inheritedRoles {
-			m.LootMap["iam-inherited-roles"].Contents += fmt.Sprintf("  - %s\n", role)
-		}
-		m.LootMap["iam-inherited-roles"].Contents += "\n"
-	}
+		// Check for high privilege roles
+		isHighPriv := highPrivilegeRoles[sb.Role]
 
-	// Track groups
-	if principal.Type == "Group" {
-		var roles []string
-		for _, binding := range principal.PolicyBindings {
-			roles = append(roles, binding.Role)
+		if isHighPriv {
+			m.LootMap["iam-commands"].Contents += fmt.Sprintf(
+				"# Service Account: %s [HIGH PRIVILEGE] (%s)\n",
+				sb.MemberEmail, sb.Role,
+			)
+		} else {
+			m.LootMap["iam-commands"].Contents += fmt.Sprintf(
+				"# Service Account: %s\n",
+				sb.MemberEmail,
+			)
 		}
-		hasHighPriv := ""
-		if hasHighPrivilege {
-			hasHighPriv = " [HIGH PRIVILEGE]"
-		}
-		m.LootMap["iam-groups"].Contents += fmt.Sprintf(
-			"# Group: %s%s\n"+
-				"# Project: %s\n"+
-				"# Roles: %s\n"+
-				"# Enumerate group membership (requires Admin SDK):\n"+
-				"# gcloud identity groups memberships list --group-email=%s\n\n",
-			principal.Email, hasHighPriv,
-			projectID,
-			strings.Join(roles, ", "),
-			principal.Email,
-		)
-	}
 
-	// gcloud commands for enumeration
-	if principal.Type == "ServiceAccount" {
-		saEmail := strings.TrimPrefix(principal.Name, "serviceAccount:")
-		m.LootMap["iam-gcloud-commands"].Contents += fmt.Sprintf(
-			"# Service Account: %s\n"+
-				"gcloud iam service-accounts describe %s --project=%s\n"+
+		// Use project scope if available, otherwise use first project
+		projectID := sb.ScopeID
+		if sb.ScopeType != "project" && len(m.ProjectIDs) > 0 {
+			projectID = m.ProjectIDs[0]
+		}
+
+		m.LootMap["iam-commands"].Contents += fmt.Sprintf(
+			"gcloud iam service-accounts describe %s --project=%s\n"+
 				"gcloud iam service-accounts keys list --iam-account=%s --project=%s\n"+
-				"gcloud iam service-accounts get-iam-policy %s --project=%s\n\n",
-			saEmail,
-			saEmail, projectID,
-			saEmail, projectID,
-			saEmail, projectID,
-		)
-
-		// Service account exploitation commands
-		m.LootMap["iam-service-accounts"].Contents += fmt.Sprintf(
-			"# Service Account: %s\n"+
-				"# Create a key for this service account:\n"+
+				"gcloud iam service-accounts get-iam-policy %s --project=%s\n"+
 				"gcloud iam service-accounts keys create ./key.json --iam-account=%s --project=%s\n"+
-				"# Generate access token:\n"+
-				"gcloud auth print-access-token --impersonate-service-account=%s\n"+
-				"# Generate ID token:\n"+
-				"gcloud auth print-identity-token --impersonate-service-account=%s\n\n",
-			saEmail,
-			saEmail, projectID,
-			saEmail,
-			saEmail,
+				"gcloud auth print-access-token --impersonate-service-account=%s\n\n",
+			sb.MemberEmail, projectID,
+			sb.MemberEmail, projectID,
+			sb.MemberEmail, projectID,
+			sb.MemberEmail, projectID,
+			sb.MemberEmail,
 		)
 	}
 
-	// High privilege principals
-	if hasHighPrivilege {
-		m.LootMap["iam-high-privilege"].Contents += fmt.Sprintf(
-			"# Principal: %s (Type: %s)\n"+
-				"# High-Privilege Roles: %s\n"+
-				"# Resource: %s/%s\n",
-			principal.Name, principal.Type,
-			strings.Join(highPrivRoles, ", "),
-			principal.ResourceType, principal.ResourceID,
-		)
-		if principal.HasCustomRoles {
-			m.LootMap["iam-high-privilege"].Contents += fmt.Sprintf(
-				"# Custom Roles: %s\n", strings.Join(principal.CustomRoles, ", "))
-		}
-		m.LootMap["iam-high-privilege"].Contents += "\n"
-
-		// Privilege escalation paths
-		if principal.Type == "ServiceAccount" {
-			saEmail := strings.TrimPrefix(principal.Name, "serviceAccount:")
-			m.LootMap["iam-privilege-escalation"].Contents += fmt.Sprintf(
-				"# Service Account: %s has high privileges\n"+
-					"# Roles: %s\n"+
-					"# Potential privilege escalation via service account key creation:\n"+
-					"gcloud iam service-accounts keys create ./key.json --iam-account=%s\n"+
-					"# Then authenticate:\n"+
-					"gcloud auth activate-service-account %s --key-file=./key.json\n\n",
-				saEmail,
-				strings.Join(highPrivRoles, ", "),
-				saEmail,
-				saEmail,
+	// Add service accounts with keys
+	for _, sa := range m.ServiceAccounts {
+		if sa.HasKeys {
+			m.LootMap["iam-commands"].Contents += fmt.Sprintf(
+				"# Service Account with Keys: %s (Keys: %d)\n"+
+					"gcloud iam service-accounts keys list --iam-account=%s --project=%s\n\n",
+				sa.Email, sa.KeyCount, sa.Email, sa.ProjectID,
 			)
 		}
 	}
-}
 
-// addServiceAccountToLoot adds detailed service account info to loot
-func (m *IAMModule) addServiceAccountToLoot(sa IAMService.ServiceAccountInfo, projectID string) {
-	// Service accounts with user-managed keys
-	if sa.HasKeys {
-		m.LootMap["iam-service-account-keys"].Contents += fmt.Sprintf(
-			"# Service Account: %s\n"+
-				"# Project: %s\n"+
-				"# User-Managed Keys: %d\n"+
-				"# Disabled: %v\n"+
-				"# List keys:\n"+
-				"gcloud iam service-accounts keys list --iam-account=%s --project=%s\n\n",
-			sa.Email,
-			projectID,
-			sa.KeyCount,
-			sa.Disabled,
-			sa.Email, projectID,
+	// Add custom roles
+	for _, role := range m.CustomRoles {
+		m.LootMap["iam-commands"].Contents += fmt.Sprintf(
+			"# Custom Role: %s (%d permissions)\n"+
+				"gcloud iam roles describe %s --project=%s\n\n",
+			role.Title, role.PermissionCount,
+			extractRoleName(role.Name), role.ProjectID,
 		)
 	}
-}
-
-// addCustomRoleToLoot adds custom role info to loot
-func (m *IAMModule) addCustomRoleToLoot(role IAMService.CustomRole) {
-	deletedStr := ""
-	if role.Deleted {
-		deletedStr = " [DELETED]"
-	}
-	m.LootMap["iam-custom-roles"].Contents += fmt.Sprintf(
-		"# Role: %s%s\n"+
-			"# Title: %s\n"+
-			"# Stage: %s\n"+
-			"# Permissions: %d\n"+
-			"# Description: %s\n"+
-			"# View role details:\n"+
-			"gcloud iam roles describe %s --project=%s\n\n",
-		role.Name, deletedStr,
-		role.Title,
-		role.Stage,
-		role.PermissionCount,
-		role.Description,
-		extractRoleName(role.Name), role.ProjectID,
-	)
 }
 
 // extractRoleName extracts the role name from full path
@@ -403,211 +299,313 @@ func extractRoleName(fullName string) string {
 	return fullName
 }
 
-// truncateString truncates a string to maxLen characters
-func truncateString(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
+// FederatedIdentityInfo contains parsed information about a federated identity
+type FederatedIdentityInfo struct {
+	IsFederated  bool
+	ProviderType string // AWS, GitHub, GitLab, OIDC, SAML, Azure, etc.
+	PoolName     string
+	Subject      string
+	Attribute    string
+}
+
+// parseFederatedIdentity detects and parses federated identity principals
+// Federated identities use principal:// or principalSet:// format
+func parseFederatedIdentity(identity string) FederatedIdentityInfo {
+	info := FederatedIdentityInfo{}
+
+	// Check for principal:// or principalSet:// format
+	if !strings.HasPrefix(identity, "principal://") && !strings.HasPrefix(identity, "principalSet://") {
+		return info
 	}
-	return s[:maxLen-3] + "..."
+
+	info.IsFederated = true
+
+	// Parse the principal URL
+	// Format: principal://iam.googleapis.com/projects/{project}/locations/global/workloadIdentityPools/{pool}/subject/{subject}
+	// Or: principalSet://iam.googleapis.com/projects/{project}/locations/global/workloadIdentityPools/{pool}/attribute.{attr}/{value}
+
+	// Extract pool name if present
+	if strings.Contains(identity, "workloadIdentityPools/") {
+		parts := strings.Split(identity, "workloadIdentityPools/")
+		if len(parts) > 1 {
+			poolParts := strings.Split(parts[1], "/")
+			if len(poolParts) > 0 {
+				info.PoolName = poolParts[0]
+			}
+		}
+	}
+
+	// Detect provider type based on common patterns in pool names and attributes
+	identityLower := strings.ToLower(identity)
+
+	switch {
+	case strings.Contains(identityLower, "aws") || strings.Contains(identityLower, "amazon"):
+		info.ProviderType = "AWS"
+	case strings.Contains(identityLower, "github"):
+		info.ProviderType = "GitHub"
+	case strings.Contains(identityLower, "gitlab"):
+		info.ProviderType = "GitLab"
+	case strings.Contains(identityLower, "azure") || strings.Contains(identityLower, "microsoft"):
+		info.ProviderType = "Azure"
+	case strings.Contains(identityLower, "okta"):
+		info.ProviderType = "Okta"
+	case strings.Contains(identityLower, "bitbucket"):
+		info.ProviderType = "Bitbucket"
+	case strings.Contains(identityLower, "circleci"):
+		info.ProviderType = "CircleCI"
+	case strings.Contains(identity, "attribute."):
+		// Has OIDC attributes but unknown provider
+		info.ProviderType = "OIDC"
+	case strings.Contains(identity, "/subject/"):
+		// Has subject but unknown provider type
+		info.ProviderType = "Federated"
+	default:
+		info.ProviderType = "Federated"
+	}
+
+	// Extract subject if present
+	if strings.Contains(identity, "/subject/") {
+		parts := strings.Split(identity, "/subject/")
+		if len(parts) > 1 {
+			info.Subject = parts[1]
+		}
+	}
+
+	// Extract attribute and value if present
+	// Format: .../attribute.{attr}/{value}
+	if strings.Contains(identity, "/attribute.") {
+		parts := strings.Split(identity, "/attribute.")
+		if len(parts) > 1 {
+			attrParts := strings.Split(parts[1], "/")
+			if len(attrParts) >= 1 {
+				info.Attribute = attrParts[0]
+			}
+			if len(attrParts) >= 2 {
+				// The value is the specific identity (e.g., repo name)
+				info.Subject = attrParts[1]
+			}
+		}
+	}
+
+	return info
+}
+
+// formatFederatedInfo formats federated identity info for display
+func formatFederatedInfo(info FederatedIdentityInfo) string {
+	if !info.IsFederated {
+		return "-"
+	}
+
+	result := info.ProviderType
+
+	// Show subject (specific identity like repo/workflow) if available
+	if info.Subject != "" {
+		result += ": " + info.Subject
+	} else if info.Attribute != "" {
+		result += " [" + info.Attribute + "]"
+	}
+
+	// Add pool name in parentheses
+	if info.PoolName != "" {
+		result += " (pool: " + info.PoolName + ")"
+	}
+
+	return result
+}
+
+// formatCondition formats a condition for display
+func formatCondition(condInfo *IAMService.IAMCondition) string {
+	if condInfo == nil {
+		return "No"
+	}
+
+	// Build a meaningful condition summary
+	parts := []string{}
+
+	if condInfo.Title != "" {
+		parts = append(parts, condInfo.Title)
+	}
+
+	// Parse common condition patterns from expression
+	expr := condInfo.Expression
+	if expr != "" {
+		// Check for time-based conditions
+		if strings.Contains(expr, "request.time") {
+			if strings.Contains(expr, "timestamp") {
+				parts = append(parts, "[time-limited]")
+			}
+		}
+		// Check for resource-based conditions
+		if strings.Contains(expr, "resource.name") {
+			parts = append(parts, "[resource-scoped]")
+		}
+		// Check for IP-based conditions
+		if strings.Contains(expr, "origin.ip") || strings.Contains(expr, "request.origin") {
+			parts = append(parts, "[IP-restricted]")
+		}
+		// Check for device policy
+		if strings.Contains(expr, "device") {
+			parts = append(parts, "[device-policy]")
+		}
+	}
+
+	if len(parts) == 0 {
+		return "Yes"
+	}
+
+	return strings.Join(parts, " ")
 }
 
 // ------------------------------
 // Output Generation
 // ------------------------------
 func (m *IAMModule) writeOutput(ctx context.Context, logger internal.Logger) {
-	// Main principals table with security columns
-	principalHeader := []string{
-		"Principal",
-		"Type",
+	// New table structure with Scope Type/ID/Name
+	header := []string{
+		"Scope Type",
+		"Scope ID",
+		"Scope Name",
+		"Entry Type",
+		"Identity",
 		"Role",
-		"High Priv",
+		"High Privilege",
 		"Custom Role",
-		"Inherited",
+		"Has Keys",
 		"Condition",
-		"Source",
-		"Project Name",
-		"Project",
+		"MFA",
+		"Groups",
+		"Federated",
 	}
 
-	var principalBody [][]string
+	var body [][]string
 	publicAccessFound := false
-	conditionsFound := false
-	for _, principal := range m.Principals {
-		for _, binding := range principal.PolicyBindings {
-			isHighPriv := ""
-			if highPrivilegeRoles[binding.Role] {
-				isHighPriv = "YES"
-			}
+	saWithKeys := 0
+	highPrivCount := 0
 
-			isCustom := ""
-			if strings.HasPrefix(binding.Role, "projects/") || strings.HasPrefix(binding.Role, "organizations/") {
-				isCustom = "✓"
-			}
+	// Add scope bindings (one row per binding)
+	for _, sb := range m.ScopeBindings {
+		isHighPriv := "No"
+		if highPrivilegeRoles[sb.Role] {
+			isHighPriv = "Yes"
+			highPrivCount++
+		}
 
-			inherited := ""
-			source := binding.ResourceType
-			if binding.IsInherited {
-				inherited = "✓"
-				source = binding.InheritedFrom
-			}
+		isCustom := "No"
+		if sb.IsCustom {
+			isCustom = "Yes"
+		}
 
-			// Check for conditions (conditional access)
-			condition := ""
-			if binding.HasCondition {
-				conditionsFound = true
-				if binding.ConditionInfo != nil && binding.ConditionInfo.Title != "" {
-					condition = binding.ConditionInfo.Title
+		// Format condition
+		condition := "No"
+		if sb.HasCondition {
+			condition = formatCondition(sb.ConditionInfo)
+		}
+
+		// Check for public access
+		if sb.MemberType == "PUBLIC" || sb.MemberType == "ALL_AUTHENTICATED" {
+			publicAccessFound = true
+		}
+
+		// Get MFA status
+		mfa := "-"
+		if sb.MemberType == "User" {
+			if status, ok := m.MFAStatus[sb.MemberEmail]; ok {
+				if status.Error != "" {
+					mfa = "Unknown"
+				} else if status.HasMFA {
+					mfa = "Yes"
 				} else {
-					condition = "✓"
+					mfa = "No"
 				}
 			}
-
-			// Check for public access
-			if principal.Type == "PUBLIC" || principal.Type == "ALL_AUTHENTICATED" {
-				publicAccessFound = true
-			}
-
-			principalBody = append(principalBody, []string{
-				principal.Email,
-				principal.Type,
-				binding.Role,
-				isHighPriv,
-				isCustom,
-				inherited,
-				condition,
-				source,
-				m.GetProjectName(binding.ResourceID),
-				binding.ResourceID,
-			})
+		} else if sb.MemberType == "ServiceAccount" {
+			mfa = "N/A"
 		}
+
+		// Get groups this member belongs to
+		groups := "-"
+		if memberGroups, ok := m.MemberToGroups[sb.MemberEmail]; ok && len(memberGroups) > 0 {
+			groups = strings.Join(memberGroups, ", ")
+		}
+
+		// Check for federated identity
+		federated := formatFederatedInfo(parseFederatedIdentity(sb.MemberEmail))
+
+		body = append(body, []string{
+			sb.ScopeType,
+			sb.ScopeID,
+			sb.ScopeName,
+			sb.MemberType,
+			sb.MemberEmail,
+			sb.Role,
+			isHighPriv,
+			isCustom,
+			"-",
+			condition,
+			mfa,
+			groups,
+			federated,
+		})
 	}
 
-	// Service accounts table
-	saHeader := []string{
-		"Email",
-		"Display Name",
-		"Disabled",
-		"Has Keys",
-		"Key Count",
-		"Project Name",
-		"Project",
-	}
-
-	var saBody [][]string
-	saWithKeys := 0
+	// Add service accounts
 	for _, sa := range m.ServiceAccounts {
-		disabled := ""
-		if sa.Disabled {
-			disabled = "✓"
-		}
-		hasKeys := ""
+		hasKeys := "No"
 		if sa.HasKeys {
-			hasKeys = "YES"
+			hasKeys = "Yes"
 			saWithKeys++
 		}
 
-		saBody = append(saBody, []string{
-			sa.Email,
-			sa.DisplayName,
-			disabled,
-			hasKeys,
-			fmt.Sprintf("%d", sa.KeyCount),
-			m.GetProjectName(sa.ProjectID),
+		disabled := ""
+		if sa.Disabled {
+			disabled = " (disabled)"
+		}
+
+		// Get groups this SA belongs to
+		groups := "-"
+		if memberGroups, ok := m.MemberToGroups[sa.Email]; ok && len(memberGroups) > 0 {
+			groups = strings.Join(memberGroups, ", ")
+		}
+
+		body = append(body, []string{
+			"project",
 			sa.ProjectID,
+			m.GetProjectName(sa.ProjectID),
+			"ServiceAccountInfo",
+			sa.Email + disabled,
+			sa.DisplayName,
+			"-",
+			"-",
+			hasKeys,
+			"-",
+			"N/A",
+			groups,
+			"-", // Service accounts are not federated identities
 		})
 	}
 
-	// Custom roles table
-	customRoleHeader := []string{
-		"Role Name",
-		"Title",
-		"Stage",
-		"Permissions",
-		"Deleted",
-		"Project Name",
-		"Project",
-	}
-
-	var customRoleBody [][]string
+	// Add custom roles
 	for _, role := range m.CustomRoles {
 		deleted := ""
 		if role.Deleted {
-			deleted = "✓"
+			deleted = " (deleted)"
 		}
 
-		customRoleBody = append(customRoleBody, []string{
-			extractRoleName(role.Name),
-			role.Title,
-			role.Stage,
-			fmt.Sprintf("%d", role.PermissionCount),
-			deleted,
-			m.GetProjectName(role.ProjectID),
+		body = append(body, []string{
+			"project",
 			role.ProjectID,
+			m.GetProjectName(role.ProjectID),
+			"CustomRole",
+			extractRoleName(role.Name) + deleted,
+			fmt.Sprintf("%s (%d permissions)", role.Title, role.PermissionCount),
+			"-",
+			"Yes",
+			"-",
+			"-",
+			"-",
+			"-",
+			"-", // Custom roles are not federated identities
 		})
-	}
-
-	// Groups table
-	groupHeader := []string{
-		"Group Email",
-		"Role Count",
-		"High Privilege",
-		"Project Name",
-		"Project",
-	}
-
-	var groupBody [][]string
-	for _, group := range m.Groups {
-		hasHighPriv := ""
-		for _, role := range group.Roles {
-			if highPrivilegeRoles[role] {
-				hasHighPriv = "YES"
-				break
-			}
-		}
-
-		groupBody = append(groupBody, []string{
-			group.Email,
-			fmt.Sprintf("%d", len(group.Roles)),
-			hasHighPriv,
-			m.GetProjectName(group.ProjectID),
-			group.ProjectID,
-		})
-	}
-
-	// High privilege principals table
-	highPrivHeader := []string{
-		"Principal",
-		"Type",
-		"High Priv Roles",
-		"Custom Roles",
-		"Project Name",
-		"Project",
-	}
-
-	var highPrivBody [][]string
-	highPrivSet := make(map[string]bool)
-	for _, principal := range m.Principals {
-		var highPrivRoles []string
-		for _, binding := range principal.PolicyBindings {
-			if highPrivilegeRoles[binding.Role] {
-				highPrivRoles = append(highPrivRoles, binding.Role)
-			}
-		}
-		if len(highPrivRoles) > 0 && !highPrivSet[principal.Name] {
-			highPrivSet[principal.Name] = true
-			customRolesStr := ""
-			if principal.HasCustomRoles {
-				customRolesStr = strings.Join(principal.CustomRoles, ", ")
-			}
-			highPrivBody = append(highPrivBody, []string{
-				principal.Email,
-				principal.Type,
-				strings.Join(highPrivRoles, ", "),
-				customRolesStr,
-				m.GetProjectName(principal.ResourceID),
-				principal.ResourceID,
-			})
-		}
 	}
 
 	// Collect loot files
@@ -621,84 +619,10 @@ func (m *IAMModule) writeOutput(ctx context.Context, logger internal.Logger) {
 	// Build tables
 	tables := []internal.TableFile{
 		{
-			Name:   "iam-principals",
-			Header: principalHeader,
-			Body:   principalBody,
+			Name:   "iam",
+			Header: header,
+			Body:   body,
 		},
-	}
-
-	// Add service accounts table if there are any
-	if len(saBody) > 0 {
-		tables = append(tables, internal.TableFile{
-			Name:   "iam-service-accounts",
-			Header: saHeader,
-			Body:   saBody,
-		})
-	}
-
-	// Add custom roles table if there are any
-	if len(customRoleBody) > 0 {
-		tables = append(tables, internal.TableFile{
-			Name:   "iam-custom-roles",
-			Header: customRoleHeader,
-			Body:   customRoleBody,
-		})
-	}
-
-	// Add groups table if there are any
-	if len(groupBody) > 0 {
-		tables = append(tables, internal.TableFile{
-			Name:   "iam-groups",
-			Header: groupHeader,
-			Body:   groupBody,
-		})
-	}
-
-	// Add high privilege principals table if there are any
-	if len(highPrivBody) > 0 {
-		tables = append(tables, internal.TableFile{
-			Name:   "iam-high-privilege",
-			Header: highPrivHeader,
-			Body:   highPrivBody,
-		})
-		logger.InfoM(fmt.Sprintf("[FINDING] Found %d principal(s) with high-privilege roles!", len(highPrivBody)), globals.GCP_IAM_MODULE_NAME)
-	}
-
-	// Conditional bindings table
-	conditionsHeader := []string{
-		"Principal",
-		"Type",
-		"Role",
-		"Condition Title",
-		"Condition Expression",
-		"Project Name",
-		"Project",
-	}
-
-	var conditionsBody [][]string
-	for _, principal := range m.Principals {
-		for _, binding := range principal.PolicyBindings {
-			if binding.HasCondition && binding.ConditionInfo != nil {
-				conditionsBody = append(conditionsBody, []string{
-					principal.Email,
-					principal.Type,
-					binding.Role,
-					binding.ConditionInfo.Title,
-					truncateString(binding.ConditionInfo.Expression, 80),
-					m.GetProjectName(binding.ResourceID),
-					binding.ResourceID,
-				})
-			}
-		}
-	}
-
-	// Add conditional bindings table if there are any
-	if len(conditionsBody) > 0 {
-		tables = append(tables, internal.TableFile{
-			Name:   "iam-conditions",
-			Header: conditionsHeader,
-			Body:   conditionsBody,
-		})
 	}
 
 	// Log warnings for security findings
@@ -708,8 +632,8 @@ func (m *IAMModule) writeOutput(ctx context.Context, logger internal.Logger) {
 	if saWithKeys > 0 {
 		logger.InfoM(fmt.Sprintf("[FINDING] Found %d service account(s) with user-managed keys!", saWithKeys), globals.GCP_IAM_MODULE_NAME)
 	}
-	if conditionsFound {
-		logger.InfoM(fmt.Sprintf("[INFO] Found %d conditional IAM binding(s)", len(conditionsBody)), globals.GCP_IAM_MODULE_NAME)
+	if highPrivCount > 0 {
+		logger.InfoM(fmt.Sprintf("[FINDING] Found %d high-privilege role binding(s)!", highPrivCount), globals.GCP_IAM_MODULE_NAME)
 	}
 
 	output := IAMOutput{
@@ -717,20 +641,40 @@ func (m *IAMModule) writeOutput(ctx context.Context, logger internal.Logger) {
 		Loot:  lootFiles,
 	}
 
-	// Write output using HandleOutputSmart with scope support
-	scopeNames := make([]string, len(m.ProjectIDs))
-	for i, id := range m.ProjectIDs {
-		scopeNames[i] = m.GetProjectName(id)
+	// Determine output scope - use org if available, otherwise fall back to project
+	var scopeType string
+	var scopeIdentifiers []string
+	var scopeNames []string
+
+	if len(m.OrgIDs) > 0 {
+		// Use organization scope with [O] prefix format
+		scopeType = "organization"
+		for _, orgID := range m.OrgIDs {
+			scopeIdentifiers = append(scopeIdentifiers, orgID)
+			if name, ok := m.OrgNames[orgID]; ok && name != "" {
+				scopeNames = append(scopeNames, name)
+			} else {
+				scopeNames = append(scopeNames, orgID)
+			}
+		}
+	} else {
+		// Fall back to project scope
+		scopeType = "project"
+		scopeIdentifiers = m.ProjectIDs
+		for _, id := range m.ProjectIDs {
+			scopeNames = append(scopeNames, m.GetProjectName(id))
+		}
 	}
+
 	err := internal.HandleOutputSmart(
 		"gcp",
 		m.Format,
 		m.OutputDirectory,
 		m.Verbosity,
 		m.WrapTable,
-		"project",    // scopeType
-		m.ProjectIDs, // scopeIdentifiers
-		scopeNames,   // scopeNames
+		scopeType,
+		scopeIdentifiers,
+		scopeNames,
 		m.Account,
 		output,
 	)
