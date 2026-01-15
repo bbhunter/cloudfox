@@ -110,32 +110,6 @@ func (m *PrivescModule) Execute(ctx context.Context, logger internal.Logger) {
 	m.OrgNames = result.OrgNames
 	m.FolderNames = result.FolderNames
 
-	// Update hierarchy with discovered org names so path builder uses display names
-	if m.Hierarchy != nil && len(m.OrgIDs) > 0 {
-		for _, orgID := range m.OrgIDs {
-			orgName := m.OrgNames[orgID]
-			// Check if org exists in hierarchy and update display name if needed
-			found := false
-			for i := range m.Hierarchy.Organizations {
-				if m.Hierarchy.Organizations[i].ID == orgID {
-					if orgName != "" && m.Hierarchy.Organizations[i].DisplayName == "" {
-						m.Hierarchy.Organizations[i].DisplayName = orgName
-					}
-					found = true
-					break
-				}
-			}
-			// If org not in hierarchy, add it
-			if !found && orgName != "" {
-				m.Hierarchy.Organizations = append(m.Hierarchy.Organizations, gcpinternal.OrgScope{
-					ID:          orgID,
-					DisplayName: orgName,
-					Accessible:  true,
-				})
-			}
-		}
-	}
-
 	// Organize project paths by project ID
 	for _, path := range result.ProjectPaths {
 		if path.ScopeType == "project" && path.ScopeID != "" {
@@ -185,18 +159,16 @@ func (m *PrivescModule) addPathToLoot(path privescservice.PrivescPath) {
 	}
 
 	lootFile.Contents += fmt.Sprintf(
-		"# Method: %s [%s]\n"+
+		"# Method: %s\n"+
 			"# Principal: %s (%s)\n"+
 			"# Scope: %s\n"+
 			"# Target: %s\n"+
-			"# Risk Level: %s\n"+
 			"# Permissions: %s\n"+
 			"%s\n\n",
-		path.Method, path.RiskLevel,
+		path.Method,
 		path.Principal, path.PrincipalType,
 		scopeInfo,
 		path.TargetResource,
-		path.RiskLevel,
 		strings.Join(path.Permissions, ", "),
 		path.ExploitCommand,
 	)
@@ -218,7 +190,6 @@ func (m *PrivescModule) getHeader() []string {
 		"Source Principal",
 		"Source Principal Type",
 		"Action (Method)",
-		"Risk Level",
 		"Target Resource",
 		"Permissions",
 	}
@@ -239,7 +210,6 @@ func (m *PrivescModule) pathsToTableBody(paths []privescservice.PrivescPath) [][
 			path.Principal,
 			path.PrincipalType,
 			path.Method,
-			path.RiskLevel,
 			path.TargetResource,
 			strings.Join(path.Permissions, ", "),
 		})
@@ -288,12 +258,13 @@ func (m *PrivescModule) writeHierarchicalOutput(ctx context.Context, logger inte
 		ProjectLevelData: make(map[string]internal.CloudfoxOutput),
 	}
 
-	// Determine org ID - prefer discovered orgs, fall back to hierarchy
+	// Determine org ID - prefer hierarchy (for consistent output paths across modules),
+	// fall back to discovered orgs if hierarchy doesn't have org info
 	orgID := ""
-	if len(m.OrgIDs) > 0 {
-		orgID = m.OrgIDs[0]
-	} else if m.Hierarchy != nil && len(m.Hierarchy.Organizations) > 0 {
+	if m.Hierarchy != nil && len(m.Hierarchy.Organizations) > 0 {
 		orgID = m.Hierarchy.Organizations[0].ID
+	} else if len(m.OrgIDs) > 0 {
+		orgID = m.OrgIDs[0]
 	}
 
 	if orgID != "" {

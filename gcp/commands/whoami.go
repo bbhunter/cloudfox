@@ -21,6 +21,7 @@ import (
 // Flags for whoami command
 var whoamiExtended bool
 var whoamiGroups []string
+var whoamiGroupsFile string
 
 var GCPWhoAmICommand = &cobra.Command{
 	Use:     globals.GCP_WHOAMI_MODULE_NAME,
@@ -41,13 +42,19 @@ With --extended flag (adds):
 With --groups flag:
 - Provide known group email addresses when group enumeration is permission denied
 - Role bindings from these groups will be included in the output
-- Use comma-separated list: --groups=group1@domain.com,group2@domain.com`,
+- Use comma-separated list: --groups=group1@domain.com,group2@domain.com
+
+With --groupslist flag:
+- Import groups from a file (one group per line)
+- Same behavior as --groups but reads from file
+- Example: --groupslist=groups.txt`,
 	Run: runGCPWhoAmICommand,
 }
 
 func init() {
 	GCPWhoAmICommand.Flags().BoolVarP(&whoamiExtended, "extended", "e", false, "Enable extended enumeration (impersonation targets, privilege escalation paths)")
 	GCPWhoAmICommand.Flags().StringSliceVarP(&whoamiGroups, "groups", "g", []string{}, "Comma-separated list of known group email addresses (used when group enumeration is permission denied)")
+	GCPWhoAmICommand.Flags().StringVar(&whoamiGroupsFile, "groupslist", "", "Path to file containing group email addresses (one per line)")
 }
 
 // ------------------------------
@@ -114,7 +121,6 @@ type ImpersonationTarget struct {
 type PrivilegeEscalationPath struct {
 	Name        string
 	Description string
-	Risk        string // CRITICAL, HIGH, MEDIUM
 	Command     string
 }
 
@@ -156,6 +162,13 @@ func runGCPWhoAmICommand(cmd *cobra.Command, args []string) {
 		return
 	}
 
+	// Combine groups from --groups flag and --groupslist file
+	allGroups := whoamiGroups
+	if whoamiGroupsFile != "" {
+		fileGroups := internal.LoadFileLinesIntoArray(whoamiGroupsFile)
+		allGroups = append(allGroups, fileGroups...)
+	}
+
 	// Create module instance
 	module := &WhoAmIModule{
 		BaseGCPModule:        gcpinternal.NewBaseGCPModule(cmdCtx),
@@ -165,7 +178,7 @@ func runGCPWhoAmICommand(cmd *cobra.Command, args []string) {
 		DangerousPermissions: []string{},
 		LootMap:              make(map[string]*internal.LootFile),
 		Extended:             whoamiExtended,
-		ProvidedGroups:       whoamiGroups,
+		ProvidedGroups:       allGroups,
 	}
 
 	// Initialize loot files
@@ -331,8 +344,34 @@ func (m *WhoAmIModule) getOrganizationContext(ctx context.Context, logger intern
 	}
 }
 
+// normalizeGroupEmail ensures group has full email format
+// If group doesn't contain @, tries to infer domain from identity email
+func (m *WhoAmIModule) normalizeGroupEmail(group string) string {
+	if strings.Contains(group, "@") {
+		return group
+	}
+
+	// Try to infer domain from identity email
+	if m.Identity.Email != "" && strings.Contains(m.Identity.Email, "@") {
+		parts := strings.SplitN(m.Identity.Email, "@", 2)
+		if len(parts) == 2 {
+			return group + "@" + parts[1]
+		}
+	}
+
+	// Return as-is if we can't infer domain
+	return group
+}
+
 // getGroupMemberships retrieves the groups that the current identity is a member of
 func (m *WhoAmIModule) getGroupMemberships(ctx context.Context, logger internal.Logger) {
+	// Normalize provided groups to full email format
+	var normalizedGroups []string
+	for _, group := range m.ProvidedGroups {
+		normalizedGroups = append(normalizedGroups, m.normalizeGroupEmail(group))
+	}
+	m.ProvidedGroups = normalizedGroups
+
 	// Store provided groups
 	m.Identity.GroupsProvided = m.ProvidedGroups
 
@@ -649,7 +688,6 @@ func (m *WhoAmIModule) identifyPrivEscPaths(ctx context.Context, logger internal
 			path := PrivilegeEscalationPath{
 				Name:        fmt.Sprintf("Impersonate %s", target.ServiceAccount),
 				Description: "Can generate access tokens for this service account",
-				Risk:        "HIGH",
 				Command:     fmt.Sprintf("gcloud auth print-access-token --impersonate-service-account=%s", target.ServiceAccount),
 			}
 			m.PrivEscPaths = append(m.PrivEscPaths, path)
@@ -659,7 +697,6 @@ func (m *WhoAmIModule) identifyPrivEscPaths(ctx context.Context, logger internal
 			path := PrivilegeEscalationPath{
 				Name:        fmt.Sprintf("Create key for %s", target.ServiceAccount),
 				Description: "Can create persistent service account keys",
-				Risk:        "CRITICAL",
 				Command:     fmt.Sprintf("gcloud iam service-accounts keys create key.json --iam-account=%s", target.ServiceAccount),
 			}
 			m.PrivEscPaths = append(m.PrivEscPaths, path)
@@ -706,42 +743,36 @@ func getPrivEscPathsForRole(role, projectID string) []PrivilegeEscalationPath {
 		paths = append(paths, PrivilegeEscalationPath{
 			Name:        "Token Creator - Impersonate any SA",
 			Description: "Can generate access tokens for any service account in the project",
-			Risk:        "CRITICAL",
 			Command:     fmt.Sprintf("gcloud iam service-accounts list --project=%s", projectID),
 		})
 	case "roles/iam.serviceAccountKeyAdmin":
 		paths = append(paths, PrivilegeEscalationPath{
 			Name:        "Key Admin - Create persistent keys",
 			Description: "Can create service account keys for any SA",
-			Risk:        "CRITICAL",
 			Command:     fmt.Sprintf("gcloud iam service-accounts list --project=%s", projectID),
 		})
 	case "roles/cloudfunctions.admin":
 		paths = append(paths, PrivilegeEscalationPath{
 			Name:        "Cloud Functions Admin - Code Execution",
 			Description: "Can deploy Cloud Functions with SA permissions",
-			Risk:        "HIGH",
 			Command:     "gcloud functions deploy malicious-function --runtime=python39 --trigger-http --service-account=<target-sa>",
 		})
 	case "roles/compute.admin":
 		paths = append(paths, PrivilegeEscalationPath{
 			Name:        "Compute Admin - Metadata Injection",
 			Description: "Can add startup scripts with SA access",
-			Risk:        "HIGH",
 			Command:     "gcloud compute instances add-metadata <instance> --metadata=startup-script='curl -H \"Metadata-Flavor: Google\" http://metadata/...'",
 		})
 	case "roles/container.admin":
 		paths = append(paths, PrivilegeEscalationPath{
 			Name:        "Container Admin - Pod Deployment",
 			Description: "Can deploy pods with service account access",
-			Risk:        "HIGH",
 			Command:     fmt.Sprintf("gcloud container clusters get-credentials <cluster> --project=%s", projectID),
 		})
 	case "roles/owner", "roles/editor":
 		paths = append(paths, PrivilegeEscalationPath{
 			Name:        "Owner/Editor - Full Project Access",
 			Description: "Has full control over project resources",
-			Risk:        "CRITICAL",
 			Command:     fmt.Sprintf("gcloud projects get-iam-policy %s", projectID),
 		})
 	}
@@ -801,11 +832,10 @@ func (m *WhoAmIModule) generateLoot() {
 		// Privilege escalation loot
 		for _, path := range m.PrivEscPaths {
 			m.LootMap["whoami-privesc"].Contents += fmt.Sprintf(
-				"## %s [%s]\n"+
+				"## %s\n"+
 					"# %s\n"+
 					"%s\n\n",
 				path.Name,
-				path.Risk,
 				path.Description,
 				path.Command,
 			)
@@ -1033,7 +1063,6 @@ func (m *WhoAmIModule) buildTables() []internal.TableFile {
 		if len(m.PrivEscPaths) > 0 {
 			privescHeader := []string{
 				"Path Name",
-				"Risk",
 				"Description",
 				"Command",
 			}
@@ -1042,7 +1071,6 @@ func (m *WhoAmIModule) buildTables() []internal.TableFile {
 			for _, path := range m.PrivEscPaths {
 				privescBody = append(privescBody, []string{
 					path.Name,
-					path.Risk,
 					path.Description,
 					path.Command,
 				})
@@ -1062,6 +1090,7 @@ func (m *WhoAmIModule) buildTables() []internal.TableFile {
 func (m *WhoAmIModule) collectLootFiles() []internal.LootFile {
 	var lootFiles []internal.LootFile
 	for _, loot := range m.LootMap {
+		// Include loot files that have content and aren't just header comments
 		if loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# Generated by CloudFox\n\n") {
 			lootFiles = append(lootFiles, *loot)
 		}
