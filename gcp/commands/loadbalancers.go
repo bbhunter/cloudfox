@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 
+	diagramservice "github.com/BishopFox/cloudfox/gcp/services/diagramService"
 	loadbalancerservice "github.com/BishopFox/cloudfox/gcp/services/loadbalancerService"
 	"github.com/BishopFox/cloudfox/globals"
 	"github.com/BishopFox/cloudfox/internal"
@@ -192,11 +193,75 @@ func (m *LoadBalancersModule) addToLoot(projectID string, lb loadbalancerservice
 }
 
 func (m *LoadBalancersModule) writeOutput(ctx context.Context, logger internal.Logger) {
+	// Generate ASCII diagram and add to loot
+	diagram := m.generateLoadBalancerDiagram()
+	if diagram != "" {
+		// Add diagram to the first project's loot
+		for projectID := range m.LootMap {
+			if m.LootMap[projectID] == nil {
+				m.LootMap[projectID] = make(map[string]*internal.LootFile)
+			}
+			m.LootMap[projectID]["loadbalancers-diagram"] = &internal.LootFile{
+				Name:     "loadbalancers-diagram",
+				Contents: diagram,
+			}
+			break // Only add once for flat output
+		}
+
+		// For hierarchical output, add to all projects
+		if m.Hierarchy != nil && !m.FlatOutput {
+			for projectID := range m.LootMap {
+				if m.LootMap[projectID] == nil {
+					m.LootMap[projectID] = make(map[string]*internal.LootFile)
+				}
+				m.LootMap[projectID]["loadbalancers-diagram"] = &internal.LootFile{
+					Name:     "loadbalancers-diagram",
+					Contents: diagram,
+				}
+			}
+		}
+	}
+
 	if m.Hierarchy != nil && !m.FlatOutput {
 		m.writeHierarchicalOutput(ctx, logger)
 	} else {
 		m.writeFlatOutput(ctx, logger)
 	}
+}
+
+// ------------------------------
+// Diagram Generation
+// ------------------------------
+
+// generateLoadBalancerDiagram creates an ASCII visualization of load balancer architecture
+func (m *LoadBalancersModule) generateLoadBalancerDiagram() string {
+	allLBs := m.getAllLoadBalancers()
+	if len(allLBs) == 0 {
+		return ""
+	}
+
+	// Convert to diagram service types
+	diagramLBs := make([]diagramservice.LoadBalancerInfo, 0, len(allLBs))
+	for _, lb := range allLBs {
+		diagramLBs = append(diagramLBs, diagramservice.LoadBalancerInfo{
+			Name:            lb.Name,
+			Type:            lb.Type,
+			Scheme:          lb.Scheme,
+			IPAddress:       lb.IPAddress,
+			Port:            lb.Port,
+			Region:          lb.Region,
+			BackendServices: lb.BackendServices,
+			SecurityPolicy:  lb.SecurityPolicy,
+		})
+	}
+
+	// Determine project ID for header (use first project if multiple)
+	projectID := ""
+	if len(m.ProjectIDs) == 1 {
+		projectID = m.ProjectIDs[0]
+	}
+
+	return diagramservice.DrawLoadBalancerDiagram(diagramLBs, projectID, 90)
 }
 
 func (m *LoadBalancersModule) getLBHeader() []string {

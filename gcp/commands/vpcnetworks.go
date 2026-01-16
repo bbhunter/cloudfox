@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 
+	diagramservice "github.com/BishopFox/cloudfox/gcp/services/diagramService"
 	vpcservice "github.com/BishopFox/cloudfox/gcp/services/vpcService"
 	"github.com/BishopFox/cloudfox/globals"
 	"github.com/BishopFox/cloudfox/internal"
@@ -272,11 +273,101 @@ func (m *VPCNetworksModule) addPeeringToLoot(projectID string, peering vpcservic
 }
 
 func (m *VPCNetworksModule) writeOutput(ctx context.Context, logger internal.Logger) {
+	// Generate ASCII diagram and add to loot
+	diagram := m.generateVPCNetworksDiagram()
+	if diagram != "" {
+		// Add diagram to the first project's loot
+		for projectID := range m.LootMap {
+			if m.LootMap[projectID] == nil {
+				m.LootMap[projectID] = make(map[string]*internal.LootFile)
+			}
+			m.LootMap[projectID]["vpcnetworks-diagram"] = &internal.LootFile{
+				Name:     "vpcnetworks-diagram",
+				Contents: diagram,
+			}
+			break // Only add once for flat output
+		}
+
+		// For hierarchical output, add to all projects
+		if m.Hierarchy != nil && !m.FlatOutput {
+			for projectID := range m.LootMap {
+				if m.LootMap[projectID] == nil {
+					m.LootMap[projectID] = make(map[string]*internal.LootFile)
+				}
+				m.LootMap[projectID]["vpcnetworks-diagram"] = &internal.LootFile{
+					Name:     "vpcnetworks-diagram",
+					Contents: diagram,
+				}
+			}
+		}
+	}
+
 	if m.Hierarchy != nil && !m.FlatOutput {
 		m.writeHierarchicalOutput(ctx, logger)
 	} else {
 		m.writeFlatOutput(ctx, logger)
 	}
+}
+
+// ------------------------------
+// Diagram Generation
+// ------------------------------
+
+// generateVPCNetworksDiagram creates an ASCII visualization of VPC networks
+func (m *VPCNetworksModule) generateVPCNetworksDiagram() string {
+	allNetworks := m.getAllNetworks()
+	if len(allNetworks) == 0 {
+		return ""
+	}
+
+	// Convert networks to diagram service types
+	diagramNetworks := make([]diagramservice.NetworkInfo, 0, len(allNetworks))
+	for _, n := range allNetworks {
+		diagramNetworks = append(diagramNetworks, diagramservice.NetworkInfo{
+			Name:          n.Name,
+			ProjectID:     n.ProjectID,
+			RoutingMode:   n.RoutingMode,
+			MTU:           0, // VPCNetworkInfo doesn't have MTU
+			IsSharedVPC:   false,
+			SharedVPCRole: "",
+			PeeringCount:  len(n.Peerings),
+		})
+	}
+
+	// Build subnets by network
+	subnetsByNetwork := make(map[string][]diagramservice.SubnetInfo)
+	for _, s := range m.getAllSubnets() {
+		key := s.ProjectID + "/" + s.Network
+		subnetsByNetwork[key] = append(subnetsByNetwork[key], diagramservice.SubnetInfo{
+			Name:                  s.Name,
+			Region:                s.Region,
+			IPCIDRRange:           s.IPCidrRange,
+			PrivateIPGoogleAccess: s.PrivateIPGoogleAccess,
+			FlowLogsEnabled:       s.EnableFlowLogs,
+		})
+	}
+
+	// Convert peerings to diagram service types
+	diagramPeerings := make([]diagramservice.VPCPeeringInfo, 0, len(m.getAllPeerings()))
+	for _, p := range m.getAllPeerings() {
+		diagramPeerings = append(diagramPeerings, diagramservice.VPCPeeringInfo{
+			Name:          p.Name,
+			Network:       p.Network,
+			PeerNetwork:   p.PeerNetwork,
+			PeerProjectID: p.PeerProjectID,
+			State:         p.State,
+			ExportRoutes:  p.ExportCustomRoutes,
+			ImportRoutes:  p.ImportCustomRoutes,
+		})
+	}
+
+	// Determine project ID for header (use first project if multiple)
+	projectID := ""
+	if len(m.ProjectIDs) == 1 {
+		projectID = m.ProjectIDs[0]
+	}
+
+	return diagramservice.DrawVPCNetworksDiagram(diagramNetworks, subnetsByNetwork, diagramPeerings, projectID, 90)
 }
 
 func (m *VPCNetworksModule) getNetworksHeader() []string {
