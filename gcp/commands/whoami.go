@@ -122,11 +122,13 @@ type ImpersonationTarget struct {
 }
 
 type PrivilegeEscalationPath struct {
-	Name           string
+	ProjectID      string // GCP project ID
+	Permission     string // The permission/method enabling privesc
+	Category       string // Category of the privesc (SA Impersonation, Key Creation, etc.)
 	Description    string
-	Command        string
 	SourceRole     string // The role that grants this potential path
 	SourceScope    string // Where the role is granted (project ID, folder, org)
+	Command        string // Exploit command (for loot file only)
 	Confidence     string // "confirmed" (verified via API) or "potential" (inferred from role)
 	RequiredPerms  string // Specific permissions needed for this path
 }
@@ -138,6 +140,8 @@ type DataExfilCapability struct {
 	Category    string
 	RiskLevel   string
 	Description string
+	SourceRole  string // The role/principal that grants this capability
+	SourceScope string // Where the role is granted (project, folder, org)
 }
 
 // LateralMoveCapability represents a lateral movement capability for the current identity
@@ -147,6 +151,8 @@ type LateralMoveCapability struct {
 	Category    string
 	RiskLevel   string
 	Description string
+	SourceRole  string // The role/principal that grants this capability
+	SourceScope string // Where the role is granted (project, folder, org)
 }
 
 // ------------------------------
@@ -752,11 +758,13 @@ func (m *WhoAmIModule) identifyPrivEscPaths(ctx context.Context, logger internal
 	for _, target := range m.ImpersonationTargets {
 		if target.CanImpersonate {
 			path := PrivilegeEscalationPath{
-				Name:          fmt.Sprintf("Impersonate %s", target.ServiceAccount),
-				Description:   "Can generate access tokens for this service account",
-				Command:       fmt.Sprintf("gcloud auth print-access-token --impersonate-service-account=%s", target.ServiceAccount),
+				ProjectID:     target.ProjectID,
+				Permission:    "iam.serviceAccounts.getAccessToken",
+				Category:      "SA Impersonation",
+				Description:   fmt.Sprintf("Can generate access tokens for %s", target.ServiceAccount),
 				SourceRole:    "(via SA IAM policy)",
 				SourceScope:   fmt.Sprintf("project/%s", target.ProjectID),
+				Command:       fmt.Sprintf("gcloud auth print-access-token --impersonate-service-account=%s", target.ServiceAccount),
 				Confidence:    "confirmed",
 				RequiredPerms: "iam.serviceAccounts.getAccessToken",
 			}
@@ -765,11 +773,13 @@ func (m *WhoAmIModule) identifyPrivEscPaths(ctx context.Context, logger internal
 
 		if target.CanCreateKeys {
 			path := PrivilegeEscalationPath{
-				Name:          fmt.Sprintf("Create key for %s", target.ServiceAccount),
-				Description:   "Can create persistent service account keys",
-				Command:       fmt.Sprintf("gcloud iam service-accounts keys create key.json --iam-account=%s", target.ServiceAccount),
+				ProjectID:     target.ProjectID,
+				Permission:    "iam.serviceAccountKeys.create",
+				Category:      "Key Creation",
+				Description:   fmt.Sprintf("Can create persistent keys for %s", target.ServiceAccount),
 				SourceRole:    "(via SA IAM policy)",
 				SourceScope:   fmt.Sprintf("project/%s", target.ProjectID),
+				Command:       fmt.Sprintf("gcloud iam service-accounts keys create key.json --iam-account=%s", target.ServiceAccount),
 				Confidence:    "confirmed",
 				RequiredPerms: "iam.serviceAccountKeys.create",
 			}
@@ -792,12 +802,26 @@ func (m *WhoAmIModule) identifyPrivEscPathsFromCache(cache *gcpinternal.PrivescC
 		}
 
 		for _, method := range methods {
+			// Extract project ID from target if available
+			projectID := ""
+			if strings.Contains(method.Target, "projects/") {
+				parts := strings.Split(method.Target, "/")
+				for i, p := range parts {
+					if p == "projects" && i+1 < len(parts) {
+						projectID = parts[i+1]
+						break
+					}
+				}
+			}
+
 			privEscPath := PrivilegeEscalationPath{
-				Name:          method.Method,
+				ProjectID:     projectID,
+				Permission:    method.Method,
+				Category:      method.Category,
 				Description:   fmt.Sprintf("Risk Level: %s", method.RiskLevel),
-				Command:       "", // Cache doesn't store exploit commands
 				SourceRole:    principal,
 				SourceScope:   method.Target,
+				Command:       "", // Cache doesn't store exploit commands
 				Confidence:    strings.ToLower(method.RiskLevel),
 				RequiredPerms: strings.Join(method.Permissions, ", "),
 			}
@@ -839,11 +863,13 @@ func (m *WhoAmIModule) identifyPrivEscPathsFromAnalysis(ctx context.Context, rel
 		}
 
 		privEscPath := PrivilegeEscalationPath{
-			Name:          path.Method,
+			ProjectID:     path.ProjectID,
+			Permission:    path.Method,
+			Category:      path.Category,
 			Description:   path.Description,
-			Command:       path.ExploitCommand,
 			SourceRole:    fmt.Sprintf("%s (%s)", path.Principal, path.PrincipalType),
 			SourceScope:   fmt.Sprintf("%s/%s", path.ScopeType, path.ScopeID),
+			Command:       path.ExploitCommand,
 			Confidence:    strings.ToLower(path.RiskLevel),
 			RequiredPerms: strings.Join(path.Permissions, ", "),
 		}
@@ -963,6 +989,8 @@ func (m *WhoAmIModule) identifyDataExfilFromCache(cache *gcpinternal.AttackPathC
 				Category:    method.Category,
 				RiskLevel:   method.RiskLevel,
 				Description: method.Target,
+				SourceRole:  principal,
+				SourceScope: fmt.Sprintf("%s/%s", method.ScopeType, method.ScopeID),
 			}
 			m.DataExfilCapabilities = append(m.DataExfilCapabilities, capability)
 		}
@@ -1013,6 +1041,8 @@ func (m *WhoAmIModule) identifyDataExfilFromAnalysis(ctx context.Context, releva
 			Category:    path.Category,
 			RiskLevel:   path.RiskLevel,
 			Description: path.Description,
+			SourceRole:  fmt.Sprintf("%s (%s)", path.Principal, path.PrincipalType),
+			SourceScope: fmt.Sprintf("%s/%s", path.ScopeType, path.ScopeID),
 		}
 		m.DataExfilCapabilities = append(m.DataExfilCapabilities, capability)
 	}
@@ -1078,6 +1108,8 @@ func (m *WhoAmIModule) identifyLateralFromCache(cache *gcpinternal.AttackPathCac
 				Category:    method.Category,
 				RiskLevel:   method.RiskLevel,
 				Description: method.Target,
+				SourceRole:  principal,
+				SourceScope: fmt.Sprintf("%s/%s", method.ScopeType, method.ScopeID),
 			}
 			m.LateralMoveCapabilities = append(m.LateralMoveCapabilities, capability)
 		}
@@ -1128,6 +1160,8 @@ func (m *WhoAmIModule) identifyLateralFromAnalysis(ctx context.Context, relevant
 			Category:    path.Category,
 			RiskLevel:   path.RiskLevel,
 			Description: path.Description,
+			SourceRole:  fmt.Sprintf("%s (%s)", path.Principal, path.PrincipalType),
+			SourceScope: fmt.Sprintf("%s/%s", path.ScopeType, path.ScopeID),
 		}
 		m.LateralMoveCapabilities = append(m.LateralMoveCapabilities, capability)
 	}
@@ -1204,7 +1238,7 @@ func (m *WhoAmIModule) generateLoot() {
 					"# Required permissions: %s\n"+
 					"%s"+
 					"%s\n\n",
-				path.Name,
+				path.Permission,
 				path.Description,
 				path.SourceRole,
 				path.SourceScope,
@@ -1220,13 +1254,15 @@ func (m *WhoAmIModule) generateLoot() {
 			m.LootMap["whoami-data-exfil"].Contents += fmt.Sprintf(
 				"## %s\n"+
 					"# Category: %s\n"+
-					"# Project: %s\n"+
 					"# Description: %s\n"+
+					"# Source Role: %s\n"+
+					"# Source Scope: %s\n"+
 					"%s\n\n",
 				cap.Permission,
 				cap.Category,
-				cap.ProjectID,
 				cap.Description,
+				cap.SourceRole,
+				cap.SourceScope,
 				generateExfilExploitCmd(cap.Permission, cap.ProjectID),
 			)
 		}
@@ -1236,13 +1272,15 @@ func (m *WhoAmIModule) generateLoot() {
 			m.LootMap["whoami-lateral-movement"].Contents += fmt.Sprintf(
 				"## %s\n"+
 					"# Category: %s\n"+
-					"# Project: %s\n"+
 					"# Description: %s\n"+
+					"# Source Role: %s\n"+
+					"# Source Scope: %s\n"+
 					"%s\n\n",
 				cap.Permission,
 				cap.Category,
-				cap.ProjectID,
 				cap.Description,
+				cap.SourceRole,
+				cap.SourceScope,
 				generateLateralExploitCmd(cap.Permission, cap.ProjectID),
 			)
 		}
@@ -1519,77 +1557,50 @@ func (m *WhoAmIModule) buildTables() []internal.TableFile {
 			})
 		}
 
-		// Privilege escalation table
-		if len(m.PrivEscPaths) > 0 {
-			privescHeader := []string{
-				"Path Name",
-				"Description",
-				"Source Role",
+		// Combined attack paths table (privesc, data exfil, lateral movement)
+		totalPaths := len(m.PrivEscPaths) + len(m.DataExfilCapabilities) + len(m.LateralMoveCapabilities)
+		if totalPaths > 0 {
+			attackPathsHeader := []string{
+				"Type",
 				"Source Scope",
-				"Confidence",
-				"Required Perms",
-				"Command",
+				"Source Role",
+				"Permission",
+				"Category",
+				"Description",
 			}
 
-			var privescBody [][]string
+			var attackPathsBody [][]string
+
+			// Add privilege escalation paths
 			for _, path := range m.PrivEscPaths {
-				privescBody = append(privescBody, []string{
-					path.Name,
-					path.Description,
-					path.SourceRole,
+				attackPathsBody = append(attackPathsBody, []string{
+					"Privesc",
 					path.SourceScope,
-					path.Confidence,
-					path.RequiredPerms,
-					path.Command,
+					path.SourceRole,
+					path.Permission,
+					path.Category,
+					path.Description,
 				})
 			}
 
-			tables = append(tables, internal.TableFile{
-				Name:   "whoami-privesc",
-				Header: privescHeader,
-				Body:   privescBody,
-			})
-		}
-
-		// Data exfiltration capabilities table
-		if len(m.DataExfilCapabilities) > 0 {
-			exfilHeader := []string{
-				"Project ID",
-				"Permission",
-				"Category",
-				"Description",
-			}
-
-			var exfilBody [][]string
+			// Add data exfiltration capabilities
 			for _, cap := range m.DataExfilCapabilities {
-				exfilBody = append(exfilBody, []string{
-					cap.ProjectID,
+				attackPathsBody = append(attackPathsBody, []string{
+					"Exfil",
+					cap.SourceScope,
+					cap.SourceRole,
 					cap.Permission,
 					cap.Category,
 					cap.Description,
 				})
 			}
 
-			tables = append(tables, internal.TableFile{
-				Name:   "whoami-data-exfil",
-				Header: exfilHeader,
-				Body:   exfilBody,
-			})
-		}
-
-		// Lateral movement capabilities table
-		if len(m.LateralMoveCapabilities) > 0 {
-			lateralHeader := []string{
-				"Project ID",
-				"Permission",
-				"Category",
-				"Description",
-			}
-
-			var lateralBody [][]string
+			// Add lateral movement capabilities
 			for _, cap := range m.LateralMoveCapabilities {
-				lateralBody = append(lateralBody, []string{
-					cap.ProjectID,
+				attackPathsBody = append(attackPathsBody, []string{
+					"Lateral",
+					cap.SourceScope,
+					cap.SourceRole,
 					cap.Permission,
 					cap.Category,
 					cap.Description,
@@ -1597,9 +1608,9 @@ func (m *WhoAmIModule) buildTables() []internal.TableFile {
 			}
 
 			tables = append(tables, internal.TableFile{
-				Name:   "whoami-lateral-movement",
-				Header: lateralHeader,
-				Body:   lateralBody,
+				Name:   "whoami-attack-paths",
+				Header: attackPathsHeader,
+				Body:   attackPathsBody,
 			})
 		}
 	}
