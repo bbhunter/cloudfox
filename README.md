@@ -117,7 +117,7 @@ Additional policy notes (as of 09/2022):
 
 **Minimal Permissions (Single Project):**
 
-For basic enumeration of a single project, the `roles/viewer` role provides read access to most resources.
+For basic enumeration of a single project, the `roles/viewer` role provides read access to most resources (includes logging, monitoring, and compute/network viewing).
 
 **Comprehensive Permissions (Organization-Wide):**
 
@@ -130,12 +130,10 @@ For thorough security assessments across an entire organization:
 | **Organization** | `roles/cloudasset.viewer` | Query Cloud Asset Inventory for all resources |
 | **Organization** | `roles/cloudidentity.groupsViewer` | Enumerate Google Groups and memberships |
 | **Folder** | `roles/resourcemanager.folderViewer` | View folder hierarchy and metadata |
-| **Project** | `roles/viewer` | Read access to most project resources |
-| **Project** | `roles/monitoring.viewer` | View monitoring metrics and dashboards |
-| **Project** | `roles/logging.viewer` | Read audit logs and log-based metrics |
-| **Project** | `roles/compute.networkViewer` | View network configurations, firewall rules, VPCs |
-| **Project** | `roles/serviceusage.viewer` | View enabled APIs and service configurations |
+| **Project** | `roles/viewer` | Read access to most project resources (includes logging.viewer, monitoring.viewer, compute.viewer) |
 | **Tooling Project** | `roles/serviceusage.serviceUsageAdmin` | (Optional) Manage API quotas for CloudFox operations |
+
+> **Note:** The basic `roles/viewer` role includes permissions from `roles/logging.viewer`, `roles/monitoring.viewer`, and `roles/compute.networkViewer`, so these don't need to be granted separately.
 
 #### GCP API Requirements
 
