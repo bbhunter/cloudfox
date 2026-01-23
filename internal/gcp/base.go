@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 
@@ -23,7 +24,120 @@ var (
 	ErrPermissionDenied   = errors.New("permission denied")
 	ErrNotFound           = errors.New("resource not found")
 	ErrVPCServiceControls = errors.New("blocked by VPC Service Controls")
+	ErrSessionInvalid     = errors.New("session invalid")
 )
+
+// ------------------------------
+// Session Error Detection
+// ------------------------------
+// These functions detect when GCP credentials are invalid/expired
+// and exit with clear messages to prevent incomplete data.
+
+// IsGCPSessionError checks if an error indicates a session/authentication problem.
+// If true, the program should exit with a clear message - continuing would produce incomplete results.
+func IsGCPSessionError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Check for gRPC status errors
+	if grpcStatus, ok := status.FromError(err); ok {
+		switch grpcStatus.Code() {
+		case codes.Unauthenticated:
+			return true
+		}
+	}
+
+	// Check for REST API errors (googleapi.Error)
+	var googleErr *googleapi.Error
+	if errors.As(err, &googleErr) {
+		// 401 Unauthorized is always a session error
+		if googleErr.Code == 401 {
+			return true
+		}
+	}
+
+	// Check error message for common session issues
+	errStr := strings.ToLower(err.Error())
+
+	// Authentication failures
+	if strings.Contains(errStr, "unauthenticated") ||
+		strings.Contains(errStr, "invalid_grant") ||
+		strings.Contains(errStr, "token has been expired or revoked") ||
+		strings.Contains(errStr, "token expired") ||
+		strings.Contains(errStr, "refresh token") && strings.Contains(errStr, "expired") ||
+		strings.Contains(errStr, "credentials") && strings.Contains(errStr, "expired") ||
+		strings.Contains(errStr, "unable to authenticate") ||
+		strings.Contains(errStr, "authentication failed") ||
+		strings.Contains(errStr, "could not find default credentials") ||
+		strings.Contains(errStr, "application default credentials") && strings.Contains(errStr, "not found") {
+		return true
+	}
+
+	// Connection issues that indicate GCP is unreachable
+	if strings.Contains(errStr, "connection refused") ||
+		strings.Contains(errStr, "no such host") ||
+		strings.Contains(errStr, "connection reset") {
+		return true
+	}
+
+	// OAuth issues
+	if strings.Contains(errStr, "oauth2") && (strings.Contains(errStr, "token") || strings.Contains(errStr, "expired")) {
+		return true
+	}
+
+	return false
+}
+
+// CheckGCPSessionError checks if an error is a session error and exits if so.
+// Call this on every API error to ensure session issues are caught immediately.
+// Returns true if error was a session error (program will have exited).
+// Returns false if error is not a session error (caller should handle normally).
+func CheckGCPSessionError(err error, logger internal.Logger, moduleName string) bool {
+	if !IsGCPSessionError(err) {
+		return false
+	}
+
+	// Determine the specific session issue for a helpful message
+	errStr := strings.ToLower(err.Error())
+	var reason string
+
+	switch {
+	case strings.Contains(errStr, "invalid_grant") || strings.Contains(errStr, "token has been expired or revoked"):
+		reason = "Your GCP credentials have expired or been revoked"
+	case strings.Contains(errStr, "refresh token") && strings.Contains(errStr, "expired"):
+		reason = "Your refresh token has expired - please re-authenticate"
+	case strings.Contains(errStr, "could not find default credentials") || strings.Contains(errStr, "application default credentials"):
+		reason = "No GCP credentials found - run: gcloud auth application-default login"
+	case strings.Contains(errStr, "unauthenticated") || strings.Contains(errStr, "authentication failed"):
+		reason = "Authentication failed - your credentials are invalid"
+	case strings.Contains(errStr, "connection refused") || strings.Contains(errStr, "no such host"):
+		reason = "Cannot connect to GCP APIs - check your network connection"
+	default:
+		reason = "Session error detected - credentials may be invalid"
+	}
+
+	logger.ErrorM("", moduleName)
+	logger.ErrorM("╔════════════════════════════════════════════════════════════════╗", moduleName)
+	logger.ErrorM("║                    SESSION ERROR DETECTED                       ║", moduleName)
+	logger.ErrorM("╠════════════════════════════════════════════════════════════════╣", moduleName)
+	logger.ErrorM(fmt.Sprintf("║ %s", reason), moduleName)
+	logger.ErrorM("║                                                                  ║", moduleName)
+	logger.ErrorM("║ Your GCP session is no longer valid.                            ║", moduleName)
+	logger.ErrorM("║ Results may be incomplete - please fix and re-run.              ║", moduleName)
+	logger.ErrorM("╠════════════════════════════════════════════════════════════════╣", moduleName)
+	logger.ErrorM("║ Common fixes:                                                   ║", moduleName)
+	logger.ErrorM("║  • Re-authenticate: gcloud auth login                           ║", moduleName)
+	logger.ErrorM("║  • ADC login: gcloud auth application-default login             ║", moduleName)
+	logger.ErrorM("║  • Check account: gcloud auth list                              ║", moduleName)
+	logger.ErrorM("║  • Service account: check GOOGLE_APPLICATION_CREDENTIALS        ║", moduleName)
+	logger.ErrorM("╚════════════════════════════════════════════════════════════════╝", moduleName)
+	logger.ErrorM("", moduleName)
+	logger.ErrorM(fmt.Sprintf("Original error: %v", err), moduleName)
+
+	os.Exit(1)
+	return true // Never reached, but satisfies compiler
+}
 
 // ParseGCPError converts GCP API errors into cleaner, standardized error types
 // This should be used by all GCP service modules for consistent error handling
@@ -140,10 +254,15 @@ func IsAPINotEnabled(err error) bool {
 
 // HandleGCPError logs an appropriate message for a GCP API error and returns true if execution should continue
 // Returns false if the error is fatal and the caller should stop processing
+// IMPORTANT: This now checks for session errors first and will exit if credentials are invalid!
 func HandleGCPError(err error, logger internal.Logger, moduleName string, resourceDesc string) bool {
 	if err == nil {
 		return true // No error, continue
 	}
+
+	// CRITICAL: Check for session errors first - exit immediately if credentials are invalid
+	// This prevents incomplete data from being saved
+	CheckGCPSessionError(err, logger, moduleName)
 
 	// Parse the raw GCP error into a standardized error type
 	parsedErr := ParseGCPError(err, "")
