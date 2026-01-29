@@ -45,6 +45,7 @@ const GCP_BEYONDCORP_MODULE_NAME string = "beyondcorp"
 const GCP_ACCESSLEVELS_MODULE_NAME string = "access-levels"
 
 // Pentest modules
+const GCP_HIDDEN_ADMINS_MODULE_NAME string = "hidden-admins"
 const GCP_KEYS_MODULE_NAME string = "keys"
 const GCP_HMACKEYS_MODULE_NAME string = "hmac-keys"
 const GCP_PRIVESC_MODULE_NAME string = "privesc"
