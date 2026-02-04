@@ -304,11 +304,11 @@ func (m *CertManagerModule) writeOutput(ctx context.Context, logger internal.Log
 }
 
 func (m *CertManagerModule) getCertificatesHeader() []string {
-	return []string{"Project Name", "Project ID", "Name", "Type", "Domains", "Expires", "Days Left", "Wildcard", "Expired", "Self-Managed"}
+	return []string{"Project", "Name", "Type", "Domains", "Expires", "Days Left", "Wildcard", "Expired", "Self-Managed"}
 }
 
 func (m *CertManagerModule) getCertMapsHeader() []string {
-	return []string{"Project Name", "Project ID", "Name", "Location", "Entries", "Certificates"}
+	return []string{"Project", "Name", "Location", "Entries", "Certificates"}
 }
 
 func (m *CertManagerModule) certsToTableBody(certs []certmanagerservice.Certificate, sslCerts []certmanagerservice.SSLCertificate) [][]string {
@@ -330,7 +330,6 @@ func (m *CertManagerModule) certsToTableBody(certs []certmanagerservice.Certific
 
 		body = append(body, []string{
 			m.GetProjectName(cert.ProjectID),
-			cert.ProjectID,
 			cert.Name,
 			cert.Type,
 			strings.Join(cert.Domains, ", "),
@@ -358,7 +357,6 @@ func (m *CertManagerModule) certsToTableBody(certs []certmanagerservice.Certific
 
 		body = append(body, []string{
 			m.GetProjectName(cert.ProjectID),
-			cert.ProjectID,
 			cert.Name,
 			cert.Type,
 			strings.Join(cert.Domains, ", "),
@@ -378,7 +376,6 @@ func (m *CertManagerModule) certMapsToTableBody(certMaps []certmanagerservice.Ce
 	for _, certMap := range certMaps {
 		body = append(body, []string{
 			m.GetProjectName(certMap.ProjectID),
-			certMap.ProjectID,
 			certMap.Name,
 			certMap.Location,
 			fmt.Sprintf("%d", certMap.EntryCount),

@@ -114,17 +114,22 @@ func BuildScopeHierarchy(projectIDs []string, provider HierarchyDataProvider) (*
 			continue
 		}
 
+		// If ancestry is empty, mark as standalone
+		if len(ancestry) == 0 {
+			hierarchy.StandaloneProjs = append(hierarchy.StandaloneProjs, projectID)
+			continue
+		}
+
 		// Parse ancestry to find org and folder
+		// Note: ancestry is ordered from org -> folder(s) -> project
 		var foundOrg, foundFolder string
+		var lastFolderID string
 		for _, node := range ancestry {
 			switch node.Type {
 			case "organization":
 				foundOrg = node.ID
 			case "folder":
-				if foundFolder == "" {
-					// First folder is the direct parent
-					foundFolder = node.ID
-				}
+				lastFolderID = node.ID
 				folderToOrg[node.ID] = foundOrg
 				if _, exists := folderInfo[node.ID]; !exists {
 					folderInfo[node.ID] = FolderScope{
@@ -137,6 +142,10 @@ func BuildScopeHierarchy(projectIDs []string, provider HierarchyDataProvider) (*
 				}
 			case "project":
 				projectNames[node.ID] = node.DisplayName
+				// The folder directly containing this project is the last folder we saw
+				if lastFolderID != "" {
+					foundFolder = lastFolderID
+				}
 			}
 		}
 

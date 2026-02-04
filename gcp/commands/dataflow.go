@@ -176,7 +176,7 @@ func (m *DataflowModule) getTableHeader() []string {
 		"State",
 		"Location",
 		"Service Account",
-		"Attack Paths",
+		"SA Attack Paths",
 		"Public IPs",
 		"Workers",
 	}
@@ -191,7 +191,7 @@ func (m *DataflowModule) jobsToTableBody(jobs []dataflowservice.JobInfo) [][]str
 		}
 
 		// Check attack paths (privesc/exfil/lateral) for the service account
-		attackPaths := "-"
+		attackPaths := "run --attack-paths"
 		if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
 			if job.ServiceAccount != "" {
 				attackPaths = m.AttackPathCache.GetAttackSummary(job.ServiceAccount)

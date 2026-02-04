@@ -169,11 +169,11 @@ func (m *BeyondCorpModule) writeOutput(ctx context.Context, logger internal.Logg
 }
 
 func (m *BeyondCorpModule) getConnectorsHeader() []string {
-	return []string{"Project Name", "Project ID", "Name", "Location", "State", "Service Account", "Resource Role", "Resource Principal", "Public"}
+	return []string{"Project", "Name", "Location", "State", "Service Account", "IAM Binding Role", "IAM Binding Principal", "Public"}
 }
 
 func (m *BeyondCorpModule) getConnectionsHeader() []string {
-	return []string{"Project Name", "Project ID", "Name", "Location", "State", "Endpoint", "Gateway", "Resource Role", "Resource Principal", "Public"}
+	return []string{"Project", "Name", "Location", "State", "Endpoint", "Gateway", "IAM Binding Role", "IAM Binding Principal", "Public"}
 }
 
 func (m *BeyondCorpModule) connectorsToTableBody(connectors []beyondcorpservice.AppConnectorInfo) [][]string {
@@ -187,7 +187,6 @@ func (m *BeyondCorpModule) connectorsToTableBody(connectors []beyondcorpservice.
 		if len(connector.IAMBindings) == 0 {
 			body = append(body, []string{
 				m.GetProjectName(connector.ProjectID),
-				connector.ProjectID,
 				connector.Name,
 				connector.Location,
 				connector.State,
@@ -201,7 +200,6 @@ func (m *BeyondCorpModule) connectorsToTableBody(connectors []beyondcorpservice.
 				for _, member := range binding.Members {
 					body = append(body, []string{
 						m.GetProjectName(connector.ProjectID),
-						connector.ProjectID,
 						connector.Name,
 						connector.Location,
 						connector.State,
@@ -228,7 +226,6 @@ func (m *BeyondCorpModule) connectionsToTableBody(connections []beyondcorpservic
 		if len(conn.IAMBindings) == 0 {
 			body = append(body, []string{
 				m.GetProjectName(conn.ProjectID),
-				conn.ProjectID,
 				conn.Name,
 				conn.Location,
 				conn.State,
@@ -243,7 +240,6 @@ func (m *BeyondCorpModule) connectionsToTableBody(connections []beyondcorpservic
 				for _, member := range binding.Members {
 					body = append(body, []string{
 						m.GetProjectName(conn.ProjectID),
-						conn.ProjectID,
 						conn.Name,
 						conn.Location,
 						conn.State,

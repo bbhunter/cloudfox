@@ -1373,8 +1373,7 @@ func (m *NetworkTopologyModule) getNetworksHeader() []string {
 
 func (m *NetworkTopologyModule) getSubnetsHeader() []string {
 	return []string{
-		"Project Name",
-		"Project ID",
+		"Project",
 		"Subnet",
 		"Network",
 		"Region",
@@ -1382,8 +1381,8 @@ func (m *NetworkTopologyModule) getSubnetsHeader() []string {
 		"Private Google Access",
 		"Flow Logs",
 		"Purpose",
-		"Resource Role",
-		"Resource Principal",
+		"IAM Binding Role",
+		"IAM Binding Principal",
 	}
 }
 
@@ -1448,7 +1447,6 @@ func (m *NetworkTopologyModule) subnetsToTableBody(subnets []Subnet) [][]string 
 			for _, binding := range s.IAMBindings {
 				body = append(body, []string{
 					m.GetProjectName(s.ProjectID),
-					s.ProjectID,
 					s.Name,
 					m.extractNetworkName(s.Network),
 					s.Region,
@@ -1464,7 +1462,6 @@ func (m *NetworkTopologyModule) subnetsToTableBody(subnets []Subnet) [][]string 
 			// No IAM bindings - single row
 			body = append(body, []string{
 				m.GetProjectName(s.ProjectID),
-				s.ProjectID,
 				s.Name,
 				m.extractNetworkName(s.Network),
 				s.Region,

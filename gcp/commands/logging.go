@@ -15,9 +15,9 @@ import (
 
 var GCPLoggingCommand = &cobra.Command{
 	Use:     globals.GCP_LOGGING_MODULE_NAME,
-	Aliases: []string{"logs", "sinks", "log-sinks"},
-	Short:   "Enumerate Cloud Logging sinks and metrics with security analysis",
-	Long: `Enumerate Cloud Logging sinks and log-based metrics across projects.
+	Aliases: []string{"logs", "sinks", "log-sinks", "logging-gaps"},
+	Short:   "Enumerate Cloud Logging configuration including sinks, metrics, and logging gaps",
+	Long: `Enumerate Cloud Logging configuration across projects including sinks, metrics, and logging gaps.
 
 Features:
 - Lists all logging sinks (log exports)
@@ -25,19 +25,26 @@ Features:
 - Identifies cross-project log exports
 - Shows sink filters and exclusions
 - Lists log-based metrics for alerting
-- Generates gcloud commands for further analysis
+- Identifies resources with missing or incomplete logging
+- Generates gcloud commands for logging enumeration
 
-Security Columns:
+Log Sinks:
 - Destination: Where logs are exported (bucket, dataset, topic)
 - CrossProject: Whether logs are exported to another project
 - WriterIdentity: Service account used for export
 - Filter: What logs are included/excluded
 
-Attack Surface:
+Logging Gaps (resources with incomplete logging):
+- Cloud Storage buckets without access logging
+- VPC subnets without flow logs
+- GKE clusters with incomplete logging configuration
+- Cloud SQL instances without query/connection logging
+
+Security Considerations:
 - Cross-project exports may leak logs to external projects
 - Sink writer identity may have excessive permissions
 - Disabled sinks may indicate log evasion
-- Missing sinks may indicate lack of log retention`,
+- Missing logging on resources creates detection blind spots`,
 	Run: runGCPLoggingCommand,
 }
 
@@ -47,8 +54,9 @@ Attack Surface:
 type LoggingModule struct {
 	gcpinternal.BaseGCPModule
 
-	ProjectSinks   map[string][]LoggingService.SinkInfo   // projectID -> sinks
-	ProjectMetrics map[string][]LoggingService.MetricInfo // projectID -> metrics
+	ProjectSinks   map[string][]LoggingService.SinkInfo      // projectID -> sinks
+	ProjectMetrics map[string][]LoggingService.MetricInfo    // projectID -> metrics
+	ProjectGaps    map[string][]LoggingService.LoggingGap    // projectID -> logging gaps
 	LootMap        map[string]map[string]*internal.LootFile
 	mu             sync.Mutex
 }
@@ -77,6 +85,7 @@ func runGCPLoggingCommand(cmd *cobra.Command, args []string) {
 		BaseGCPModule:  gcpinternal.NewBaseGCPModule(cmdCtx),
 		ProjectSinks:   make(map[string][]LoggingService.SinkInfo),
 		ProjectMetrics: make(map[string][]LoggingService.MetricInfo),
+		ProjectGaps:    make(map[string][]LoggingService.LoggingGap),
 		LootMap:        make(map[string]map[string]*internal.LootFile),
 	}
 
@@ -91,9 +100,10 @@ func (m *LoggingModule) Execute(ctx context.Context, logger internal.Logger) {
 
 	allSinks := m.getAllSinks()
 	allMetrics := m.getAllMetrics()
+	allGaps := m.getAllGaps()
 
-	if len(allSinks) == 0 && len(allMetrics) == 0 {
-		logger.InfoM("No logging sinks or metrics found", globals.GCP_LOGGING_MODULE_NAME)
+	if len(allSinks) == 0 && len(allMetrics) == 0 && len(allGaps) == 0 {
+		logger.InfoM("No logging configuration found", globals.GCP_LOGGING_MODULE_NAME)
 		return
 	}
 
@@ -109,7 +119,7 @@ func (m *LoggingModule) Execute(ctx context.Context, logger internal.Logger) {
 		}
 	}
 
-	msg := fmt.Sprintf("Found %d sink(s), %d metric(s)", len(allSinks), len(allMetrics))
+	msg := fmt.Sprintf("Found %d sink(s), %d metric(s), %d logging gap(s)", len(allSinks), len(allMetrics), len(allGaps))
 	if crossProjectCount > 0 {
 		msg += fmt.Sprintf(" [%d cross-project]", crossProjectCount)
 	}
@@ -139,6 +149,15 @@ func (m *LoggingModule) getAllMetrics() []LoggingService.MetricInfo {
 	return all
 }
 
+// getAllGaps returns all logging gaps from all projects
+func (m *LoggingModule) getAllGaps() []LoggingService.LoggingGap {
+	var all []LoggingService.LoggingGap
+	for _, gaps := range m.ProjectGaps {
+		all = append(all, gaps...)
+	}
+	return all
+}
+
 // ------------------------------
 // Project Processor
 // ------------------------------
@@ -151,6 +170,7 @@ func (m *LoggingModule) processProject(ctx context.Context, projectID string, lo
 
 	var projectSinks []LoggingService.SinkInfo
 	var projectMetrics []LoggingService.MetricInfo
+	var projectGaps []LoggingService.LoggingGap
 
 	// Get sinks
 	sinks, err := ls.Sinks(projectID)
@@ -172,154 +192,123 @@ func (m *LoggingModule) processProject(ctx context.Context, projectID string, lo
 		projectMetrics = append(projectMetrics, metrics...)
 	}
 
+	// Get logging gaps
+	gaps, err := ls.LoggingGaps(projectID)
+	if err != nil {
+		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
+			gcpinternal.HandleGCPError(err, logger, globals.GCP_LOGGING_MODULE_NAME,
+				fmt.Sprintf("Could not enumerate logging gaps in project %s", projectID))
+		}
+	} else {
+		projectGaps = append(projectGaps, gaps...)
+	}
+
 	// Thread-safe store per-project
 	m.mu.Lock()
 	m.ProjectSinks[projectID] = projectSinks
 	m.ProjectMetrics[projectID] = projectMetrics
+	m.ProjectGaps[projectID] = projectGaps
 
 	// Initialize loot for this project
 	if m.LootMap[projectID] == nil {
 		m.LootMap[projectID] = make(map[string]*internal.LootFile)
-		m.LootMap[projectID]["sinks-commands"] = &internal.LootFile{
-			Name:     "sinks-commands",
-			Contents: "# Cloud Logging Sinks Commands\n# Generated by CloudFox\n\n",
-		}
-		m.LootMap[projectID]["sinks-cross-project"] = &internal.LootFile{
-			Name:     "sinks-cross-project",
-			Contents: "# Cross-Project Log Exports\n# Generated by CloudFox\n# These sinks export logs to external projects\n\n",
-		}
-		m.LootMap[projectID]["sinks-writer-identities"] = &internal.LootFile{
-			Name:     "sinks-writer-identities",
-			Contents: "# Logging Sink Writer Identities\n# Generated by CloudFox\n# Service accounts that have write access to destinations\n\n",
-		}
-		m.LootMap[projectID]["metrics-commands"] = &internal.LootFile{
-			Name:     "metrics-commands",
-			Contents: "# Cloud Logging Metrics Commands\n# Generated by CloudFox\n\n",
+		m.LootMap[projectID]["logging-commands"] = &internal.LootFile{
+			Name:     "logging-commands",
+			Contents: "# Cloud Logging Enumeration Commands\n# Generated by CloudFox\n\n",
 		}
 	}
 
-	for _, sink := range projectSinks {
-		m.addSinkToLoot(projectID, sink)
-	}
-	for _, metric := range projectMetrics {
-		m.addMetricToLoot(projectID, metric)
-	}
+	m.generateLootCommands(projectID, projectSinks, projectMetrics, projectGaps)
 	m.mu.Unlock()
 
 	if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-		logger.InfoM(fmt.Sprintf("Found %d sink(s), %d metric(s) in project %s", len(projectSinks), len(projectMetrics), projectID), globals.GCP_LOGGING_MODULE_NAME)
+		logger.InfoM(fmt.Sprintf("Found %d sink(s), %d metric(s), %d gap(s) in project %s", len(projectSinks), len(projectMetrics), len(projectGaps), projectID), globals.GCP_LOGGING_MODULE_NAME)
 	}
 }
 
 // ------------------------------
 // Loot File Management
 // ------------------------------
-func (m *LoggingModule) addSinkToLoot(projectID string, sink LoggingService.SinkInfo) {
-	lootFile := m.LootMap[projectID]["sinks-commands"]
+func (m *LoggingModule) generateLootCommands(projectID string, sinks []LoggingService.SinkInfo, metrics []LoggingService.MetricInfo, gaps []LoggingService.LoggingGap) {
+	lootFile := m.LootMap[projectID]["logging-commands"]
 	if lootFile == nil {
 		return
 	}
 
-	// Sinks commands file
-	lootFile.Contents += fmt.Sprintf(
-		"# Sink: %s (Project: %s)\n"+
-			"# Destination: %s (%s)\n"+
-			"gcloud logging sinks describe %s --project=%s\n",
-		sink.Name, sink.ProjectID,
-		sink.DestinationType, getDestinationName(sink),
-		sink.Name, sink.ProjectID,
-	)
+	// Project-level logging enumeration
+	lootFile.Contents += fmt.Sprintf("## Project: %s\n\n", projectID)
 
-	// Add destination-specific commands
-	switch sink.DestinationType {
-	case "storage":
-		if sink.DestinationBucket != "" {
-			lootFile.Contents += fmt.Sprintf(
-				"gsutil ls gs://%s/\n"+
-					"gsutil cat gs://%s/**/*.json 2>/dev/null | head -100\n",
-				sink.DestinationBucket, sink.DestinationBucket,
-			)
-		}
-	case "bigquery":
-		if sink.DestinationDataset != "" {
-			destProject := sink.DestinationProject
-			if destProject == "" {
-				destProject = sink.ProjectID
+	// Sinks enumeration commands
+	lootFile.Contents += "# ===== Log Sinks =====\n"
+	lootFile.Contents += fmt.Sprintf("gcloud logging sinks list --project=%s\n\n", projectID)
+
+	for _, sink := range sinks {
+		lootFile.Contents += fmt.Sprintf("# Sink: %s (%s)\n", sink.Name, sink.DestinationType)
+		lootFile.Contents += fmt.Sprintf("gcloud logging sinks describe %s --project=%s\n", sink.Name, projectID)
+
+		// Add destination-specific enumeration commands
+		switch sink.DestinationType {
+		case "storage":
+			if sink.DestinationBucket != "" {
+				lootFile.Contents += fmt.Sprintf("# Check bucket logging destination:\ngsutil ls gs://%s/\n", sink.DestinationBucket)
 			}
-			lootFile.Contents += fmt.Sprintf(
-				"bq ls %s:%s\n"+
-					"bq query --use_legacy_sql=false 'SELECT * FROM `%s.%s.*` LIMIT 100'\n",
-				destProject, sink.DestinationDataset,
-				destProject, sink.DestinationDataset,
-			)
-		}
-	case "pubsub":
-		if sink.DestinationTopic != "" {
-			destProject := sink.DestinationProject
-			if destProject == "" {
-				destProject = sink.ProjectID
+		case "bigquery":
+			if sink.DestinationDataset != "" {
+				destProject := sink.DestinationProject
+				if destProject == "" {
+					destProject = projectID
+				}
+				lootFile.Contents += fmt.Sprintf("# Check BigQuery logging destination:\nbq ls %s:%s\n", destProject, sink.DestinationDataset)
 			}
-			lootFile.Contents += fmt.Sprintf(
-				"gcloud pubsub subscriptions create log-capture --topic=%s --project=%s\n"+
-					"gcloud pubsub subscriptions pull log-capture --limit=10 --auto-ack --project=%s\n",
-				sink.DestinationTopic, destProject, destProject,
-			)
-		}
-	}
-	lootFile.Contents += "\n"
-
-	// Cross-project exports
-	if sink.IsCrossProject {
-		crossProjectLoot := m.LootMap[projectID]["sinks-cross-project"]
-		if crossProjectLoot != nil {
-			filter := sink.Filter
-			if filter == "" {
-				filter = "(no filter - all logs)"
+		case "pubsub":
+			if sink.DestinationTopic != "" {
+				destProject := sink.DestinationProject
+				if destProject == "" {
+					destProject = projectID
+				}
+				lootFile.Contents += fmt.Sprintf("# Check Pub/Sub logging destination:\ngcloud pubsub topics describe %s --project=%s\n", sink.DestinationTopic, destProject)
 			}
-			crossProjectLoot.Contents += fmt.Sprintf(
-				"# Sink: %s\n"+
-					"# Source Project: %s\n"+
-					"# Destination Project: %s\n"+
-					"# Destination Type: %s\n"+
-					"# Destination: %s\n"+
-					"# Filter: %s\n"+
-					"# Writer Identity: %s\n\n",
-				sink.Name,
-				sink.ProjectID,
-				sink.DestinationProject,
-				sink.DestinationType,
-				sink.Destination,
-				filter,
-				sink.WriterIdentity,
-			)
+		}
+
+		if sink.IsCrossProject {
+			lootFile.Contents += fmt.Sprintf("# NOTE: Cross-project export to %s\n", sink.DestinationProject)
+		}
+		lootFile.Contents += "\n"
+	}
+
+	// Metrics enumeration commands
+	if len(metrics) > 0 {
+		lootFile.Contents += "# ===== Log-based Metrics =====\n"
+		lootFile.Contents += fmt.Sprintf("gcloud logging metrics list --project=%s\n\n", projectID)
+
+		for _, metric := range metrics {
+			lootFile.Contents += fmt.Sprintf("# Metric: %s\n", metric.Name)
+			lootFile.Contents += fmt.Sprintf("gcloud logging metrics describe %s --project=%s\n\n", metric.Name, projectID)
 		}
 	}
 
-	// Writer identities
-	if sink.WriterIdentity != "" {
-		writerLoot := m.LootMap[projectID]["sinks-writer-identities"]
-		if writerLoot != nil {
-			writerLoot.Contents += fmt.Sprintf(
-				"# Sink: %s -> %s (%s)\n"+
-					"%s\n\n",
-				sink.Name, sink.DestinationType, getDestinationName(sink),
-				sink.WriterIdentity,
-			)
+	// Logging gaps enumeration commands
+	if len(gaps) > 0 {
+		lootFile.Contents += "# ===== Logging Configuration Gaps =====\n"
+		lootFile.Contents += "# Commands to verify logging configuration on resources with gaps\n\n"
+
+		for _, gap := range gaps {
+			lootFile.Contents += fmt.Sprintf("# %s: %s (%s) - %s\n", gap.ResourceType, gap.ResourceName, gap.Location, gap.LoggingStatus)
+			lootFile.Contents += fmt.Sprintf("# Missing: %s\n", strings.Join(gap.MissingLogs, ", "))
+
+			switch gap.ResourceType {
+			case "bucket":
+				lootFile.Contents += fmt.Sprintf("gsutil logging get gs://%s\n", gap.ResourceName)
+			case "subnet":
+				lootFile.Contents += fmt.Sprintf("gcloud compute networks subnets describe %s --region=%s --project=%s --format='value(logConfig)'\n", gap.ResourceName, gap.Location, projectID)
+			case "gke":
+				lootFile.Contents += fmt.Sprintf("gcloud container clusters describe %s --location=%s --project=%s --format='value(loggingService,loggingConfig)'\n", gap.ResourceName, gap.Location, projectID)
+			case "cloudsql":
+				lootFile.Contents += fmt.Sprintf("gcloud sql instances describe %s --project=%s --format='value(settings.databaseFlags)'\n", gap.ResourceName, projectID)
+			}
+			lootFile.Contents += "\n"
 		}
 	}
-}
-
-func (m *LoggingModule) addMetricToLoot(projectID string, metric LoggingService.MetricInfo) {
-	lootFile := m.LootMap[projectID]["metrics-commands"]
-	if lootFile == nil {
-		return
-	}
-	lootFile.Contents += fmt.Sprintf(
-		"# Metric: %s (Project: %s)\n"+
-			"gcloud logging metrics describe %s --project=%s\n\n",
-		metric.Name, metric.ProjectID,
-		metric.Name, metric.ProjectID,
-	)
 }
 
 // ------------------------------
@@ -357,6 +346,18 @@ func (m *LoggingModule) getMetricsHeader() []string {
 		"Description",
 		"Filter",
 		"Type",
+	}
+}
+
+// getGapsHeader returns the header for logging gaps table
+func (m *LoggingModule) getGapsHeader() []string {
+	return []string{
+		"Project",
+		"Type",
+		"Resource",
+		"Location",
+		"Status",
+		"Missing Logs",
 	}
 }
 
@@ -440,6 +441,29 @@ func (m *LoggingModule) metricsToTableBody(metrics []LoggingService.MetricInfo) 
 	return body
 }
 
+// gapsToTableBody converts logging gaps to table body rows
+func (m *LoggingModule) gapsToTableBody(gaps []LoggingService.LoggingGap) [][]string {
+	var body [][]string
+	for _, gap := range gaps {
+		missingLogs := strings.Join(gap.MissingLogs, "; ")
+
+		location := gap.Location
+		if location == "" {
+			location = "-"
+		}
+
+		body = append(body, []string{
+			m.GetProjectName(gap.ProjectID),
+			gap.ResourceType,
+			gap.ResourceName,
+			location,
+			gap.LoggingStatus,
+			missingLogs,
+		})
+	}
+	return body
+}
+
 // buildTablesForProject builds table files for a project
 func (m *LoggingModule) buildTablesForProject(projectID string) []internal.TableFile {
 	var tableFiles []internal.TableFile
@@ -460,6 +484,14 @@ func (m *LoggingModule) buildTablesForProject(projectID string) []internal.Table
 		})
 	}
 
+	if gaps, ok := m.ProjectGaps[projectID]; ok && len(gaps) > 0 {
+		tableFiles = append(tableFiles, internal.TableFile{
+			Name:   globals.GCP_LOGGING_MODULE_NAME + "-gaps",
+			Header: m.getGapsHeader(),
+			Body:   m.gapsToTableBody(gaps),
+		})
+	}
+
 	return tableFiles
 }
 
@@ -470,7 +502,19 @@ func (m *LoggingModule) writeHierarchicalOutput(ctx context.Context, logger inte
 		ProjectLevelData: make(map[string]internal.CloudfoxOutput),
 	}
 
+	// Collect all projects that have data
+	projectsWithData := make(map[string]bool)
 	for projectID := range m.ProjectSinks {
+		projectsWithData[projectID] = true
+	}
+	for projectID := range m.ProjectMetrics {
+		projectsWithData[projectID] = true
+	}
+	for projectID := range m.ProjectGaps {
+		projectsWithData[projectID] = true
+	}
+
+	for projectID := range projectsWithData {
 		tableFiles := m.buildTablesForProject(projectID)
 
 		// Collect loot for this project
@@ -484,24 +528,6 @@ func (m *LoggingModule) writeHierarchicalOutput(ctx context.Context, logger inte
 		}
 
 		outputData.ProjectLevelData[projectID] = LoggingOutput{Table: tableFiles, Loot: lootFiles}
-	}
-
-	// Also add projects that only have metrics
-	for projectID := range m.ProjectMetrics {
-		if _, exists := outputData.ProjectLevelData[projectID]; !exists {
-			tableFiles := m.buildTablesForProject(projectID)
-
-			var lootFiles []internal.LootFile
-			if projectLoot, ok := m.LootMap[projectID]; ok {
-				for _, loot := range projectLoot {
-					if loot != nil && loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# Generated by CloudFox\n\n") {
-						lootFiles = append(lootFiles, *loot)
-					}
-				}
-			}
-
-			outputData.ProjectLevelData[projectID] = LoggingOutput{Table: tableFiles, Loot: lootFiles}
-		}
 	}
 
 	pathBuilder := m.BuildPathBuilder()
@@ -524,6 +550,7 @@ func (m *LoggingModule) writeHierarchicalOutput(ctx context.Context, logger inte
 func (m *LoggingModule) writeFlatOutput(ctx context.Context, logger internal.Logger) {
 	allSinks := m.getAllSinks()
 	allMetrics := m.getAllMetrics()
+	allGaps := m.getAllGaps()
 
 	// Build table files
 	tableFiles := []internal.TableFile{}
@@ -541,6 +568,14 @@ func (m *LoggingModule) writeFlatOutput(ctx context.Context, logger internal.Log
 			Name:   globals.GCP_LOGGING_MODULE_NAME + "-metrics",
 			Header: m.getMetricsHeader(),
 			Body:   m.metricsToTableBody(allMetrics),
+		})
+	}
+
+	if len(allGaps) > 0 {
+		tableFiles = append(tableFiles, internal.TableFile{
+			Name:   globals.GCP_LOGGING_MODULE_NAME + "-gaps",
+			Header: m.getGapsHeader(),
+			Body:   m.gapsToTableBody(allGaps),
 		})
 	}
 

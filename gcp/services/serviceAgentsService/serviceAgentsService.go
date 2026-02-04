@@ -28,6 +28,7 @@ func NewWithSession(session *gcpinternal.SafeSession) *ServiceAgentsService {
 type ServiceAgentInfo struct {
 	Email          string   `json:"email"`
 	ProjectID      string   `json:"projectId"`
+	SourceProject  string   `json:"sourceProject"` // Project the agent belongs to (extracted from email)
 	ServiceName    string   `json:"serviceName"`
 	AgentType      string   `json:"agentType"` // compute, gke, cloudbuild, etc.
 	Roles          []string `json:"roles"`
@@ -155,8 +156,11 @@ func (s *ServiceAgentsService) GetServiceAgents(projectID string) ([]ServiceAgen
 				continue // Not a service agent
 			}
 
+			// Extract source project from email
+			sourceProject := s.extractSourceProject(email)
+
 			// Check for cross-project access
-			isCrossProject := !strings.Contains(email, projectID)
+			isCrossProject := sourceProject != "" && sourceProject != projectID
 
 			// Add or update agent
 			if agent, exists := seenAgents[email]; exists {
@@ -165,6 +169,7 @@ func (s *ServiceAgentsService) GetServiceAgents(projectID string) ([]ServiceAgen
 				agent := &ServiceAgentInfo{
 					Email:          email,
 					ProjectID:      projectID,
+					SourceProject:  sourceProject,
 					ServiceName:    agentType,
 					AgentType:      agentType,
 					Roles:          []string{binding.Role},
@@ -182,6 +187,68 @@ func (s *ServiceAgentsService) GetServiceAgents(projectID string) ([]ServiceAgen
 	}
 
 	return agents, nil
+}
+
+// extractSourceProject extracts the source project ID/number from a service agent email
+func (s *ServiceAgentsService) extractSourceProject(email string) string {
+	parts := strings.Split(email, "@")
+	if len(parts) != 2 {
+		return ""
+	}
+
+	prefix := parts[0]
+	domain := parts[1]
+
+	// Pattern: PROJECT_NUMBER@cloudservices.gserviceaccount.com
+	if domain == "cloudservices.gserviceaccount.com" {
+		return prefix // This is the project number
+	}
+
+	// Pattern: PROJECT_NUMBER-compute@developer.gserviceaccount.com
+	if strings.HasSuffix(domain, "developer.gserviceaccount.com") {
+		if idx := strings.Index(prefix, "-compute"); idx > 0 {
+			return prefix[:idx] // Project number
+		}
+	}
+
+	// Pattern: PROJECT_ID@appspot.gserviceaccount.com
+	if domain == "appspot.gserviceaccount.com" {
+		return prefix // This is the project ID
+	}
+
+	// Pattern: service-PROJECT_NUMBER@gcp-sa-*.iam.gserviceaccount.com
+	if strings.HasPrefix(domain, "gcp-sa-") && strings.HasSuffix(domain, ".iam.gserviceaccount.com") {
+		if strings.HasPrefix(prefix, "service-") {
+			return strings.TrimPrefix(prefix, "service-") // Project number
+		}
+		return prefix
+	}
+
+	// Pattern: PROJECT_NUMBER@compute-system.iam.gserviceaccount.com
+	if strings.HasSuffix(domain, ".iam.gserviceaccount.com") {
+		// Most service agents use project number as prefix
+		if strings.HasPrefix(prefix, "service-") {
+			return strings.TrimPrefix(prefix, "service-")
+		}
+		return prefix
+	}
+
+	// Pattern: PROJECT_NUMBER@cloudbuild.gserviceaccount.com
+	if domain == "cloudbuild.gserviceaccount.com" {
+		return prefix // Project number
+	}
+
+	// Pattern: PROJECT_NUMBER@container-engine-robot.iam.gserviceaccount.com
+	if strings.Contains(domain, "container-engine-robot") {
+		return prefix
+	}
+
+	// Pattern: PROJECT_NUMBER@serverless-robot-prod.iam.gserviceaccount.com
+	if strings.Contains(domain, "serverless-robot-prod") {
+		return prefix
+	}
+
+	return ""
 }
 
 func (s *ServiceAgentsService) identifyServiceAgent(email string) (string, string) {

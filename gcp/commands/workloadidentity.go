@@ -69,13 +69,14 @@ type WorkloadIdentityModule struct {
 	gcpinternal.BaseGCPModule
 
 	// Module-specific fields (GKE Workload Identity) - per-project for hierarchical output
-	ProjectClusters         map[string][]ClusterWorkloadIdentity                              // projectID -> clusters
-	ProjectBindings         map[string][]WorkloadIdentityBinding                              // projectID -> bindings
-	ProjectPools            map[string][]workloadidentityservice.WorkloadIdentityPool         // projectID -> pools
-	ProjectProviders        map[string][]workloadidentityservice.WorkloadIdentityProvider     // projectID -> providers
-	ProjectFederatedBindings map[string][]workloadidentityservice.FederatedIdentityBinding   // projectID -> federated bindings
-	LootMap                 map[string]map[string]*internal.LootFile                          // projectID -> loot files
-	mu                      sync.Mutex
+	ProjectClusters          map[string][]ClusterWorkloadIdentity                             // projectID -> clusters
+	ProjectBindings          map[string][]WorkloadIdentityBinding                             // projectID -> bindings
+	ProjectPools             map[string][]workloadidentityservice.WorkloadIdentityPool        // projectID -> pools
+	ProjectProviders         map[string][]workloadidentityservice.WorkloadIdentityProvider    // projectID -> providers
+	ProjectFederatedBindings map[string][]workloadidentityservice.FederatedIdentityBinding    // projectID -> federated bindings
+	LootMap                  map[string]map[string]*internal.LootFile                         // projectID -> loot files
+	AttackPathCache          *gcpinternal.AttackPathCache                                     // Cached attack path analysis results
+	mu                       sync.Mutex
 }
 
 // ------------------------------
@@ -118,6 +119,19 @@ func runGCPWorkloadIdentityCommand(cmd *cobra.Command, args []string) {
 // Module Execution
 // ------------------------------
 func (m *WorkloadIdentityModule) Execute(ctx context.Context, logger internal.Logger) {
+	// Get attack path cache from context (populated by all-checks or attack path analysis)
+	m.AttackPathCache = gcpinternal.GetAttackPathCacheFromContext(ctx)
+
+	// If no context cache, try loading from disk cache
+	if m.AttackPathCache == nil || !m.AttackPathCache.IsPopulated() {
+		diskCache, metadata, err := gcpinternal.LoadAttackPathCacheFromFile(m.OutputDirectory, m.Account)
+		if err == nil && diskCache != nil && diskCache.IsPopulated() {
+			logger.InfoM(fmt.Sprintf("Using attack path cache from disk (created: %s)",
+				metadata.CreatedAt.Format("2006-01-02 15:04:05")), globals.GCP_WORKLOAD_IDENTITY_MODULE_NAME)
+			m.AttackPathCache = diskCache
+		}
+	}
+
 	// Run enumeration with concurrency
 	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_WORKLOAD_IDENTITY_MODULE_NAME, m.processProject)
 
@@ -769,13 +783,12 @@ func (m *WorkloadIdentityModule) buildTables(
 
 	// Clusters table
 	clustersHeader := []string{
-		"Project Name",
-		"Project ID",
+		"Project",
 		"Cluster",
 		"Location",
-		"WI Enabled",
+		"Cluster WI Enabled",
 		"Workload Pool",
-		"Node Pools",
+		"Node Pools WI Enabled",
 	}
 
 	var clustersBody [][]string
@@ -789,14 +802,16 @@ func (m *WorkloadIdentityModule) buildTables(
 			workloadPool = cwi.WorkloadPool
 		}
 
+		// Format as "X of Y" for clarity
+		nodePoolsWI := fmt.Sprintf("%d of %d", cwi.NodePoolsWithWI, cwi.TotalNodePools)
+
 		clustersBody = append(clustersBody, []string{
 			m.GetProjectName(cwi.ProjectID),
-			cwi.ProjectID,
 			cwi.ClusterName,
 			cwi.Location,
 			wiEnabled,
 			workloadPool,
-			fmt.Sprintf("%d/%d", cwi.NodePoolsWithWI, cwi.TotalNodePools),
+			nodePoolsWI,
 		})
 	}
 
@@ -811,13 +826,13 @@ func (m *WorkloadIdentityModule) buildTables(
 
 	// Bindings table
 	bindingsHeader := []string{
-		"Project Name",
-		"Project ID",
+		"Project",
 		"Cluster",
 		"K8s Namespace",
 		"K8s Service Account",
 		"GCP Service Account",
-		"High Priv",
+		"High Privilege SA",
+		"SA Attack Paths",
 	}
 
 	var bindingsBody [][]string
@@ -827,14 +842,22 @@ func (m *WorkloadIdentityModule) buildTables(
 			highPriv = "Yes"
 		}
 
+		// Check attack paths for the GCP service account
+		attackPaths := "-"
+		if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
+			attackPaths = m.AttackPathCache.GetAttackSummary(binding.GCPServiceAccount)
+		} else {
+			attackPaths = "run --attack-paths"
+		}
+
 		bindingsBody = append(bindingsBody, []string{
 			m.GetProjectName(binding.ProjectID),
-			binding.ProjectID,
 			binding.ClusterName,
 			binding.KubernetesNS,
 			binding.KubernetesSA,
 			binding.GCPServiceAccount,
 			highPriv,
+			attackPaths,
 		})
 	}
 
@@ -854,8 +877,7 @@ func (m *WorkloadIdentityModule) buildTables(
 	// Federation Pools table
 	if len(pools) > 0 {
 		poolsHeader := []string{
-			"Project Name",
-			"Project ID",
+			"Project",
 			"Pool ID",
 			"Display Name",
 			"State",
@@ -870,7 +892,6 @@ func (m *WorkloadIdentityModule) buildTables(
 			}
 			poolsBody = append(poolsBody, []string{
 				m.GetProjectName(pool.ProjectID),
-				pool.ProjectID,
 				pool.PoolID,
 				pool.DisplayName,
 				pool.State,
@@ -888,13 +909,12 @@ func (m *WorkloadIdentityModule) buildTables(
 	// Federation Providers table
 	if len(providers) > 0 {
 		providersHeader := []string{
-			"Project Name",
-			"Project ID",
+			"Project",
 			"Pool",
 			"Provider",
 			"Type",
-			"Issuer/Account",
-			"Attribute Condition",
+			"OIDC Issuer / AWS Account",
+			"Access Condition",
 		}
 
 		var providersBody [][]string
@@ -913,7 +933,6 @@ func (m *WorkloadIdentityModule) buildTables(
 
 			providersBody = append(providersBody, []string{
 				m.GetProjectName(p.ProjectID),
-				p.ProjectID,
 				p.PoolID,
 				p.ProviderID,
 				p.ProviderType,
@@ -932,21 +951,29 @@ func (m *WorkloadIdentityModule) buildTables(
 	// Federated bindings table
 	if len(federatedBindings) > 0 {
 		fedBindingsHeader := []string{
-			"Project Name",
-			"Project ID",
+			"Project",
 			"Pool",
 			"GCP Service Account",
-			"External Subject",
+			"External Identity",
+			"SA Attack Paths",
 		}
 
 		var fedBindingsBody [][]string
 		for _, fb := range federatedBindings {
+			// Check attack paths for the GCP service account
+			attackPaths := "-"
+			if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
+				attackPaths = m.AttackPathCache.GetAttackSummary(fb.GCPServiceAccount)
+			} else {
+				attackPaths = "run --attack-paths"
+			}
+
 			fedBindingsBody = append(fedBindingsBody, []string{
 				m.GetProjectName(fb.ProjectID),
-				fb.ProjectID,
 				fb.PoolID,
 				fb.GCPServiceAccount,
 				fb.ExternalSubject,
+				attackPaths,
 			})
 		}
 

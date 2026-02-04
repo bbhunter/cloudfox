@@ -310,21 +310,21 @@ func (m *FirewallModule) writeOutput(ctx context.Context, logger internal.Logger
 // Table headers
 func (m *FirewallModule) getRulesHeader() []string {
 	return []string{
-		"Project Name", "Project ID", "Rule Name", "Network", "Direction",
+		"Project", "Rule Name", "Network", "Direction",
 		"Priority", "Source Ranges", "Allowed", "Targets", "Disabled", "Logging",
 	}
 }
 
 func (m *FirewallModule) getNetworksHeader() []string {
 	return []string{
-		"Project Name", "Project ID", "Network Name", "Routing Mode",
+		"Project", "Network Name", "Routing Mode",
 		"Subnets", "Peerings", "Auto Subnets",
 	}
 }
 
 func (m *FirewallModule) getSubnetsHeader() []string {
 	return []string{
-		"Project Name", "Project ID", "Network", "Subnet Name",
+		"Project", "Network", "Subnet Name",
 		"Region", "CIDR Range", "Private Google Access",
 	}
 }
@@ -354,7 +354,6 @@ func (m *FirewallModule) rulesToTableBody(rules []NetworkService.FirewallRuleInf
 
 		body = append(body, []string{
 			m.GetProjectName(rule.ProjectID),
-			rule.ProjectID,
 			rule.Name,
 			rule.Network,
 			rule.Direction,
@@ -386,7 +385,6 @@ func (m *FirewallModule) networksToTableBody(networks []NetworkService.VPCInfo) 
 
 		body = append(body, []string{
 			m.GetProjectName(network.ProjectID),
-			network.ProjectID,
 			network.Name,
 			network.RoutingMode,
 			fmt.Sprintf("%d", subnetCount),
@@ -403,7 +401,6 @@ func (m *FirewallModule) subnetsToTableBody(subnets []NetworkService.SubnetInfo)
 	for _, subnet := range subnets {
 		body = append(body, []string{
 			m.GetProjectName(subnet.ProjectID),
-			subnet.ProjectID,
 			subnet.Network,
 			subnet.Name,
 			subnet.Region,

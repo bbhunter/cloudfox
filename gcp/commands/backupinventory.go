@@ -622,8 +622,7 @@ func (m *BackupInventoryModule) getResourcesHeader() []string {
 
 func (m *BackupInventoryModule) getSnapshotsHeader() []string {
 	return []string{
-		"Project ID",
-		"Project Name",
+		"Project",
 		"Snapshot",
 		"Source Disk",
 		"Size (GB)",
@@ -632,8 +631,8 @@ func (m *BackupInventoryModule) getSnapshotsHeader() []string {
 		"Type",
 		"Auto Created",
 		"Locations",
-		"Resource Role",
-		"Resource Principal",
+		"IAM Binding Role",
+		"IAM Binding Principal",
 		"Public",
 	}
 }
@@ -702,7 +701,6 @@ func (m *BackupInventoryModule) snapshotsToTableBody(snapshots []ComputeSnapshot
 		// If no IAM bindings, still show the snapshot
 		if len(s.IAMBindings) == 0 {
 			body = append(body, []string{
-				s.ProjectID,
 				m.GetProjectName(s.ProjectID),
 				s.Name,
 				m.extractDiskName(s.SourceDisk),
@@ -721,7 +719,6 @@ func (m *BackupInventoryModule) snapshotsToTableBody(snapshots []ComputeSnapshot
 			for _, binding := range s.IAMBindings {
 				for _, member := range binding.Members {
 					body = append(body, []string{
-						s.ProjectID,
 						m.GetProjectName(s.ProjectID),
 						s.Name,
 						m.extractDiskName(s.SourceDisk),

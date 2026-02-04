@@ -269,28 +269,39 @@ func (m *BucketEnumModule) addObjectToLoot(projectID string, obj bucketenumservi
 		if obj.IsPublic {
 			publicMarker = " [PUBLIC]"
 		}
+		// Build local directory path: bucket/BUCKETNAME/OBJECTPATH/
+		localDir := fmt.Sprintf("bucket/%s/%s", obj.BucketName, getObjectDir(obj.ObjectName))
+		localCpCmd := fmt.Sprintf("gsutil cp gs://%s/%s %s", obj.BucketName, obj.ObjectName, localDir)
 		lootFile.Contents += fmt.Sprintf(
 			"# gs://%s/%s%s\n"+
 				"# Size: %d bytes, Type: %s\n"+
+				"mkdir -p %s\n"+
 				"%s\n\n",
 			obj.BucketName, obj.ObjectName, publicMarker,
 			obj.Size, obj.ContentType,
-			obj.DownloadCmd,
+			localDir,
+			localCpCmd,
 		)
 	}
 }
 
 func (m *BucketEnumModule) addFileToLoot(projectID string, file bucketenumservice.SensitiveFileInfo) {
+	// Build local directory path: bucket/BUCKETNAME/OBJECTPATH/
+	localDir := fmt.Sprintf("bucket/%s/%s", file.BucketName, getObjectDir(file.ObjectName))
+	localCpCmd := fmt.Sprintf("gsutil cp gs://%s/%s %s", file.BucketName, file.ObjectName, localDir)
+
 	// All files go to the general commands file
 	if lootFile := m.LootMap[projectID]["bucket-enum-commands"]; lootFile != nil {
 		lootFile.Contents += fmt.Sprintf(
 			"# [%s] %s - gs://%s/%s\n"+
 				"# Category: %s, Size: %d bytes\n"+
+				"mkdir -p %s\n"+
 				"%s\n\n",
 			file.RiskLevel, file.Category,
 			file.BucketName, file.ObjectName,
 			file.Description, file.Size,
-			file.DownloadCmd,
+			localDir,
+			localCpCmd,
 		)
 	}
 
@@ -300,11 +311,13 @@ func (m *BucketEnumModule) addFileToLoot(projectID string, file bucketenumservic
 			lootFile.Contents += fmt.Sprintf(
 				"# [%s] %s - gs://%s/%s\n"+
 					"# Category: %s, Size: %d bytes\n"+
+					"mkdir -p %s\n"+
 					"%s\n\n",
 				file.RiskLevel, file.Category,
 				file.BucketName, file.ObjectName,
 				file.Description, file.Size,
-				file.DownloadCmd,
+				localDir,
+				localCpCmd,
 			)
 		}
 	}
@@ -319,15 +332,15 @@ func (m *BucketEnumModule) writeOutput(ctx context.Context, logger internal.Logg
 }
 
 func (m *BucketEnumModule) getFilesHeader() []string {
-	return []string{"Project ID", "Project Name", "Bucket", "Object Name", "Category", "Size", "Public", "Description"}
+	return []string{"Project", "Bucket", "Object Name", "Category", "Size", "Public", "Description"}
 }
 
 func (m *BucketEnumModule) getSensitiveFilesHeader() []string {
-	return []string{"Project ID", "Project Name", "Bucket", "Object Name", "Category", "Size", "Public"}
+	return []string{"Project", "Bucket", "Object Name", "Category", "Size", "Public"}
 }
 
 func (m *BucketEnumModule) getAllObjectsHeader() []string {
-	return []string{"Project ID", "Project Name", "Bucket", "Object Name", "Content Type", "Size", "Public", "Updated"}
+	return []string{"Project", "Bucket", "Object Name", "Content Type", "Size", "Public", "Updated"}
 }
 
 func (m *BucketEnumModule) filesToTableBody(files []bucketenumservice.SensitiveFileInfo) [][]string {
@@ -338,7 +351,6 @@ func (m *BucketEnumModule) filesToTableBody(files []bucketenumservice.SensitiveF
 			publicStatus = "Yes"
 		}
 		body = append(body, []string{
-			file.ProjectID,
 			m.GetProjectName(file.ProjectID),
 			file.BucketName,
 			file.ObjectName,
@@ -360,7 +372,6 @@ func (m *BucketEnumModule) sensitiveFilesToTableBody(files []bucketenumservice.S
 				publicStatus = "Yes"
 			}
 			body = append(body, []string{
-				file.ProjectID,
 				m.GetProjectName(file.ProjectID),
 				file.BucketName,
 				file.ObjectName,
@@ -381,7 +392,6 @@ func (m *BucketEnumModule) allObjectsToTableBody(objects []bucketenumservice.Obj
 			publicStatus = "Yes"
 		}
 		body = append(body, []string{
-			obj.ProjectID,
 			m.GetProjectName(obj.ProjectID),
 			obj.BucketName,
 			obj.ObjectName,
@@ -539,6 +549,17 @@ func (m *BucketEnumModule) writeFlatOutput(ctx context.Context, logger internal.
 	if err != nil {
 		logger.ErrorM(fmt.Sprintf("Error writing output: %v", err), globals.GCP_BUCKETENUM_MODULE_NAME)
 	}
+}
+
+// getObjectDir returns the directory portion of an object path
+// e.g., "processReports-pilot-gcp-01/function-source.zip" -> "processReports-pilot-gcp-01/"
+// e.g., "file.txt" -> ""
+func getObjectDir(objectName string) string {
+	lastSlash := strings.LastIndex(objectName, "/")
+	if lastSlash == -1 {
+		return ""
+	}
+	return objectName[:lastSlash+1]
 }
 
 func formatFileSize(bytes int64) string {

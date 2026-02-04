@@ -91,15 +91,48 @@ func runGCPLateralMovementCommand(cmd *cobra.Command, args []string) {
 func (m *LateralMovementModule) Execute(ctx context.Context, logger internal.Logger) {
 	logger.InfoM("Mapping lateral movement paths...", GCP_LATERALMOVEMENT_MODULE_NAME)
 
-	// Analyze org and folder level lateral movement paths (runs once for all projects)
-	m.analyzeOrgFolderLateralPaths(ctx, logger)
+	var usedCache bool
 
-	// Process each project
-	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, GCP_LATERALMOVEMENT_MODULE_NAME, m.processProject)
+	// Check if attack path analysis was already run (via --attack-paths flag)
+	if cache := gcpinternal.GetAttackPathCacheFromContext(ctx); cache != nil && cache.HasRawData() {
+		if cachedResult, ok := cache.GetRawData().(*attackpathservice.CombinedAttackPathData); ok {
+			logger.InfoM("Using cached attack path analysis results", GCP_LATERALMOVEMENT_MODULE_NAME)
+			m.loadFromCachedData(cachedResult)
+			usedCache = true
+		}
+	}
 
-	// Consolidate all paths
-	for _, paths := range m.ProjectPaths {
-		m.AllPaths = append(m.AllPaths, paths...)
+	// If no context cache, try loading from disk cache
+	if !usedCache {
+		diskCache, metadata, err := gcpinternal.LoadAttackPathCacheFromFile(m.OutputDirectory, m.Account)
+		if err == nil && diskCache != nil && diskCache.HasRawData() {
+			if cachedResult, ok := diskCache.GetRawData().(*attackpathservice.CombinedAttackPathData); ok {
+				logger.InfoM(fmt.Sprintf("Using disk cache (created: %s, projects: %v)",
+					metadata.CreatedAt.Format("2006-01-02 15:04:05"), metadata.ProjectsIn), GCP_LATERALMOVEMENT_MODULE_NAME)
+				m.loadFromCachedData(cachedResult)
+				usedCache = true
+			}
+		}
+	}
+
+	// If no cached data, run full analysis
+	if !usedCache {
+		logger.InfoM("Running lateral movement analysis...", GCP_LATERALMOVEMENT_MODULE_NAME)
+
+		// Analyze org and folder level lateral movement paths (runs once for all projects)
+		m.analyzeOrgFolderLateralPaths(ctx, logger)
+
+		// Process each project
+		m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, GCP_LATERALMOVEMENT_MODULE_NAME, m.processProject)
+
+		// Consolidate all paths
+		for _, paths := range m.ProjectPaths {
+			m.AllPaths = append(m.AllPaths, paths...)
+		}
+
+		// Save to disk cache for future use (run full analysis for all attack types)
+		// Skip if running under all-checks (consolidated save happens at the end)
+		m.saveToAttackPathCache(ctx, logger)
 	}
 
 	// Check results
@@ -117,6 +150,72 @@ func (m *LateralMovementModule) Execute(ctx context.Context, logger internal.Log
 	logger.SuccessM(fmt.Sprintf("Found %d lateral movement path(s)", len(m.AllPaths)), GCP_LATERALMOVEMENT_MODULE_NAME)
 
 	m.writeOutput(ctx, logger)
+}
+
+// loadFromCachedData loads lateral movement paths from cached attack path data
+func (m *LateralMovementModule) loadFromCachedData(data *attackpathservice.CombinedAttackPathData) {
+	// Filter to only include lateral paths
+	for _, path := range data.AllPaths {
+		if path.PathType == "lateral" {
+			m.AllPaths = append(m.AllPaths, path)
+			// Also organize by project
+			if path.ScopeType == "project" && path.ScopeID != "" {
+				m.ProjectPaths[path.ScopeID] = append(m.ProjectPaths[path.ScopeID], path)
+			} else if path.ScopeType == "organization" {
+				m.ProjectPaths["organization"] = append(m.ProjectPaths["organization"], path)
+			} else if path.ScopeType == "folder" {
+				m.ProjectPaths["folder"] = append(m.ProjectPaths["folder"], path)
+			}
+		}
+	}
+}
+
+// saveToAttackPathCache saves attack path data to disk cache
+func (m *LateralMovementModule) saveToAttackPathCache(ctx context.Context, logger internal.Logger) {
+	// Skip saving if running under all-checks (consolidated save happens at the end)
+	if gcpinternal.IsAllChecksMode(ctx) {
+		logger.InfoM("Skipping individual cache save (all-checks mode)", GCP_LATERALMOVEMENT_MODULE_NAME)
+		return
+	}
+
+	// Run full analysis (all types) so we can cache for other modules
+	svc := attackpathservice.New()
+	fullResult, err := svc.CombinedAttackPathAnalysis(ctx, m.ProjectIDs, m.ProjectNames, "all")
+	if err != nil {
+		logger.InfoM(fmt.Sprintf("Could not run full attack path analysis for caching: %v", err), GCP_LATERALMOVEMENT_MODULE_NAME)
+		return
+	}
+
+	cache := gcpinternal.NewAttackPathCache()
+
+	// Populate cache with paths from all scopes
+	var pathInfos []gcpinternal.AttackPathInfo
+	for _, path := range fullResult.AllPaths {
+		pathInfos = append(pathInfos, gcpinternal.AttackPathInfo{
+			Principal:     path.Principal,
+			PrincipalType: path.PrincipalType,
+			Method:        path.Method,
+			PathType:      gcpinternal.AttackPathType(path.PathType),
+			Category:      path.Category,
+			RiskLevel:     path.RiskLevel,
+			Target:        path.TargetResource,
+			Permissions:   path.Permissions,
+			ScopeType:     path.ScopeType,
+			ScopeID:       path.ScopeID,
+		})
+	}
+	cache.PopulateFromPaths(pathInfos)
+	cache.SetRawData(fullResult)
+
+	// Save to disk
+	err = gcpinternal.SaveAttackPathCacheToFile(cache, m.ProjectIDs, m.OutputDirectory, m.Account, "1.0")
+	if err != nil {
+		logger.InfoM(fmt.Sprintf("Could not save attack path cache: %v", err), GCP_LATERALMOVEMENT_MODULE_NAME)
+	} else {
+		privesc, exfil, lateral := cache.GetStats()
+		logger.InfoM(fmt.Sprintf("Saved attack path cache to disk (%d privesc, %d exfil, %d lateral)",
+			privesc, exfil, lateral), GCP_LATERALMOVEMENT_MODULE_NAME)
+	}
 }
 
 // analyzeOrgFolderLateralPaths analyzes organization and folder level IAM for lateral movement permissions
@@ -755,13 +854,14 @@ func (m *LateralMovementModule) writeOutput(ctx context.Context, logger internal
 
 func (m *LateralMovementModule) getHeader() []string {
 	return []string{
-		"Scope Type",
-		"Scope Name",
-		"Principal",
+		"Project",
+		"Source",
 		"Principal Type",
+		"Principal",
 		"Method",
 		"Target Resource",
 		"Category",
+		"Binding Scope",
 		"Permissions",
 	}
 }
@@ -774,14 +874,25 @@ func (m *LateralMovementModule) pathsToTableBody(paths []attackpathservice.Attac
 			scopeName = path.ScopeID
 		}
 
+		// Format binding scope (where the IAM binding is defined)
+		bindingScope := "Project"
+		if path.ScopeType == "organization" {
+			bindingScope = "Organization"
+		} else if path.ScopeType == "folder" {
+			bindingScope = "Folder"
+		} else if path.ScopeType == "resource" {
+			bindingScope = "Resource"
+		}
+
 		body = append(body, []string{
-			path.ScopeType,
 			scopeName,
-			path.Principal,
+			path.ScopeType,
 			path.PrincipalType,
+			path.Principal,
 			path.Method,
 			path.TargetResource,
 			path.Category,
+			bindingScope,
 			strings.Join(path.Permissions, ", "),
 		})
 	}

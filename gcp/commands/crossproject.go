@@ -24,6 +24,7 @@ This module is designed for penetration testing and identifies:
 - Potential lateral movement paths between projects
 - Cross-project logging sinks (data exfiltration via logs)
 - Cross-project Pub/Sub exports (data exfiltration via messages)
+- Impersonation targets (which SAs can be impersonated in target projects)
 
 Features:
 - Maps cross-project service account access
@@ -32,6 +33,16 @@ Features:
 - Discovers Pub/Sub subscriptions exporting to other projects (BQ, GCS, push)
 - Generates exploitation commands for lateral movement
 - Highlights service accounts spanning trust boundaries
+- Shows impersonation targets when --attack-paths flag is used
+
+TIP: For a complete picture including impersonation targets and attack paths,
+use the global --attack-paths flag:
+
+  cloudfox gcp crossproject -l projects.txt --attack-paths
+
+This will populate the Target Type, Target Principal, and Attack Path columns
+with detailed information about what service accounts can be impersonated and
+what privesc/exfil/lateral movement capabilities exist.
 
 WARNING: Requires multiple projects to be specified for effective analysis.
 Use -p for single project or -l for project list file.`,
@@ -50,6 +61,7 @@ type CrossProjectModule struct {
 	CrossProjectSinks     []crossprojectservice.CrossProjectLoggingSink
 	CrossProjectPubSub    []crossprojectservice.CrossProjectPubSubExport
 	LootMap               map[string]*internal.LootFile
+	AttackPathCache       *gcpinternal.AttackPathCache
 }
 
 // ------------------------------
@@ -94,6 +106,19 @@ func runGCPCrossProjectCommand(cmd *cobra.Command, args []string) {
 // Module Execution
 // ------------------------------
 func (m *CrossProjectModule) Execute(ctx context.Context, logger internal.Logger) {
+	// Get attack path cache from context (populated by all-checks or attack path analysis)
+	m.AttackPathCache = gcpinternal.GetAttackPathCacheFromContext(ctx)
+
+	// If no context cache, try loading from disk cache
+	if m.AttackPathCache == nil || !m.AttackPathCache.IsPopulated() {
+		diskCache, metadata, err := gcpinternal.LoadAttackPathCacheFromFile(m.OutputDirectory, m.Account)
+		if err == nil && diskCache != nil && diskCache.IsPopulated() {
+			logger.InfoM(fmt.Sprintf("Using attack path cache from disk (created: %s)",
+				metadata.CreatedAt.Format("2006-01-02 15:04:05")), globals.GCP_CROSSPROJECT_MODULE_NAME)
+			m.AttackPathCache = diskCache
+		}
+	}
+
 	logger.InfoM(fmt.Sprintf("Analyzing cross-project access patterns across %d project(s)...", len(m.ProjectIDs)), globals.GCP_CROSSPROJECT_MODULE_NAME)
 
 	svc := crossprojectservice.New()
@@ -206,57 +231,6 @@ func (m *CrossProjectModule) addBindingToLoot(binding crossprojectservice.CrossP
 	}
 }
 
-// isCrossTenantPrincipal checks if a principal is from outside the organization
-func isCrossTenantPrincipal(principal string, projectIDs []string) bool {
-	// Extract service account email
-	email := strings.TrimPrefix(principal, "serviceAccount:")
-	email = strings.TrimPrefix(email, "user:")
-	email = strings.TrimPrefix(email, "group:")
-
-	// Check if the email domain is gserviceaccount.com (service account)
-	if strings.Contains(email, "@") && strings.Contains(email, ".iam.gserviceaccount.com") {
-		// Extract project from SA email
-		// Format: NAME@PROJECT.iam.gserviceaccount.com
-		parts := strings.Split(email, "@")
-		if len(parts) == 2 {
-			domain := parts[1]
-			saProject := strings.TrimSuffix(domain, ".iam.gserviceaccount.com")
-
-			// Check if SA's project is in our project list
-			for _, p := range projectIDs {
-				if p == saProject {
-					return false // It's from within our organization
-				}
-			}
-			return true // External SA
-		}
-	}
-
-	// Check for compute/appspot service accounts
-	if strings.Contains(email, "-compute@developer.gserviceaccount.com") ||
-		strings.Contains(email, "@appspot.gserviceaccount.com") {
-		// Extract project number/ID
-		parts := strings.Split(email, "@")
-		if len(parts) == 2 {
-			projectPart := strings.Split(parts[0], "-")[0]
-			for _, p := range projectIDs {
-				if strings.Contains(p, projectPart) {
-					return false
-				}
-			}
-			return true
-		}
-	}
-
-	// For regular users, check domain
-	if strings.Contains(email, "@") && !strings.Contains(email, "gserviceaccount.com") {
-		// Can't determine organization from email alone
-		return false
-	}
-
-	return false
-}
-
 func (m *CrossProjectModule) addServiceAccountToLoot(sa crossprojectservice.CrossProjectServiceAccount) {
 	// Add impersonation commands for cross-project SAs
 	m.LootMap["crossproject-commands"].Contents += fmt.Sprintf(
@@ -333,114 +307,134 @@ func (m *CrossProjectModule) writeOutput(ctx context.Context, logger internal.Lo
 
 func (m *CrossProjectModule) getHeader() []string {
 	return []string{
-		"Source Project Name",
-		"Source Project ID",
-		"Principal/Resource",
-		"Type",
-		"Action/Destination",
-		"Target Project Name",
-		"Target Project ID",
-		"External",
+		"Source Project",
+		"Source Type",
+		"Source Principal",
+		"Binding Type",
+		"Target Project",
+		"Target Type",
+		"Target Principal",
+		"Target Role",
+		"Attack Path",
 	}
 }
 
-func (m *CrossProjectModule) buildTableBody() [][]string {
-	var body [][]string
-
-	// Add cross-project bindings
-	for _, binding := range m.CrossBindings {
-		external := "No"
-		if isCrossTenantPrincipal(binding.Principal, m.ProjectIDs) {
-			external = "Yes"
-		}
-
-		body = append(body, []string{
-			m.GetProjectName(binding.SourceProject),
-			binding.SourceProject,
-			binding.Principal,
-			"IAM Binding",
-			binding.Role,
-			m.GetProjectName(binding.TargetProject),
-			binding.TargetProject,
-			external,
-		})
+// getImpersonationTarget checks if a role grants impersonation capabilities and returns the target
+// Returns (targetType, targetPrincipal) - both "-" if no impersonation target found
+func (m *CrossProjectModule) getImpersonationTarget(principal, role, targetProject string) (string, string) {
+	// Roles that grant impersonation capabilities
+	impersonationRoles := map[string]bool{
+		"roles/iam.serviceAccountTokenCreator": true,
+		"roles/iam.serviceAccountKeyAdmin":     true,
+		"iam.serviceAccountTokenCreator":       true,
+		"iam.serviceAccountKeyAdmin":           true,
 	}
 
-	// Add cross-project service accounts (one row per target access)
-	for _, sa := range m.CrossProjectSAs {
-		for _, access := range sa.TargetAccess {
-			// Parse access string (format: "project:role")
-			parts := strings.SplitN(access, ":", 2)
-			targetProject := ""
-			role := access
-			if len(parts) == 2 {
-				targetProject = parts[0]
-				role = parts[1]
+	cleanedRole := cleanRole(role)
+
+	// Check if this is an impersonation role
+	if !impersonationRoles[role] && !impersonationRoles[cleanedRole] &&
+		!strings.Contains(cleanedRole, "serviceAccountTokenCreator") &&
+		!strings.Contains(cleanedRole, "serviceAccountKeyAdmin") {
+		return "-", "-"
+	}
+
+	// Try to get impersonation targets from cache
+	if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
+		cleanedPrincipal := cleanPrincipal(principal)
+		targets := m.AttackPathCache.GetImpersonationTargets(cleanedPrincipal)
+		if len(targets) > 0 {
+			// Filter targets to those in the target project
+			var projectTargets []string
+			for _, t := range targets {
+				if strings.Contains(t, targetProject) {
+					projectTargets = append(projectTargets, t)
+				}
 			}
-
-			body = append(body, []string{
-				m.GetProjectName(sa.ProjectID),
-				sa.ProjectID,
-				sa.Email,
-				"Service Account",
-				role,
-				m.GetProjectName(targetProject),
-				targetProject,
-				"No",
-			})
+			if len(projectTargets) > 0 {
+				if len(projectTargets) == 1 {
+					return "Service Account", projectTargets[0]
+				}
+				return "Service Account", fmt.Sprintf("%d SAs", len(projectTargets))
+			}
+			// If no project-specific targets, show all targets
+			if len(targets) == 1 {
+				return "Service Account", targets[0]
+			}
+			return "Service Account", fmt.Sprintf("%d SAs", len(targets))
 		}
 	}
 
-	// Add lateral movement paths (one row per target role)
-	for _, path := range m.LateralMovementPaths {
-		for _, role := range path.TargetRoles {
-			body = append(body, []string{
-				m.GetProjectName(path.SourceProject),
-				path.SourceProject,
-				path.SourcePrincipal,
-				"Lateral Movement",
-				fmt.Sprintf("%s -> %s", path.AccessMethod, role),
-				m.GetProjectName(path.TargetProject),
-				path.TargetProject,
-				"No",
-			})
+	// No specific targets found in cache - this likely means the role was granted at the
+	// project level (not on specific SAs), which means ALL SAs in the target project can be impersonated
+	return "Service Account", fmt.Sprintf("All SAs in %s", m.GetProjectName(targetProject))
+}
+
+// getPrincipalTypeDisplay returns a human-readable type for the principal
+func getPrincipalTypeDisplay(principal string) string {
+	if strings.HasPrefix(principal, "serviceAccount:") {
+		return "Service Account"
+	} else if strings.HasPrefix(principal, "user:") {
+		return "User"
+	} else if strings.HasPrefix(principal, "group:") {
+		return "Group"
+	} else if strings.HasPrefix(principal, "domain:") {
+		return "Domain"
+	}
+	return "Unknown"
+}
+
+// cleanPrincipal removes common prefixes from principal strings for cleaner display
+func cleanPrincipal(principal string) string {
+	// Remove serviceAccount:, user:, group: prefixes
+	principal = strings.TrimPrefix(principal, "serviceAccount:")
+	principal = strings.TrimPrefix(principal, "user:")
+	principal = strings.TrimPrefix(principal, "group:")
+	principal = strings.TrimPrefix(principal, "domain:")
+	return principal
+}
+
+// cleanRole extracts just the role name from a full role path
+func cleanRole(role string) string {
+	// Handle full project paths like "projects/project-id/roles/customRole"
+	if strings.Contains(role, "/roles/") {
+		parts := strings.Split(role, "/roles/")
+		if len(parts) == 2 {
+			return parts[1]
 		}
 	}
+	// Handle standard roles like "roles/compute.admin"
+	if strings.HasPrefix(role, "roles/") {
+		return strings.TrimPrefix(role, "roles/")
+	}
+	return role
+}
 
-	// Add logging sinks
-	for _, sink := range m.CrossProjectSinks {
-		filter := sink.Filter
-		if filter == "" {
-			filter = "(all logs)"
-		}
+// extractCrossProjectResourceName extracts just the resource name from a full resource path
+func extractCrossProjectResourceName(path string) string {
+	// Handle various path formats
+	parts := strings.Split(path, "/")
+	if len(parts) > 0 {
+		return parts[len(parts)-1]
+	}
+	return path
+}
 
-		body = append(body, []string{
-			m.GetProjectName(sink.SourceProject),
-			sink.SourceProject,
-			sink.SinkName,
-			"Logging Sink",
-			fmt.Sprintf("%s: %s", sink.DestinationType, filter),
-			m.GetProjectName(sink.TargetProject),
-			sink.TargetProject,
-			"No",
-		})
+// getAttackPathForTarget returns attack path summary for a principal accessing a target project
+func (m *CrossProjectModule) getAttackPathForTarget(targetProject, principal string) string {
+	if m.AttackPathCache == nil || !m.AttackPathCache.IsPopulated() {
+		return "-"
 	}
 
-	// Add Pub/Sub exports
-	for _, export := range m.CrossProjectPubSub {
-		body = append(body, []string{
-			m.GetProjectName(export.SourceProject),
-			export.SourceProject,
-			export.SubscriptionName,
-			"Pub/Sub Export",
-			fmt.Sprintf("%s -> %s", export.ExportType, export.ExportDest),
-			m.GetProjectName(export.TargetProject),
-			export.TargetProject,
-			"No",
-		})
+	// Clean principal for lookup
+	cleanedPrincipal := cleanPrincipal(principal)
+
+	// Check if this is a service account
+	if strings.Contains(cleanedPrincipal, "@") && strings.Contains(cleanedPrincipal, ".iam.gserviceaccount.com") {
+		return m.AttackPathCache.GetAttackSummary(cleanedPrincipal)
 	}
 
-	return body
+	return "-"
 }
 
 func (m *CrossProjectModule) collectLootFiles() []internal.LootFile {
@@ -453,35 +447,168 @@ func (m *CrossProjectModule) collectLootFiles() []internal.LootFile {
 	return lootFiles
 }
 
+// buildTableBodyByTargetProject builds table bodies grouped by target project
+// Returns a map of targetProjectID -> [][]string (rows for that target project)
+func (m *CrossProjectModule) buildTableBodyByTargetProject() map[string][][]string {
+	bodyByProject := make(map[string][][]string)
+
+	// Add cross-project bindings
+	for _, binding := range m.CrossBindings {
+		principalType := getPrincipalTypeDisplay(binding.Principal)
+		principal := cleanPrincipal(binding.Principal)
+		role := cleanRole(binding.Role)
+		attackPath := m.getAttackPathForTarget(binding.TargetProject, binding.Principal)
+		targetType, targetPrincipal := m.getImpersonationTarget(binding.Principal, binding.Role, binding.TargetProject)
+
+		row := []string{
+			m.GetProjectName(binding.SourceProject),
+			principalType,
+			principal,
+			"IAM Binding",
+			m.GetProjectName(binding.TargetProject),
+			targetType,
+			targetPrincipal,
+			role,
+			attackPath,
+		}
+		bodyByProject[binding.TargetProject] = append(bodyByProject[binding.TargetProject], row)
+	}
+
+	// Add cross-project service accounts
+	for _, sa := range m.CrossProjectSAs {
+		for _, access := range sa.TargetAccess {
+			parts := strings.SplitN(access, ": ", 2)
+			targetProject := ""
+			role := access
+			if len(parts) == 2 {
+				targetProject = parts[0]
+				role = parts[1]
+			}
+
+			role = cleanRole(role)
+			attackPath := m.getAttackPathForTarget(targetProject, "serviceAccount:"+sa.Email)
+			targetType, targetPrincipal := m.getImpersonationTarget(sa.Email, role, targetProject)
+
+			row := []string{
+				m.GetProjectName(sa.ProjectID),
+				"Service Account",
+				sa.Email,
+				"IAM Binding",
+				m.GetProjectName(targetProject),
+				targetType,
+				targetPrincipal,
+				role,
+				attackPath,
+			}
+			bodyByProject[targetProject] = append(bodyByProject[targetProject], row)
+		}
+	}
+
+	// Add lateral movement paths
+	for _, path := range m.LateralMovementPaths {
+		for _, role := range path.TargetRoles {
+			principalType := getPrincipalTypeDisplay(path.SourcePrincipal)
+			principal := cleanPrincipal(path.SourcePrincipal)
+			cleanedRole := cleanRole(role)
+			attackPath := m.getAttackPathForTarget(path.TargetProject, path.SourcePrincipal)
+			targetType, targetPrincipal := m.getImpersonationTarget(path.SourcePrincipal, role, path.TargetProject)
+
+			row := []string{
+				m.GetProjectName(path.SourceProject),
+				principalType,
+				principal,
+				path.AccessMethod,
+				m.GetProjectName(path.TargetProject),
+				targetType,
+				targetPrincipal,
+				cleanedRole,
+				attackPath,
+			}
+			bodyByProject[path.TargetProject] = append(bodyByProject[path.TargetProject], row)
+		}
+	}
+
+	// Add logging sinks - these are resources, not principals
+	for _, sink := range m.CrossProjectSinks {
+		dest := sink.DestinationType
+		if sink.Filter != "" {
+			filter := sink.Filter
+			if len(filter) > 30 {
+				filter = filter[:27] + "..."
+			}
+			dest = fmt.Sprintf("%s (%s)", sink.DestinationType, filter)
+		}
+
+		row := []string{
+			m.GetProjectName(sink.SourceProject),
+			"Logging Sink",
+			sink.SinkName,
+			"Data Export",
+			m.GetProjectName(sink.TargetProject),
+			"-",
+			"-",
+			dest,
+			"-",
+		}
+		bodyByProject[sink.TargetProject] = append(bodyByProject[sink.TargetProject], row)
+	}
+
+	// Add Pub/Sub exports - these are resources, not principals
+	for _, export := range m.CrossProjectPubSub {
+		dest := export.ExportType
+		if export.ExportDest != "" {
+			destName := extractCrossProjectResourceName(export.ExportDest)
+			dest = fmt.Sprintf("%s: %s", export.ExportType, destName)
+		}
+
+		row := []string{
+			m.GetProjectName(export.SourceProject),
+			"Pub/Sub",
+			export.SubscriptionName,
+			"Data Export",
+			m.GetProjectName(export.TargetProject),
+			"-",
+			"-",
+			dest,
+			"-",
+		}
+		bodyByProject[export.TargetProject] = append(bodyByProject[export.TargetProject], row)
+	}
+
+	return bodyByProject
+}
+
 func (m *CrossProjectModule) writeHierarchicalOutput(ctx context.Context, logger internal.Logger) {
-	// For crossproject, output at project level since we're looking for entities accessing into each project
+	// For crossproject, output at project level grouped by TARGET project
 	outputData := internal.HierarchicalOutputData{
 		OrgLevelData:     make(map[string]internal.CloudfoxOutput),
 		ProjectLevelData: make(map[string]internal.CloudfoxOutput),
 	}
 
 	header := m.getHeader()
-	body := m.buildTableBody()
+	bodyByProject := m.buildTableBodyByTargetProject()
 	lootFiles := m.collectLootFiles()
 
-	var tables []internal.TableFile
-	if len(body) > 0 {
-		tables = append(tables, internal.TableFile{
-			Name:   "crossproject",
-			Header: header,
-			Body:   body,
-		})
-	}
+	// Create output for each target project
+	for targetProject, body := range bodyByProject {
+		if len(body) == 0 {
+			continue
+		}
 
-	output := CrossProjectOutput{
-		Table: tables,
-		Loot:  lootFiles,
-	}
+		tables := []internal.TableFile{
+			{
+				Name:   "crossproject",
+				Header: header,
+				Body:   body,
+			},
+		}
 
-	// Place at first project level (cross-project analysis spans multiple projects but we need a location)
-	// Use first project ID as the output location
-	if len(m.ProjectIDs) > 0 {
-		outputData.ProjectLevelData[m.ProjectIDs[0]] = output
+		output := CrossProjectOutput{
+			Table: tables,
+			Loot:  lootFiles, // Loot files are shared across all projects
+		}
+
+		outputData.ProjectLevelData[targetProject] = output
 	}
 
 	pathBuilder := m.BuildPathBuilder()
@@ -495,42 +622,43 @@ func (m *CrossProjectModule) writeHierarchicalOutput(ctx context.Context, logger
 
 func (m *CrossProjectModule) writeFlatOutput(ctx context.Context, logger internal.Logger) {
 	header := m.getHeader()
-	body := m.buildTableBody()
+	bodyByProject := m.buildTableBodyByTargetProject()
 	lootFiles := m.collectLootFiles()
 
-	var tables []internal.TableFile
-	if len(body) > 0 {
-		tables = append(tables, internal.TableFile{
-			Name:   "crossproject",
-			Header: header,
-			Body:   body,
-		})
-	}
+	// Write output for each target project separately
+	for targetProject, body := range bodyByProject {
+		if len(body) == 0 {
+			continue
+		}
 
-	output := CrossProjectOutput{
-		Table: tables,
-		Loot:  lootFiles,
-	}
+		tables := []internal.TableFile{
+			{
+				Name:   "crossproject",
+				Header: header,
+				Body:   body,
+			},
+		}
 
-	scopeNames := make([]string, len(m.ProjectIDs))
-	for i, id := range m.ProjectIDs {
-		scopeNames[i] = m.GetProjectName(id)
-	}
+		output := CrossProjectOutput{
+			Table: tables,
+			Loot:  lootFiles,
+		}
 
-	err := internal.HandleOutputSmart(
-		"gcp",
-		m.Format,
-		m.OutputDirectory,
-		m.Verbosity,
-		m.WrapTable,
-		"project",
-		m.ProjectIDs,
-		scopeNames,
-		m.Account,
-		output,
-	)
-	if err != nil {
-		logger.ErrorM(fmt.Sprintf("Error writing output: %v", err), globals.GCP_CROSSPROJECT_MODULE_NAME)
-		m.CommandCounter.Error++
+		err := internal.HandleOutputSmart(
+			"gcp",
+			m.Format,
+			m.OutputDirectory,
+			m.Verbosity,
+			m.WrapTable,
+			"project",
+			[]string{targetProject},
+			[]string{m.GetProjectName(targetProject)},
+			m.Account,
+			output,
+		)
+		if err != nil {
+			logger.ErrorM(fmt.Sprintf("Error writing output for project %s: %v", targetProject, err), globals.GCP_CROSSPROJECT_MODULE_NAME)
+			m.CommandCounter.Error++
+		}
 	}
 }

@@ -492,7 +492,7 @@ func (m *AppEngineModule) getTableHeader() []string {
 		"Ingress",
 		"Public",
 		"Service Account",
-		"Attack Paths",
+		"SA Attack Paths",
 		"Default SA",
 		"Deprecated",
 		"Env Vars",
@@ -534,7 +534,7 @@ func (m *AppEngineModule) buildTablesForProject(projectID string, apps []AppEngi
 			}
 
 			// Check attack paths (privesc/exfil/lateral) for the service account
-			attackPaths := "-"
+			attackPaths := "run --attack-paths"
 			if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
 				if ver.ServiceAccount != "" {
 					attackPaths = m.AttackPathCache.GetAttackSummary(ver.ServiceAccount)

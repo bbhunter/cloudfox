@@ -104,6 +104,16 @@ func (m *GKEModule) Execute(ctx context.Context, logger internal.Logger) {
 	// Get attack path cache from context (populated by all-checks or attack path analysis)
 	m.AttackPathCache = gcpinternal.GetAttackPathCacheFromContext(ctx)
 
+	// If no context cache, try loading from disk cache
+	if m.AttackPathCache == nil || !m.AttackPathCache.IsPopulated() {
+		diskCache, metadata, err := gcpinternal.LoadAttackPathCacheFromFile(m.OutputDirectory, m.Account)
+		if err == nil && diskCache != nil && diskCache.IsPopulated() {
+			logger.InfoM(fmt.Sprintf("Using attack path cache from disk (created: %s)",
+				metadata.CreatedAt.Format("2006-01-02 15:04:05")), globals.GCP_GKE_MODULE_NAME)
+			m.AttackPathCache = diskCache
+		}
+	}
+
 	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_GKE_MODULE_NAME, m.processProject)
 
 	// Get all clusters for stats
@@ -331,11 +341,11 @@ func (m *GKEModule) writeFlatOutput(ctx context.Context, logger internal.Logger)
 func (m *GKEModule) buildTablesForProject(clusters []GKEService.ClusterInfo, nodePools []GKEService.NodePoolInfo) []internal.TableFile {
 	tableFiles := []internal.TableFile{}
 
-	// Clusters table
+	// Clusters table - columns grouped by: identity, network/access, cluster-level security
 	clusterHeader := []string{
-		"Project Name", "Project ID", "Name", "Location", "Endpoint", "Status", "Version",
-		"Mode", "Private", "MasterAuth", "NetPolicy", "WorkloadID", "Shielded", "BinAuth",
-		"Release Channel", "ConfigConnector",
+		"Project", "Name", "Location", "Mode", "Status", "Version", "Release Channel",
+		"Endpoint", "Private", "Authorized CIDRs",
+		"WorkloadID", "NetPolicy", "BinAuth",
 	}
 
 	var clusterBody [][]string
@@ -353,13 +363,15 @@ func (m *GKEModule) buildTablesForProject(clusters []GKEService.ClusterInfo, nod
 			endpoint = "-"
 		}
 
+		// Format authorized CIDRs
+		authorizedCIDRs := formatAuthorizedCIDRs(cluster)
+
 		clusterBody = append(clusterBody, []string{
-			m.GetProjectName(cluster.ProjectID), cluster.ProjectID, cluster.Name, cluster.Location,
-			endpoint, cluster.Status, cluster.CurrentMasterVersion, clusterMode,
-			shared.BoolToYesNo(cluster.PrivateCluster), shared.BoolToYesNo(cluster.MasterAuthorizedOnly),
-			shared.BoolToYesNo(cluster.NetworkPolicy), shared.BoolToYesNo(cluster.WorkloadIdentity != ""),
-			shared.BoolToYesNo(cluster.ShieldedNodes), shared.BoolToYesNo(cluster.BinaryAuthorization),
-			releaseChannel, shared.BoolToYesNo(cluster.ConfigConnector),
+			m.GetProjectName(cluster.ProjectID), cluster.Name, cluster.Location,
+			clusterMode, cluster.Status, cluster.CurrentMasterVersion, releaseChannel,
+			endpoint, shared.BoolToYesNo(cluster.PrivateCluster), authorizedCIDRs,
+			shared.BoolToYesNo(cluster.WorkloadIdentity != ""), shared.BoolToYesNo(cluster.NetworkPolicy),
+			shared.BoolToYesNo(cluster.BinaryAuthorization),
 		})
 	}
 
@@ -371,10 +383,11 @@ func (m *GKEModule) buildTablesForProject(clusters []GKEService.ClusterInfo, nod
 		})
 	}
 
-	// Node pools table
+	// Node pools table - node-level details including hardware security (like instances module)
 	nodePoolHeader := []string{
-		"Project Name", "Project ID", "Cluster", "Node Pool", "Machine Type", "Node Count",
-		"Service Account", "Attack Paths", "Cloud Platform Scope", "Auto Upgrade", "Secure Boot", "Preemptible",
+		"Project", "Cluster", "Node Pool", "Machine Type", "Node Count",
+		"Service Account", "SA Attack Paths", "SA Scopes", "SA Scope Summary",
+		"Auto Upgrade", "Secure Boot", "Integrity", "Preemptible",
 	}
 
 	var nodePoolBody [][]string
@@ -385,7 +398,7 @@ func (m *GKEModule) buildTablesForProject(clusters []GKEService.ClusterInfo, nod
 		}
 
 		// Check attack paths (privesc/exfil/lateral) for the service account
-		attackPaths := "-"
+		attackPaths := "run --attack-paths"
 		if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
 			if saDisplay != "-" {
 				attackPaths = m.AttackPathCache.GetAttackSummary(saDisplay)
@@ -394,11 +407,21 @@ func (m *GKEModule) buildTablesForProject(clusters []GKEService.ClusterInfo, nod
 			}
 		}
 
+		// Format actual scopes for display
+		scopes := formatGKEScopes(np.OAuthScopes)
+
+		// Get scope summary, default to "Unknown" if empty
+		scopeSummary := np.ScopeSummary
+		if scopeSummary == "" {
+			scopeSummary = "Unknown"
+		}
+
 		nodePoolBody = append(nodePoolBody, []string{
-			m.GetProjectName(np.ProjectID), np.ProjectID, np.ClusterName, np.Name,
+			m.GetProjectName(np.ProjectID), np.ClusterName, np.Name,
 			np.MachineType, fmt.Sprintf("%d", np.NodeCount), saDisplay, attackPaths,
-			shared.BoolToYesNo(np.HasCloudPlatformScope), shared.BoolToYesNo(np.AutoUpgrade),
-			shared.BoolToYesNo(np.SecureBoot), shared.BoolToYesNo(np.Preemptible || np.Spot),
+			scopes, scopeSummary, shared.BoolToYesNo(np.AutoUpgrade),
+			shared.BoolToYesNo(np.SecureBoot), shared.BoolToYesNo(np.IntegrityMonitoring),
+			shared.BoolToYesNo(np.Preemptible || np.Spot),
 		})
 	}
 
@@ -411,4 +434,43 @@ func (m *GKEModule) buildTablesForProject(clusters []GKEService.ClusterInfo, nod
 	}
 
 	return tableFiles
+}
+
+// formatAuthorizedCIDRs formats the authorized CIDRs for display
+func formatAuthorizedCIDRs(cluster GKEService.ClusterInfo) string {
+	if cluster.PrivateCluster {
+		return "Private endpoint"
+	}
+	if !cluster.MasterAuthorizedOnly {
+		return "0.0.0.0/0 (any)"
+	}
+	if len(cluster.MasterAuthorizedCIDRs) == 0 {
+		return "None configured"
+	}
+	// Check if 0.0.0.0/0 is in the list (effectively public)
+	for _, cidr := range cluster.MasterAuthorizedCIDRs {
+		if cidr == "0.0.0.0/0" {
+			return "0.0.0.0/0 (any)"
+		}
+	}
+	// Show all CIDRs
+	return strings.Join(cluster.MasterAuthorizedCIDRs, ", ")
+}
+
+// formatGKEScopes formats OAuth scopes for display (extracts short names from URLs)
+func formatGKEScopes(scopes []string) string {
+	if len(scopes) == 0 {
+		return "-"
+	}
+
+	var shortScopes []string
+	for _, scope := range scopes {
+		// Extract the scope name from the URL
+		// e.g., "https://www.googleapis.com/auth/cloud-platform" -> "cloud-platform"
+		parts := strings.Split(scope, "/")
+		if len(parts) > 0 {
+			shortScopes = append(shortScopes, parts[len(parts)-1])
+		}
+	}
+	return strings.Join(shortScopes, ", ")
 }

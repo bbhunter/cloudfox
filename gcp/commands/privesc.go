@@ -123,13 +123,49 @@ func runGCPPrivescCommand(cmd *cobra.Command, args []string) {
 func (m *PrivescModule) Execute(ctx context.Context, logger internal.Logger) {
 	logger.InfoM("Analyzing privilege escalation paths across organizations, folders, projects, and resources...", globals.GCP_PRIVESC_MODULE_NAME)
 
-	// Use attackpathService with "privesc" path type
-	svc := attackpathservice.New()
-	result, err := svc.CombinedAttackPathAnalysis(ctx, m.ProjectIDs, m.ProjectNames, "privesc")
-	if err != nil {
-		m.CommandCounter.Error++
-		gcpinternal.HandleGCPError(err, logger, globals.GCP_PRIVESC_MODULE_NAME, "Failed to analyze privilege escalation")
-		return
+	var result *attackpathservice.CombinedAttackPathData
+
+	// Check if attack path analysis was already run (via --attack-paths flag)
+	// to avoid duplicate enumeration
+	if cache := gcpinternal.GetAttackPathCacheFromContext(ctx); cache != nil && cache.HasRawData() {
+		if cachedResult, ok := cache.GetRawData().(*attackpathservice.CombinedAttackPathData); ok {
+			logger.InfoM("Using cached attack path analysis results", globals.GCP_PRIVESC_MODULE_NAME)
+			// Filter to only include privesc paths (cache has all types)
+			result = filterPrivescPaths(cachedResult)
+		}
+	}
+
+	// If no context cache, try loading from disk cache
+	if result == nil {
+		diskCache, metadata, err := gcpinternal.LoadAttackPathCacheFromFile(m.OutputDirectory, m.Account)
+		if err == nil && diskCache != nil && diskCache.HasRawData() {
+			if cachedResult, ok := diskCache.GetRawData().(*attackpathservice.CombinedAttackPathData); ok {
+				logger.InfoM(fmt.Sprintf("Using disk cache (created: %s, projects: %v)",
+					metadata.CreatedAt.Format("2006-01-02 15:04:05"), metadata.ProjectsIn), globals.GCP_PRIVESC_MODULE_NAME)
+				// Filter to only include privesc paths
+				result = filterPrivescPaths(cachedResult)
+			}
+		}
+	}
+
+	// If no cached data, run the analysis and save to disk
+	if result == nil {
+		logger.InfoM("Running privilege escalation analysis...", globals.GCP_PRIVESC_MODULE_NAME)
+		svc := attackpathservice.New()
+		var err error
+		// Run full analysis (all types) so we can cache for other modules
+		fullResult, err := svc.CombinedAttackPathAnalysis(ctx, m.ProjectIDs, m.ProjectNames, "all")
+		if err != nil {
+			m.CommandCounter.Error++
+			gcpinternal.HandleGCPError(err, logger, globals.GCP_PRIVESC_MODULE_NAME, "Failed to analyze privilege escalation")
+			return
+		}
+
+		// Save to disk cache for future use (skip if running under all-checks)
+		m.saveToAttackPathCache(ctx, fullResult, logger)
+
+		// Filter to only include privesc paths for this module
+		result = filterPrivescPaths(fullResult)
 	}
 
 	// Store results
@@ -226,13 +262,14 @@ func (m *PrivescModule) writeOutput(ctx context.Context, logger internal.Logger)
 
 func (m *PrivescModule) getHeader() []string {
 	return []string{
-		"Scope Type",
-		"Scope ID",
-		"Scope Name",
-		"Source Principal",
-		"Source Principal Type",
-		"Action (Method)",
+		"Project",
+		"Source",
+		"Principal Type",
+		"Principal",
+		"Method",
 		"Target Resource",
+		"Category",
+		"Binding Scope",
 		"Permissions",
 	}
 }
@@ -245,15 +282,38 @@ func (m *PrivescModule) pathsToTableBody(paths []attackpathservice.AttackPath) [
 			scopeName = path.ScopeID
 		}
 
+		// Format binding scope (where the IAM binding is defined)
+		bindingScope := "Project"
+		if path.ScopeType == "organization" {
+			bindingScope = "Organization"
+		} else if path.ScopeType == "folder" {
+			bindingScope = "Folder"
+		} else if path.ScopeType == "resource" {
+			bindingScope = "Resource"
+		}
+
+		// Format target resource
+		targetResource := path.TargetResource
+		if targetResource == "" || targetResource == "*" {
+			targetResource = "*"
+		}
+
+		// Format permissions
+		permissions := strings.Join(path.Permissions, ", ")
+		if permissions == "" {
+			permissions = "-"
+		}
+
 		body = append(body, []string{
-			path.ScopeType,
-			path.ScopeID,
 			scopeName,
-			path.Principal,
+			path.ScopeType,
 			path.PrincipalType,
+			path.Principal,
 			path.Method,
-			path.TargetResource,
-			strings.Join(path.Permissions, ", "),
+			targetResource,
+			path.Category,
+			bindingScope,
+			permissions,
 		})
 	}
 	return body
@@ -383,4 +443,88 @@ func (m *PrivescModule) writeFlatOutput(ctx context.Context, logger internal.Log
 	if err != nil {
 		logger.ErrorM(fmt.Sprintf("Error writing output: %v", err), globals.GCP_PRIVESC_MODULE_NAME)
 	}
+}
+
+// saveToAttackPathCache saves attack path data to disk cache
+func (m *PrivescModule) saveToAttackPathCache(ctx context.Context, data *attackpathservice.CombinedAttackPathData, logger internal.Logger) {
+	// Skip saving if running under all-checks (consolidated save happens at the end)
+	if gcpinternal.IsAllChecksMode(ctx) {
+		logger.InfoM("Skipping individual cache save (all-checks mode)", globals.GCP_PRIVESC_MODULE_NAME)
+		return
+	}
+
+	cache := gcpinternal.NewAttackPathCache()
+
+	// Populate cache with paths from all scopes
+	var pathInfos []gcpinternal.AttackPathInfo
+	for _, path := range data.AllPaths {
+		pathInfos = append(pathInfos, gcpinternal.AttackPathInfo{
+			Principal:     path.Principal,
+			PrincipalType: path.PrincipalType,
+			Method:        path.Method,
+			PathType:      gcpinternal.AttackPathType(path.PathType),
+			Category:      path.Category,
+			RiskLevel:     path.RiskLevel,
+			Target:        path.TargetResource,
+			Permissions:   path.Permissions,
+			ScopeType:     path.ScopeType,
+			ScopeID:       path.ScopeID,
+		})
+	}
+	cache.PopulateFromPaths(pathInfos)
+	cache.SetRawData(data)
+
+	// Save to disk
+	err := gcpinternal.SaveAttackPathCacheToFile(cache, m.ProjectIDs, m.OutputDirectory, m.Account, "1.0")
+	if err != nil {
+		logger.InfoM(fmt.Sprintf("Could not save attack path cache: %v", err), globals.GCP_PRIVESC_MODULE_NAME)
+	} else {
+		privesc, exfil, lateral := cache.GetStats()
+		logger.InfoM(fmt.Sprintf("Saved attack path cache to disk (%d privesc, %d exfil, %d lateral)",
+			privesc, exfil, lateral), globals.GCP_PRIVESC_MODULE_NAME)
+	}
+}
+
+// filterPrivescPaths filters a CombinedAttackPathData to only include privesc paths
+// This is used when the cache contains all attack path types but privesc only needs privesc
+func filterPrivescPaths(data *attackpathservice.CombinedAttackPathData) *attackpathservice.CombinedAttackPathData {
+	result := &attackpathservice.CombinedAttackPathData{
+		OrgPaths:      []attackpathservice.AttackPath{},
+		FolderPaths:   []attackpathservice.AttackPath{},
+		ProjectPaths:  []attackpathservice.AttackPath{},
+		ResourcePaths: []attackpathservice.AttackPath{},
+		AllPaths:      []attackpathservice.AttackPath{},
+		OrgNames:      data.OrgNames,
+		FolderNames:   data.FolderNames,
+		OrgIDs:        data.OrgIDs,
+	}
+
+	// Filter each path slice to only include privesc paths
+	for _, path := range data.OrgPaths {
+		if path.PathType == "privesc" {
+			result.OrgPaths = append(result.OrgPaths, path)
+		}
+	}
+	for _, path := range data.FolderPaths {
+		if path.PathType == "privesc" {
+			result.FolderPaths = append(result.FolderPaths, path)
+		}
+	}
+	for _, path := range data.ProjectPaths {
+		if path.PathType == "privesc" {
+			result.ProjectPaths = append(result.ProjectPaths, path)
+		}
+	}
+	for _, path := range data.ResourcePaths {
+		if path.PathType == "privesc" {
+			result.ResourcePaths = append(result.ResourcePaths, path)
+		}
+	}
+	for _, path := range data.AllPaths {
+		if path.PathType == "privesc" {
+			result.AllPaths = append(result.AllPaths, path)
+		}
+	}
+
+	return result
 }

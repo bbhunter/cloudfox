@@ -211,15 +211,14 @@ func (m *SourceReposModule) writeOutput(ctx context.Context, logger internal.Log
 // writeHierarchicalOutput writes output to per-project directories
 func (m *SourceReposModule) writeHierarchicalOutput(ctx context.Context, logger internal.Logger) {
 	header := []string{
-		"Project Name",
-		"Project ID",
+		"Project",
 		"Name",
 		"Size",
 		"Mirror",
 		"Mirror URL",
 		"Triggers",
-		"Resource Role",
-		"Resource Principal",
+		"IAM Binding Role",
+		"IAM Binding Principal",
 	}
 
 	// Build hierarchical output data
@@ -271,15 +270,14 @@ func (m *SourceReposModule) writeHierarchicalOutput(ctx context.Context, logger 
 // writeFlatOutput writes all output to a single directory (legacy mode)
 func (m *SourceReposModule) writeFlatOutput(ctx context.Context, logger internal.Logger) {
 	header := []string{
-		"Project Name",
-		"Project ID",
+		"Project",
 		"Name",
 		"Size",
 		"Mirror",
 		"Mirror URL",
 		"Triggers",
-		"Resource Role",
-		"Resource Principal",
+		"IAM Binding Role",
+		"IAM Binding Principal",
 	}
 
 	allRepos := m.getAllRepos()
@@ -363,7 +361,6 @@ func (m *SourceReposModule) reposToTableBody(repos []sourcereposservice.RepoInfo
 			for _, binding := range repo.IAMBindings {
 				body = append(body, []string{
 					m.GetProjectName(repo.ProjectID),
-					repo.ProjectID,
 					repo.Name,
 					sizeDisplay,
 					mirror,
@@ -377,7 +374,6 @@ func (m *SourceReposModule) reposToTableBody(repos []sourcereposservice.RepoInfo
 			// Repo with no IAM bindings
 			body = append(body, []string{
 				m.GetProjectName(repo.ProjectID),
-				repo.ProjectID,
 				repo.Name,
 				sizeDisplay,
 				mirror,

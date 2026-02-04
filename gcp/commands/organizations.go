@@ -85,28 +85,94 @@ func runGCPOrganizationsCommand(cmd *cobra.Command, args []string) {
 func (m *OrganizationsModule) Execute(ctx context.Context, logger internal.Logger) {
 	orgsSvc := orgsservice.New()
 
-	// Get organizations
-	orgs, err := orgsSvc.SearchOrganizations()
-	if err != nil {
-		logger.InfoM(fmt.Sprintf("Could not enumerate organizations: %v", err), globals.GCP_ORGANIZATIONS_MODULE_NAME)
-	} else {
-		m.Organizations = orgs
-	}
+	// Check if org cache is available (from all-checks or --org-cache flag)
+	if orgCache := gcpinternal.GetOrgCacheFromContext(ctx); orgCache != nil && orgCache.IsPopulated() {
+		logger.InfoM("Using cached organization data", globals.GCP_ORGANIZATIONS_MODULE_NAME)
 
-	// Get all folders
-	folders, err := orgsSvc.SearchAllFolders()
-	if err != nil {
-		logger.InfoM(fmt.Sprintf("Could not enumerate folders: %v", err), globals.GCP_ORGANIZATIONS_MODULE_NAME)
+		// Convert cached data to module format
+		for _, org := range orgCache.Organizations {
+			m.Organizations = append(m.Organizations, orgsservice.OrganizationInfo{
+				Name:        org.Name,
+				DisplayName: org.DisplayName,
+			})
+		}
+		for _, folder := range orgCache.Folders {
+			m.Folders = append(m.Folders, orgsservice.FolderInfo{
+				Name:        folder.Name,
+				DisplayName: folder.DisplayName,
+				Parent:      folder.Parent,
+			})
+		}
+		for _, project := range orgCache.AllProjects {
+			m.Projects = append(m.Projects, orgsservice.ProjectInfo{
+				Name:        project.Name,
+				ProjectID:   project.ID,
+				DisplayName: project.DisplayName,
+				Parent:      project.Parent,
+				State:       project.State,
+			})
+		}
 	} else {
-		m.Folders = folders
-	}
+		// No context cache, try loading from disk cache
+		diskCache, metadata, err := gcpinternal.LoadOrgCacheFromFile(m.OutputDirectory, m.Account)
+		if err == nil && diskCache != nil && diskCache.IsPopulated() {
+			logger.InfoM(fmt.Sprintf("Using disk cache (created: %s, %d projects)",
+				metadata.CreatedAt.Format("2006-01-02 15:04:05"), metadata.TotalProjects), globals.GCP_ORGANIZATIONS_MODULE_NAME)
 
-	// Get all projects
-	projects, err := orgsSvc.SearchProjects("")
-	if err != nil {
-		logger.InfoM(fmt.Sprintf("Could not enumerate projects: %v", err), globals.GCP_ORGANIZATIONS_MODULE_NAME)
-	} else {
-		m.Projects = projects
+			// Convert cached data to module format
+			for _, org := range diskCache.Organizations {
+				m.Organizations = append(m.Organizations, orgsservice.OrganizationInfo{
+					Name:        org.Name,
+					DisplayName: org.DisplayName,
+				})
+			}
+			for _, folder := range diskCache.Folders {
+				m.Folders = append(m.Folders, orgsservice.FolderInfo{
+					Name:        folder.Name,
+					DisplayName: folder.DisplayName,
+					Parent:      folder.Parent,
+				})
+			}
+			for _, project := range diskCache.AllProjects {
+				m.Projects = append(m.Projects, orgsservice.ProjectInfo{
+					Name:        project.Name,
+					ProjectID:   project.ID,
+					DisplayName: project.DisplayName,
+					Parent:      project.Parent,
+					State:       project.State,
+				})
+			}
+		} else {
+			// No disk cache either, enumerate directly and save
+			logger.InfoM("Enumerating organizations, folders, and projects...", globals.GCP_ORGANIZATIONS_MODULE_NAME)
+
+			// Get organizations
+			orgs, err := orgsSvc.SearchOrganizations()
+			if err != nil {
+				logger.InfoM(fmt.Sprintf("Could not enumerate organizations: %v", err), globals.GCP_ORGANIZATIONS_MODULE_NAME)
+			} else {
+				m.Organizations = orgs
+			}
+
+			// Get all folders
+			folders, err := orgsSvc.SearchAllFolders()
+			if err != nil {
+				logger.InfoM(fmt.Sprintf("Could not enumerate folders: %v", err), globals.GCP_ORGANIZATIONS_MODULE_NAME)
+			} else {
+				m.Folders = folders
+			}
+
+			// Get all projects
+			projects, err := orgsSvc.SearchProjects("")
+			if err != nil {
+				logger.InfoM(fmt.Sprintf("Could not enumerate projects: %v", err), globals.GCP_ORGANIZATIONS_MODULE_NAME)
+			} else {
+				m.Projects = projects
+			}
+
+			// Save to disk cache for future use
+			m.saveToOrgCache(logger)
+		}
 	}
 
 	// Get ancestry for each specified project
@@ -469,6 +535,49 @@ func (m *OrganizationsModule) getOrgName(orgID string) string {
 		}
 	}
 	return orgID
+}
+
+// saveToOrgCache saves enumerated org data to disk cache
+func (m *OrganizationsModule) saveToOrgCache(logger internal.Logger) {
+	cache := gcpinternal.NewOrgCache()
+
+	// Convert module data to cache format
+	for _, org := range m.Organizations {
+		orgID := strings.TrimPrefix(org.Name, "organizations/")
+		cache.AddOrganization(gcpinternal.CachedOrganization{
+			ID:          orgID,
+			Name:        org.Name,
+			DisplayName: org.DisplayName,
+		})
+	}
+	for _, folder := range m.Folders {
+		folderID := strings.TrimPrefix(folder.Name, "folders/")
+		cache.AddFolder(gcpinternal.CachedFolder{
+			ID:          folderID,
+			Name:        folder.Name,
+			DisplayName: folder.DisplayName,
+			Parent:      folder.Parent,
+		})
+	}
+	for _, project := range m.Projects {
+		cache.AddProject(gcpinternal.CachedProject{
+			ID:          project.ProjectID,
+			Name:        project.Name,
+			DisplayName: project.DisplayName,
+			Parent:      project.Parent,
+			State:       project.State,
+		})
+	}
+	cache.MarkPopulated()
+
+	// Save to disk
+	err := gcpinternal.SaveOrgCacheToFile(cache, m.OutputDirectory, m.Account, "1.0")
+	if err != nil {
+		logger.InfoM(fmt.Sprintf("Could not save org cache: %v", err), globals.GCP_ORGANIZATIONS_MODULE_NAME)
+	} else {
+		logger.InfoM(fmt.Sprintf("Saved org cache to disk (%d orgs, %d folders, %d projects)",
+			len(m.Organizations), len(m.Folders), len(m.Projects)), globals.GCP_ORGANIZATIONS_MODULE_NAME)
+	}
 }
 
 // ------------------------------

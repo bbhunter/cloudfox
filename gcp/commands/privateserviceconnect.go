@@ -352,22 +352,22 @@ func (m *PrivateServiceConnectModule) writeOutput(ctx context.Context, logger in
 
 func (m *PrivateServiceConnectModule) getPSCEndpointsHeader() []string {
 	return []string{
-		"Project Name", "Project ID", "Name", "Region", "Network",
+		"Project", "Name", "Region", "Network",
 		"Subnet", "IP Address", "Target Type", "Target", "State",
 	}
 }
 
 func (m *PrivateServiceConnectModule) getPrivateConnectionsHeader() []string {
 	return []string{
-		"Project Name", "Project ID", "Name", "Network", "Service",
+		"Project", "Name", "Network", "Service",
 		"Peering Name", "Reserved Ranges", "Accessible Services",
 	}
 }
 
 func (m *PrivateServiceConnectModule) getServiceAttachmentsHeader() []string {
 	return []string{
-		"Project Name", "Project ID", "Name", "Region", "Target Service",
-		"Accept Policy", "Connected", "NAT Subnets", "Resource Role", "Resource Principal",
+		"Project", "Name", "Region", "Target Service",
+		"Accept Policy", "Connected", "NAT Subnets", "IAM Binding Role", "IAM Binding Principal",
 	}
 }
 
@@ -375,7 +375,7 @@ func (m *PrivateServiceConnectModule) pscEndpointsToTableBody(endpoints []networ
 	var body [][]string
 	for _, ep := range endpoints {
 		body = append(body, []string{
-			m.GetProjectName(ep.ProjectID), ep.ProjectID, ep.Name, ep.Region,
+			m.GetProjectName(ep.ProjectID), ep.Name, ep.Region,
 			ep.Network, ep.Subnetwork, ep.IPAddress, ep.TargetType, ep.Target, ep.ConnectionState,
 		})
 	}
@@ -394,7 +394,7 @@ func (m *PrivateServiceConnectModule) privateConnectionsToTableBody(conns []netw
 			accessibleServices = strings.Join(conn.AccessibleServices, ", ")
 		}
 		body = append(body, []string{
-			m.GetProjectName(conn.ProjectID), conn.ProjectID, conn.Name, conn.Network,
+			m.GetProjectName(conn.ProjectID), conn.Name, conn.Network,
 			conn.Service, conn.PeeringName, reservedRanges, accessibleServices,
 		})
 	}
@@ -411,14 +411,14 @@ func (m *PrivateServiceConnectModule) serviceAttachmentsToTableBody(attachments 
 		if len(att.IAMBindings) > 0 {
 			for _, binding := range att.IAMBindings {
 				body = append(body, []string{
-					m.GetProjectName(att.ProjectID), att.ProjectID, att.Name, att.Region,
+					m.GetProjectName(att.ProjectID), att.Name, att.Region,
 					att.TargetService, att.ConnectionPreference, fmt.Sprintf("%d", att.ConnectedEndpoints),
 					natSubnets, binding.Role, binding.Member,
 				})
 			}
 		} else {
 			body = append(body, []string{
-				m.GetProjectName(att.ProjectID), att.ProjectID, att.Name, att.Region,
+				m.GetProjectName(att.ProjectID), att.Name, att.Region,
 				att.TargetService, att.ConnectionPreference, fmt.Sprintf("%d", att.ConnectedEndpoints),
 				natSubnets, "-", "-",
 			})

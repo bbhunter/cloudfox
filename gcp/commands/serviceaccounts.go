@@ -100,6 +100,16 @@ func (m *ServiceAccountsModule) Execute(ctx context.Context, logger internal.Log
 	// Get attack path cache from context (populated by all-checks or attack path analysis)
 	m.AttackPathCache = gcpinternal.GetAttackPathCacheFromContext(ctx)
 
+	// If no context cache, try loading from disk cache
+	if m.AttackPathCache == nil || !m.AttackPathCache.IsPopulated() {
+		diskCache, metadata, err := gcpinternal.LoadAttackPathCacheFromFile(m.OutputDirectory, m.Account)
+		if err == nil && diskCache != nil && diskCache.IsPopulated() {
+			logger.InfoM(fmt.Sprintf("Using attack path cache from disk (created: %s)",
+				metadata.CreatedAt.Format("2006-01-02 15:04:05")), globals.GCP_SERVICEACCOUNTS_MODULE_NAME)
+			m.AttackPathCache = diskCache
+		}
+	}
+
 	// Run enumeration with concurrency
 	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_SERVICEACCOUNTS_MODULE_NAME, m.processProject)
 
@@ -317,18 +327,52 @@ func (m *ServiceAccountsModule) addServiceAccountToLoot(projectID string, sa Ser
 
 	keyFileName := strings.Split(sa.Email, "@")[0]
 
+	// Build summary info
+	dwdStatus := "No"
+	if sa.OAuth2ClientID != "" {
+		dwdStatus = fmt.Sprintf("Yes (Client ID: %s)", sa.OAuth2ClientID)
+	}
+
+	defaultSAInfo := "No"
+	if sa.IsDefaultSA {
+		defaultSAInfo = fmt.Sprintf("Yes (%s)", sa.DefaultSAType)
+	}
+
 	lootFile.Contents += fmt.Sprintf(
 		"# ==========================================\n"+
 			"# SERVICE ACCOUNT: %s\n"+
 			"# ==========================================\n"+
 			"# Project: %s\n"+
 			"# Display Name: %s\n"+
-			"# Disabled: %v\n",
+			"# Disabled: %v\n"+
+			"# Default SA: %s\n"+
+			"# DWD Enabled: %s\n",
 		sa.Email,
 		projectID,
 		sa.DisplayName,
 		sa.Disabled,
+		defaultSAInfo,
+		dwdStatus,
 	)
+
+	// Add key summary
+	userKeyCount := 0
+	googleKeyCount := 0
+	for _, key := range sa.Keys {
+		if key.KeyType == "USER_MANAGED" {
+			userKeyCount++
+		} else if key.KeyType == "SYSTEM_MANAGED" {
+			googleKeyCount++
+		}
+	}
+	lootFile.Contents += fmt.Sprintf("# User Managed Keys: %d\n", userKeyCount)
+	lootFile.Contents += fmt.Sprintf("# Google Managed Keys: %d\n", googleKeyCount)
+	if sa.OldestKeyAge > 0 {
+		lootFile.Contents += fmt.Sprintf("# Oldest Key Age: %d days\n", sa.OldestKeyAge)
+		if sa.OldestKeyAge > 90 {
+			lootFile.Contents += "# WARNING: Key older than 90 days - rotation recommended\n"
+		}
+	}
 
 	// Add impersonation info if available
 	if sa.ImpersonationInfo != nil {
@@ -343,28 +387,87 @@ func (m *ServiceAccountsModule) addServiceAccountToLoot(projectID string, sa Ser
 		}
 	}
 
-	lootFile.Contents += fmt.Sprintf(
-		"\n# Impersonation commands:\n"+
-			"gcloud auth print-access-token --impersonate-service-account=%s\n"+
-			"gcloud auth print-identity-token --impersonate-service-account=%s\n\n"+
-			"# Key creation commands:\n"+
-			"gcloud iam service-accounts keys create %s-key.json --iam-account=%s --project=%s\n"+
-			"gcloud auth activate-service-account --key-file=%s-key.json\n\n"+
-			"# Describe service account:\n"+
-			"gcloud iam service-accounts describe %s --project=%s\n\n"+
-			"# Get IAM policy for this service account:\n"+
-			"gcloud iam service-accounts get-iam-policy %s --project=%s\n\n",
-		sa.Email,
-		sa.Email,
-		keyFileName,
-		sa.Email,
-		projectID,
-		keyFileName,
-		sa.Email,
-		projectID,
-		sa.Email,
-		projectID,
-	)
+	lootFile.Contents += fmt.Sprintf(`
+# === ENUMERATION COMMANDS ===
+
+# Describe service account
+gcloud iam service-accounts describe %s --project=%s --format=json | jq '{email: .email, displayName: .displayName, disabled: .disabled, oauth2ClientId: .oauth2ClientId}'
+
+# List all keys with creation dates and expiration
+gcloud iam service-accounts keys list --iam-account=%s --project=%s --format=json | jq -r '.[] | {keyId: .name | split("/") | last, keyType: .keyType, created: .validAfterTime, expires: .validBeforeTime}'
+
+# Get IAM policy - who can impersonate this SA
+gcloud iam service-accounts get-iam-policy %s --project=%s --format=json | jq '.bindings[] | {role: .role, members: .members}'
+
+# Check project-level IAM bindings for this SA
+gcloud projects get-iam-policy %s --format=json | jq -r '.bindings[] | select(.members[] | contains("%s")) | {role: .role, member: "%s"}'
+
+# Check what resources this SA can access
+gcloud asset search-all-iam-policies --scope=projects/%s --query='policy:%s' --format=json | jq -r '.results[] | {resource: .resource, roles: [.policy.bindings[].role]}'
+
+`, sa.Email, projectID,
+		sa.Email, projectID,
+		sa.Email, projectID,
+		projectID, sa.Email, sa.Email,
+		projectID, sa.Email)
+
+	lootFile.Contents += fmt.Sprintf(`# === EXPLOITATION COMMANDS ===
+
+# Impersonate SA - get access token
+gcloud auth print-access-token --impersonate-service-account=%s
+
+# Impersonate SA - get identity token (for Cloud Run/Functions)
+gcloud auth print-identity-token --impersonate-service-account=%s
+
+# Create a new key for this SA (requires iam.serviceAccountKeys.create)
+gcloud iam service-accounts keys create %s-key.json --iam-account=%s --project=%s
+
+# Activate the downloaded key
+gcloud auth activate-service-account --key-file=%s-key.json
+
+# Test impersonation - list projects as this SA
+gcloud projects list --impersonate-service-account=%s
+
+`, sa.Email, sa.Email, keyFileName, sa.Email, projectID, keyFileName, sa.Email)
+
+	// Add DWD exploitation if enabled
+	if sa.OAuth2ClientID != "" {
+		lootFile.Contents += fmt.Sprintf(`# === DOMAIN-WIDE DELEGATION EXPLOITATION ===
+# This SA has DWD enabled - can impersonate Workspace users!
+# OAuth2 Client ID: %s
+
+# Run the domain-wide-delegation module for detailed exploitation:
+# cloudfox gcp domain-wide-delegation -p %s
+
+# Quick test - requires SA key and target Workspace user email:
+# python dwd_exploit.py --key-file %s-key.json --subject admin@domain.com --all-scopes
+
+`, sa.OAuth2ClientID, projectID, keyFileName)
+	}
+
+	// Add section for old keys
+	if sa.HasOldKeys {
+		lootFile.Contents += fmt.Sprintf(`# === KEY ROTATION ===
+# This SA has keys older than 90 days (%d days)
+
+# List keys with age
+gcloud iam service-accounts keys list --iam-account=%s --project=%s --format='table(name.basename(), keyType, validAfterTime, validBeforeTime)'
+
+`, sa.OldestKeyAge, sa.Email, projectID)
+	}
+
+	// Add section for default SA
+	if sa.IsDefaultSA {
+		lootFile.Contents += fmt.Sprintf(`# === DEFAULT SERVICE ACCOUNT ===
+# This is a %s default service account
+
+# Check roles granted to this SA
+gcloud projects get-iam-policy %s --format=json | jq -r '.bindings[] | select(.members[] | contains("%s")) | .role'
+
+`, sa.DefaultSAType, projectID, sa.Email)
+	}
+
+	lootFile.Contents += "\n"
 }
 
 // ------------------------------
@@ -379,21 +482,20 @@ func (m *ServiceAccountsModule) writeOutput(ctx context.Context, logger internal
 }
 
 // getTableHeader returns the header for service accounts table
-// Impersonation Type: What capability the Impersonator has TO this service account
-// Impersonator: Who has that capability (can impersonate/manage this SA)
 func (m *ServiceAccountsModule) getTableHeader() []string {
 	return []string{
-		"Project Name",
-		"Project ID",
+		"Project",
 		"Email",
-		"Attack Paths",
+		"SA Attack Paths",
 		"Display Name",
 		"Disabled",
 		"Default SA",
 		"DWD",
-		"Key Count",
-		"Impersonation Type",
-		"Impersonator",
+		"User Managed Keys",
+		"Google Managed Keys",
+		"Oldest Key Age",
+		"IAM Binding Role",
+		"IAM Binding Principal",
 	}
 }
 
@@ -418,21 +520,42 @@ func (m *ServiceAccountsModule) serviceAccountsToTableBody(serviceAccounts []Ser
 		}
 
 		// Check attack paths (privesc/exfil/lateral) for this service account
-		attackPaths := "-"
+		attackPaths := "run --attack-paths"
 		if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
 			attackPaths = m.AttackPathCache.GetAttackSummary(sa.Email)
 		}
 
-		// Count user-managed keys
-		keyCount := "-"
+		// Count keys by type and find oldest key age
 		userKeyCount := 0
+		googleKeyCount := 0
 		for _, key := range sa.Keys {
 			if key.KeyType == "USER_MANAGED" {
 				userKeyCount++
+			} else if key.KeyType == "SYSTEM_MANAGED" {
+				googleKeyCount++
 			}
 		}
+		userKeys := "-"
 		if userKeyCount > 0 {
-			keyCount = fmt.Sprintf("%d", userKeyCount)
+			userKeys = fmt.Sprintf("%d", userKeyCount)
+		}
+		googleKeys := "-"
+		if googleKeyCount > 0 {
+			googleKeys = fmt.Sprintf("%d", googleKeyCount)
+		}
+
+		// Format oldest key age
+		oldestKeyAge := "-"
+		if sa.OldestKeyAge > 0 {
+			if sa.OldestKeyAge > 365 {
+				oldestKeyAge = fmt.Sprintf("%dy %dd", sa.OldestKeyAge/365, sa.OldestKeyAge%365)
+			} else {
+				oldestKeyAge = fmt.Sprintf("%dd", sa.OldestKeyAge)
+			}
+			// Add warning indicator for old keys
+			if sa.OldestKeyAge > 90 {
+				oldestKeyAge += " ⚠"
+			}
 		}
 
 		// Build IAM bindings from impersonation info
@@ -443,8 +566,8 @@ func (m *ServiceAccountsModule) serviceAccountsToTableBody(serviceAccounts []Ser
 				if email != sa.Email {
 					hasBindings = true
 					body = append(body, []string{
-						m.GetProjectName(sa.ProjectID), sa.ProjectID, sa.Email, attackPaths, sa.DisplayName,
-						disabled, defaultSA, dwd, keyCount, "TokenCreator", member,
+						m.GetProjectName(sa.ProjectID), sa.Email, attackPaths, sa.DisplayName,
+						disabled, defaultSA, dwd, userKeys, googleKeys, oldestKeyAge, "TokenCreator", member,
 					})
 				}
 			}
@@ -453,8 +576,8 @@ func (m *ServiceAccountsModule) serviceAccountsToTableBody(serviceAccounts []Ser
 				if email != sa.Email {
 					hasBindings = true
 					body = append(body, []string{
-						m.GetProjectName(sa.ProjectID), sa.ProjectID, sa.Email, attackPaths, sa.DisplayName,
-						disabled, defaultSA, dwd, keyCount, "KeyAdmin", member,
+						m.GetProjectName(sa.ProjectID), sa.Email, attackPaths, sa.DisplayName,
+						disabled, defaultSA, dwd, userKeys, googleKeys, oldestKeyAge, "KeyAdmin", member,
 					})
 				}
 			}
@@ -463,8 +586,8 @@ func (m *ServiceAccountsModule) serviceAccountsToTableBody(serviceAccounts []Ser
 				if email != sa.Email {
 					hasBindings = true
 					body = append(body, []string{
-						m.GetProjectName(sa.ProjectID), sa.ProjectID, sa.Email, attackPaths, sa.DisplayName,
-						disabled, defaultSA, dwd, keyCount, "ActAs", member,
+						m.GetProjectName(sa.ProjectID), sa.Email, attackPaths, sa.DisplayName,
+						disabled, defaultSA, dwd, userKeys, googleKeys, oldestKeyAge, "ActAs", member,
 					})
 				}
 			}
@@ -473,8 +596,8 @@ func (m *ServiceAccountsModule) serviceAccountsToTableBody(serviceAccounts []Ser
 				if email != sa.Email {
 					hasBindings = true
 					body = append(body, []string{
-						m.GetProjectName(sa.ProjectID), sa.ProjectID, sa.Email, attackPaths, sa.DisplayName,
-						disabled, defaultSA, dwd, keyCount, "SAAdmin", member,
+						m.GetProjectName(sa.ProjectID), sa.Email, attackPaths, sa.DisplayName,
+						disabled, defaultSA, dwd, userKeys, googleKeys, oldestKeyAge, "SAAdmin", member,
 					})
 				}
 			}
@@ -483,8 +606,8 @@ func (m *ServiceAccountsModule) serviceAccountsToTableBody(serviceAccounts []Ser
 				if email != sa.Email {
 					hasBindings = true
 					body = append(body, []string{
-						m.GetProjectName(sa.ProjectID), sa.ProjectID, sa.Email, attackPaths, sa.DisplayName,
-						disabled, defaultSA, dwd, keyCount, "SignBlob", member,
+						m.GetProjectName(sa.ProjectID), sa.Email, attackPaths, sa.DisplayName,
+						disabled, defaultSA, dwd, userKeys, googleKeys, oldestKeyAge, "SignBlob", member,
 					})
 				}
 			}
@@ -493,8 +616,8 @@ func (m *ServiceAccountsModule) serviceAccountsToTableBody(serviceAccounts []Ser
 				if email != sa.Email {
 					hasBindings = true
 					body = append(body, []string{
-						m.GetProjectName(sa.ProjectID), sa.ProjectID, sa.Email, attackPaths, sa.DisplayName,
-						disabled, defaultSA, dwd, keyCount, "SignJwt", member,
+						m.GetProjectName(sa.ProjectID), sa.Email, attackPaths, sa.DisplayName,
+						disabled, defaultSA, dwd, userKeys, googleKeys, oldestKeyAge, "SignJwt", member,
 					})
 				}
 			}
@@ -502,8 +625,8 @@ func (m *ServiceAccountsModule) serviceAccountsToTableBody(serviceAccounts []Ser
 
 		if !hasBindings {
 			body = append(body, []string{
-				m.GetProjectName(sa.ProjectID), sa.ProjectID, sa.Email, attackPaths, sa.DisplayName,
-				disabled, defaultSA, dwd, keyCount, "-", "-",
+				m.GetProjectName(sa.ProjectID), sa.Email, attackPaths, sa.DisplayName,
+				disabled, defaultSA, dwd, userKeys, googleKeys, oldestKeyAge, "-", "-",
 			})
 		}
 	}

@@ -143,14 +143,13 @@ func (m *IAPModule) writeOutput(ctx context.Context, logger internal.Logger) {
 
 func (m *IAPModule) getHeader() []string {
 	return []string{
-		"Project Name",
-		"Project ID",
+		"Project",
 		"Name",
 		"Region",
 		"CIDRs",
 		"FQDNs",
-		"Resource Role",
-		"Resource Principal",
+		"IAM Binding Role",
+		"IAM Binding Principal",
 	}
 }
 
@@ -170,7 +169,6 @@ func (m *IAPModule) groupsToTableBody(groups []iapservice.TunnelDestGroup) [][]s
 			for _, binding := range group.IAMBindings {
 				body = append(body, []string{
 					m.GetProjectName(group.ProjectID),
-					group.ProjectID,
 					group.Name,
 					group.Region,
 					cidrs,
@@ -182,7 +180,6 @@ func (m *IAPModule) groupsToTableBody(groups []iapservice.TunnelDestGroup) [][]s
 		} else {
 			body = append(body, []string{
 				m.GetProjectName(group.ProjectID),
-				group.ProjectID,
 				group.Name,
 				group.Region,
 				cidrs,

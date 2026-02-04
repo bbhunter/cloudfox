@@ -35,8 +35,8 @@ Security Columns:
 - PublicDecrypt: Whether allUsers/allAuthenticatedUsers can decrypt
 
 Resource IAM Columns:
-- Resource Role: The IAM role granted ON this key (e.g., roles/cloudkms.cryptoKeyDecrypter)
-- Resource Principal: The principal (user/SA/group) who has that role on this key
+- IAM Binding Role: The IAM role granted ON this key (e.g., roles/cloudkms.cryptoKeyDecrypter)
+- IAM Binding Principal: The principal (user/SA/group) who has that role on this key
 
 Attack Surface:
 - Public decrypt access allows unauthorized data access
@@ -277,8 +277,7 @@ func (m *KMSModule) writeOutput(ctx context.Context, logger internal.Logger) {
 // getKeysHeader returns the header for the crypto keys table
 func (m *KMSModule) getKeysHeader() []string {
 	return []string{
-		"Project Name",
-		"Project ID",
+		"Project",
 		"Key Name",
 		"Key Ring",
 		"Location",
@@ -289,16 +288,15 @@ func (m *KMSModule) getKeysHeader() []string {
 		"Rotation",
 		"Public Encrypt",
 		"Public Decrypt",
-		"Resource Role",
-		"Resource Principal",
+		"IAM Binding Role",
+		"IAM Binding Principal",
 	}
 }
 
 // getKeyRingsHeader returns the header for the key rings table
 func (m *KMSModule) getKeyRingsHeader() []string {
 	return []string{
-		"Project Name",
-		"Project ID",
+		"Project",
 		"Key Ring",
 		"Location",
 		"Key Count",
@@ -321,38 +319,42 @@ func (m *KMSModule) keysToTableBody(keys []KMSService.CryptoKeyInfo) [][]string 
 			protection = "SOFTWARE"
 		}
 
-		// Base row data (reused for each IAM binding)
-		baseRow := []string{
-			m.GetProjectName(key.ProjectID),
-			key.ProjectID,
-			key.Name,
-			key.KeyRing,
-			key.Location,
-			formatPurpose(key.Purpose),
-			protection,
-			key.PrimaryVersion,
-			key.PrimaryState,
-			rotation,
-			shared.BoolToYesNo(key.IsPublicEncrypt),
-			shared.BoolToYesNo(key.IsPublicDecrypt),
-		}
-
 		// If key has IAM bindings, create one row per binding
 		if len(key.IAMBindings) > 0 {
 			for _, binding := range key.IAMBindings {
-				row := make([]string, len(baseRow)+2)
-				copy(row, baseRow)
-				row[len(baseRow)] = binding.Role
-				row[len(baseRow)+1] = binding.Member
-				body = append(body, row)
+				body = append(body, []string{
+					m.GetProjectName(key.ProjectID),
+					key.Name,
+					key.KeyRing,
+					key.Location,
+					formatPurpose(key.Purpose),
+					protection,
+					key.PrimaryVersion,
+					key.PrimaryState,
+					rotation,
+					shared.BoolToYesNo(key.IsPublicEncrypt),
+					shared.BoolToYesNo(key.IsPublicDecrypt),
+					binding.Role,
+					binding.Member,
+				})
 			}
 		} else {
 			// No IAM bindings - single row
-			row := make([]string, len(baseRow)+2)
-			copy(row, baseRow)
-			row[len(baseRow)] = "-"
-			row[len(baseRow)+1] = "-"
-			body = append(body, row)
+			body = append(body, []string{
+				m.GetProjectName(key.ProjectID),
+				key.Name,
+				key.KeyRing,
+				key.Location,
+				formatPurpose(key.Purpose),
+				protection,
+				key.PrimaryVersion,
+				key.PrimaryState,
+				rotation,
+				shared.BoolToYesNo(key.IsPublicEncrypt),
+				shared.BoolToYesNo(key.IsPublicDecrypt),
+				"-",
+				"-",
+			})
 		}
 	}
 	return body
@@ -364,7 +366,6 @@ func (m *KMSModule) keyRingsToTableBody(keyRings []KMSService.KeyRingInfo) [][]s
 	for _, kr := range keyRings {
 		body = append(body, []string{
 			m.GetProjectName(kr.ProjectID),
-			kr.ProjectID,
 			kr.Name,
 			kr.Location,
 			fmt.Sprintf("%d", kr.KeyCount),

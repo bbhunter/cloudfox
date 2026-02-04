@@ -273,11 +273,11 @@ func (m *CloudArmorModule) writeOutput(ctx context.Context, logger internal.Logg
 }
 
 func (m *CloudArmorModule) getPoliciesHeader() []string {
-	return []string{"Project Name", "Project ID", "Name", "Type", "Rules", "Attached Resources", "Adaptive Protection"}
+	return []string{"Project", "Name", "Type", "Rules", "Attached Resources", "Adaptive Protection"}
 }
 
 func (m *CloudArmorModule) getUnprotectedLBsHeader() []string {
-	return []string{"Project Name", "Project ID", "Backend Service"}
+	return []string{"Project", "Backend Service"}
 }
 
 func (m *CloudArmorModule) policiesToTableBody(policies []cloudarmorservice.SecurityPolicy) [][]string {
@@ -295,7 +295,6 @@ func (m *CloudArmorModule) policiesToTableBody(policies []cloudarmorservice.Secu
 
 		body = append(body, []string{
 			m.GetProjectName(policy.ProjectID),
-			policy.ProjectID,
 			policy.Name,
 			policy.Type,
 			fmt.Sprintf("%d", policy.RuleCount),
@@ -311,7 +310,6 @@ func (m *CloudArmorModule) unprotectedLBsToTableBody(projectID string, lbs []str
 	for _, lb := range lbs {
 		body = append(body, []string{
 			m.GetProjectName(projectID),
-			projectID,
 			lb,
 		})
 	}

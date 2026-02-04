@@ -36,6 +36,10 @@ type AttackPathCache struct {
 	// Populated indicates whether the cache has been populated with data
 	Populated bool
 
+	// RawAttackPathData stores the complete attack path results for modules that need full details
+	// This avoids re-enumeration when privesc module runs after --attack-paths flag
+	RawAttackPathData interface{}
+
 	mu sync.RWMutex
 }
 
@@ -386,8 +390,116 @@ func (c *AttackPathCache) GetStats() (privesc, exfil, lateral int) {
 	return c.PrivescCount, c.ExfilCount, c.LateralCount
 }
 
+// SetRawData stores the complete attack path data for modules that need full details
+// This is used to avoid re-enumeration when running privesc after --attack-paths flag
+func (c *AttackPathCache) SetRawData(data interface{}) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.RawAttackPathData = data
+}
+
+// GetRawData retrieves the complete attack path data
+// Returns nil if no raw data is stored
+func (c *AttackPathCache) GetRawData() interface{} {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.RawAttackPathData
+}
+
+// HasRawData returns true if raw attack path data is available
+func (c *AttackPathCache) HasRawData() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.RawAttackPathData != nil
+}
+
+// GetImpersonationTargets returns service accounts that a principal can impersonate
+// Looks for SA Impersonation category methods where the target SA is stored in ScopeID
+func (c *AttackPathCache) GetImpersonationTargets(principal string) []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	var targets []string
+	seen := make(map[string]bool)
+
+	// Check all path types for SA Impersonation category
+	checkPaths := func(pathMap map[AttackPathType][]AttackMethod) {
+		for _, methods := range pathMap {
+			for _, m := range methods {
+				if m.Category == "SA Impersonation" && m.ScopeID != "" {
+					// ScopeID contains the target SA email when ScopeType is "resource"
+					if m.ScopeType == "resource" && strings.Contains(m.ScopeID, "@") {
+						if !seen[m.ScopeID] {
+							seen[m.ScopeID] = true
+							targets = append(targets, m.ScopeID)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Check by principal email (for service accounts)
+	if pathMap, ok := c.ServiceAccountPaths[principal]; ok {
+		checkPaths(pathMap)
+	}
+
+	// Check with serviceAccount: prefix
+	prefixed := "serviceAccount:" + principal
+	if pathMap, ok := c.PrincipalPaths[prefixed]; ok {
+		checkPaths(pathMap)
+	}
+
+	// Check direct principal match
+	if pathMap, ok := c.PrincipalPaths[principal]; ok {
+		checkPaths(pathMap)
+	}
+
+	return targets
+}
+
+// GetTargetsForMethod returns targets for a specific attack method
+// This is useful for finding what resources a principal can access via specific permissions
+func (c *AttackPathCache) GetTargetsForMethod(principal string, methodName string) []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	var targets []string
+	seen := make(map[string]bool)
+
+	checkPaths := func(pathMap map[AttackPathType][]AttackMethod) {
+		for _, methods := range pathMap {
+			for _, m := range methods {
+				if m.Method == methodName && m.ScopeID != "" {
+					if !seen[m.ScopeID] {
+						seen[m.ScopeID] = true
+						targets = append(targets, m.ScopeID)
+					}
+				}
+			}
+		}
+	}
+
+	// Check all possible locations for this principal
+	if pathMap, ok := c.ServiceAccountPaths[principal]; ok {
+		checkPaths(pathMap)
+	}
+	prefixed := "serviceAccount:" + principal
+	if pathMap, ok := c.PrincipalPaths[prefixed]; ok {
+		checkPaths(pathMap)
+	}
+	if pathMap, ok := c.PrincipalPaths[principal]; ok {
+		checkPaths(pathMap)
+	}
+
+	return targets
+}
+
 // Context key for attack path cache
 type attackPathCacheKey struct{}
+
+// Context key for all-checks mode (skip individual module saves)
+type allChecksModeKey struct{}
 
 // GetAttackPathCacheFromContext retrieves the attack path cache from context
 func GetAttackPathCacheFromContext(ctx context.Context) *AttackPathCache {
@@ -400,6 +512,21 @@ func GetAttackPathCacheFromContext(ctx context.Context) *AttackPathCache {
 // SetAttackPathCacheInContext returns a new context with the attack path cache
 func SetAttackPathCacheInContext(ctx context.Context, cache *AttackPathCache) context.Context {
 	return context.WithValue(ctx, attackPathCacheKey{}, cache)
+}
+
+// IsAllChecksMode returns true if running under all-checks command
+// When true, individual modules should skip saving cache to disk
+// (all-checks will save consolidated cache at the end)
+func IsAllChecksMode(ctx context.Context) bool {
+	if mode, ok := ctx.Value(allChecksModeKey{}).(bool); ok {
+		return mode
+	}
+	return false
+}
+
+// SetAllChecksMode sets the all-checks mode flag in context
+func SetAllChecksMode(ctx context.Context, enabled bool) context.Context {
+	return context.WithValue(ctx, allChecksModeKey{}, enabled)
 }
 
 // Backward compatibility: Keep PrivescCache context functions working

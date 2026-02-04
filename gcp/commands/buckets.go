@@ -47,9 +47,10 @@ type BucketsModule struct {
 	gcpinternal.BaseGCPModule
 
 	// Module-specific fields - per-project for hierarchical output
-	ProjectBuckets map[string][]CloudStorageService.BucketInfo // projectID -> buckets
-	LootMap        map[string]map[string]*internal.LootFile    // projectID -> loot files
-	mu             sync.Mutex
+	ProjectBuckets  map[string][]CloudStorageService.BucketInfo // projectID -> buckets
+	LootMap         map[string]map[string]*internal.LootFile    // projectID -> loot files
+	AttackPathCache *gcpinternal.AttackPathCache                // Cached attack path analysis results
+	mu              sync.Mutex
 }
 
 // ------------------------------
@@ -88,6 +89,19 @@ func runGCPBucketsCommand(cmd *cobra.Command, args []string) {
 // Module Execution
 // ------------------------------
 func (m *BucketsModule) Execute(ctx context.Context, logger internal.Logger) {
+	// Get attack path cache from context (populated by all-checks or attack path analysis)
+	m.AttackPathCache = gcpinternal.GetAttackPathCacheFromContext(ctx)
+
+	// If no context cache, try loading from disk cache
+	if m.AttackPathCache == nil || !m.AttackPathCache.IsPopulated() {
+		diskCache, metadata, err := gcpinternal.LoadAttackPathCacheFromFile(m.OutputDirectory, m.Account)
+		if err == nil && diskCache != nil && diskCache.IsPopulated() {
+			logger.InfoM(fmt.Sprintf("Using attack path cache from disk (created: %s)",
+				metadata.CreatedAt.Format("2006-01-02 15:04:05")), globals.GCP_BUCKETS_MODULE_NAME)
+			m.AttackPathCache = diskCache
+		}
+	}
+
 	// Run enumeration with concurrency
 	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_BUCKETS_MODULE_NAME, m.processProject)
 
@@ -339,17 +353,17 @@ func (m *BucketsModule) writeFlatOutput(ctx context.Context, logger internal.Log
 // getTableHeader returns the buckets table header
 func (m *BucketsModule) getTableHeader() []string {
 	return []string{
-		"Project ID",
-		"Project Name",
+		"Project",
 		"Name",
 		"Location",
 		"Public",
 		"Versioning",
 		"Uniform Access",
 		"Encryption",
-		"Resource Role",
+		"IAM Binding Role",
 		"Principal Type",
-		"Resource Principal",
+		"IAM Binding Principal",
+		"Principal Attack Paths",
 	}
 }
 
@@ -358,7 +372,7 @@ func (m *BucketsModule) bucketsToTableBody(buckets []CloudStorageService.BucketI
 	var body [][]string
 	for _, bucket := range buckets {
 		// Format public access
-		publicDisplay := ""
+		publicDisplay := "No"
 		if bucket.IsPublic {
 			publicDisplay = bucket.PublicAccess
 		}
@@ -368,8 +382,20 @@ func (m *BucketsModule) bucketsToTableBody(buckets []CloudStorageService.BucketI
 			for _, binding := range bucket.IAMBindings {
 				for _, member := range binding.Members {
 					memberType := shared.GetPrincipalType(member)
+
+					// Check attack paths for service account principals
+					attackPaths := "-"
+					if memberType == "ServiceAccount" {
+						if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
+							// Extract email from member string (serviceAccount:email@...)
+							email := strings.TrimPrefix(member, "serviceAccount:")
+							attackPaths = m.AttackPathCache.GetAttackSummary(email)
+						} else {
+							attackPaths = "run --attack-paths"
+						}
+					}
+
 					body = append(body, []string{
-						bucket.ProjectID,
 						m.GetProjectName(bucket.ProjectID),
 						bucket.Name,
 						bucket.Location,
@@ -380,13 +406,13 @@ func (m *BucketsModule) bucketsToTableBody(buckets []CloudStorageService.BucketI
 						binding.Role,
 						memberType,
 						member,
+						attackPaths,
 					})
 				}
 			}
 		} else {
 			// Bucket with no IAM bindings
 			body = append(body, []string{
-				bucket.ProjectID,
 				m.GetProjectName(bucket.ProjectID),
 				bucket.Name,
 				bucket.Location,
@@ -394,6 +420,7 @@ func (m *BucketsModule) bucketsToTableBody(buckets []CloudStorageService.BucketI
 				shared.BoolToYesNo(bucket.VersioningEnabled),
 				shared.BoolToYesNo(bucket.UniformBucketLevelAccess),
 				bucket.EncryptionType,
+				"-",
 				"-",
 				"-",
 				"-",

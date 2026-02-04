@@ -197,7 +197,7 @@ func (m *NotebooksModule) getInstancesHeader() []string {
 		"State",
 		"Machine Type",
 		"Service Account",
-		"Attack Paths",
+		"SA Attack Paths",
 		"Network",
 		"Subnet",
 		"Public IP",
@@ -218,7 +218,7 @@ func (m *NotebooksModule) getRuntimesHeader() []string {
 		"Type",
 		"Machine Type",
 		"Service Account",
-		"Attack Paths",
+		"SA Attack Paths",
 		"Network",
 		"Subnet",
 	}
@@ -237,7 +237,7 @@ func (m *NotebooksModule) instancesToTableBody(instances []notebooksservice.Note
 		}
 
 		// Check attack paths (privesc/exfil/lateral) for the service account
-		attackPaths := "-"
+		attackPaths := "run --attack-paths"
 		if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
 			if sa != "(default)" && sa != "" {
 				attackPaths = m.AttackPathCache.GetAttackSummary(sa)
@@ -292,7 +292,7 @@ func (m *NotebooksModule) runtimesToTableBody(runtimes []notebooksservice.Runtim
 		}
 
 		// Check attack paths (privesc/exfil/lateral) for the service account
-		attackPaths := "-"
+		attackPaths := "run --attack-paths"
 		if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
 			if sa != "-" && sa != "" {
 				attackPaths = m.AttackPathCache.GetAttackSummary(sa)

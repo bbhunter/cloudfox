@@ -327,6 +327,9 @@ func (s *OrganizationsService) GetProjectAncestry(projectID string) ([]Hierarchy
 	var ancestry []HierarchyNode
 	resourceID := "projects/" + projectID
 
+	// Track inaccessible folder IDs so we can try to find org via search
+	var inaccessibleFolderID string
+
 	for {
 		if strings.HasPrefix(resourceID, "organizations/") {
 			orgID := strings.TrimPrefix(resourceID, "organizations/")
@@ -347,6 +350,30 @@ func (s *OrganizationsService) GetProjectAncestry(projectID string) ([]Hierarchy
 		} else if strings.HasPrefix(resourceID, "folders/") {
 			folder, err := foldersClient.GetFolder(ctx, &resourcemanagerpb.GetFolderRequest{Name: resourceID})
 			if err != nil {
+				// Permission denied on folder - skip this folder and try to find the org
+				// Don't add the inaccessible folder to ancestry, just try to find the org
+				inaccessibleFolderID = strings.TrimPrefix(resourceID, "folders/")
+
+				// Try to find the org by searching accessible orgs
+				orgsIter := orgsClient.SearchOrganizations(ctx, &resourcemanagerpb.SearchOrganizationsRequest{})
+				for {
+					org, iterErr := orgsIter.Next()
+					if iterErr == iterator.Done {
+						break
+					}
+					if iterErr != nil {
+						break
+					}
+					// Add the first accessible org (best effort)
+					// The project likely belongs to one of the user's accessible orgs
+					orgID := strings.TrimPrefix(org.Name, "organizations/")
+					ancestry = append(ancestry, HierarchyNode{
+						Type:        "organization",
+						ID:          orgID,
+						DisplayName: org.DisplayName,
+					})
+					break
+				}
 				break
 			}
 			folderID := strings.TrimPrefix(folder.Name, "folders/")
@@ -373,6 +400,9 @@ func (s *OrganizationsService) GetProjectAncestry(projectID string) ([]Hierarchy
 			break
 		}
 	}
+
+	// Suppress unused variable warning
+	_ = inaccessibleFolderID
 
 	// Reverse to go from organization to project
 	for i, j := 0, len(ancestry)-1; i < j; i, j = i+1, j-1 {

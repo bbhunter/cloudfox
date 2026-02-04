@@ -243,31 +243,29 @@ func (m *BigQueryModule) writeOutput(ctx context.Context, logger internal.Logger
 // getDatasetHeader returns the dataset table header
 func (m *BigQueryModule) getDatasetHeader() []string {
 	return []string{
-		"Project ID",
-		"Project Name",
+		"Project",
 		"Dataset ID",
 		"Location",
 		"Public",
 		"Encryption",
-		"Resource Role",
+		"IAM Binding Role",
 		"Principal Type",
-		"Resource Principal",
+		"IAM Binding Principal",
 	}
 }
 
 // getTableHeader returns the table table header
 func (m *BigQueryModule) getTableHeader() []string {
 	return []string{
-		"Project ID",
-		"Project Name",
+		"Project",
 		"Dataset ID",
 		"Table ID",
 		"Type",
 		"Encryption",
 		"Rows",
 		"Public",
-		"Resource Role",
-		"Resource Principal",
+		"IAM Binding Role",
+		"IAM Binding Principal",
 	}
 }
 
@@ -290,7 +288,6 @@ func (m *BigQueryModule) datasetsToTableBody(datasets []BigQueryService.Bigquery
 					role = "READER"
 				}
 				body = append(body, []string{
-					dataset.ProjectID,
 					m.GetProjectName(dataset.ProjectID),
 					dataset.DatasetID,
 					dataset.Location,
@@ -303,7 +300,6 @@ func (m *BigQueryModule) datasetsToTableBody(datasets []BigQueryService.Bigquery
 			}
 		} else {
 			body = append(body, []string{
-				dataset.ProjectID,
 				m.GetProjectName(dataset.ProjectID),
 				dataset.DatasetID,
 				dataset.Location,
@@ -329,7 +325,6 @@ func (m *BigQueryModule) tablesToTableBody(tables []BigQueryService.BigqueryTabl
 
 		if len(table.IAMBindings) == 0 {
 			body = append(body, []string{
-				table.ProjectID,
 				m.GetProjectName(table.ProjectID),
 				table.DatasetID,
 				table.TableID,
@@ -344,7 +339,6 @@ func (m *BigQueryModule) tablesToTableBody(tables []BigQueryService.BigqueryTabl
 			for _, binding := range table.IAMBindings {
 				for _, member := range binding.Members {
 					body = append(body, []string{
-						table.ProjectID,
 						m.GetProjectName(table.ProjectID),
 						table.DatasetID,
 						table.TableID,

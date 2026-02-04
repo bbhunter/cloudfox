@@ -183,7 +183,7 @@ func (m *ComposerModule) getTableHeader() []string {
 		"Location",
 		"State",
 		"Service Account",
-		"Attack Paths",
+		"SA Attack Paths",
 		"Private",
 		"Private Endpoint",
 		"Airflow URI",
@@ -201,7 +201,7 @@ func (m *ComposerModule) environmentsToTableBody(environments []composerservice.
 		}
 
 		// Check attack paths (privesc/exfil/lateral) for the service account
-		attackPaths := "-"
+		attackPaths := "run --attack-paths"
 		if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
 			if sa != "(default)" && sa != "" {
 				attackPaths = m.AttackPathCache.GetAttackSummary(sa)

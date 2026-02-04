@@ -246,7 +246,7 @@ func (m *SchedulerModule) getTableHeader() []string {
 		"Target Type",
 		"Target",
 		"Service Account",
-		"Attack Paths",
+		"SA Attack Paths",
 		"Last Run",
 	}
 }
@@ -265,7 +265,7 @@ func (m *SchedulerModule) jobsToTableBody(jobs []SchedulerService.JobInfo) [][]s
 		}
 
 		// Check attack paths (privesc/exfil/lateral) for the service account
-		attackPaths := "-"
+		attackPaths := "run --attack-paths"
 		if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
 			if sa != "-" {
 				attackPaths = m.AttackPathCache.GetAttackSummary(sa)

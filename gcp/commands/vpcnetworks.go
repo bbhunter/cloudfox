@@ -371,19 +371,19 @@ func (m *VPCNetworksModule) generateVPCNetworksDiagram() string {
 }
 
 func (m *VPCNetworksModule) getNetworksHeader() []string {
-	return []string{"Project Name", "Project ID", "Name", "Routing Mode", "Auto Subnets", "Subnets", "Peerings"}
+	return []string{"Project", "Name", "Routing Mode", "Auto Subnets", "Subnets", "Peerings"}
 }
 
 func (m *VPCNetworksModule) getSubnetsHeader() []string {
-	return []string{"Project Name", "Project ID", "Name", "Network", "Region", "CIDR", "Private Access", "Flow Logs"}
+	return []string{"Project", "Name", "Network", "Region", "CIDR", "Private Access", "Flow Logs"}
 }
 
 func (m *VPCNetworksModule) getPeeringsHeader() []string {
-	return []string{"Project Name", "Project ID", "Name", "Network", "Peer Network", "Peer Project", "State", "Export Routes", "Import Routes"}
+	return []string{"Project", "Name", "Network", "Peer Network", "Peer Project", "State", "Export Routes", "Import Routes"}
 }
 
 func (m *VPCNetworksModule) getRoutesHeader() []string {
-	return []string{"Project Name", "Project ID", "Name", "Network", "Dest Range", "Next Hop Type", "Next Hop", "Priority"}
+	return []string{"Project", "Name", "Network", "Dest Range", "Next Hop Type", "Next Hop", "Priority"}
 }
 
 func (m *VPCNetworksModule) networksToTableBody(networks []vpcservice.VPCNetworkInfo) [][]string {
@@ -395,7 +395,6 @@ func (m *VPCNetworksModule) networksToTableBody(networks []vpcservice.VPCNetwork
 		}
 		body = append(body, []string{
 			m.GetProjectName(network.ProjectID),
-			network.ProjectID,
 			network.Name,
 			network.RoutingMode,
 			autoSubnets,
@@ -419,7 +418,6 @@ func (m *VPCNetworksModule) subnetsToTableBody(subnets []vpcservice.SubnetInfo) 
 		}
 		body = append(body, []string{
 			m.GetProjectName(subnet.ProjectID),
-			subnet.ProjectID,
 			subnet.Name,
 			subnet.Network,
 			subnet.Region,
@@ -448,7 +446,6 @@ func (m *VPCNetworksModule) peeringsToTableBody(peerings []vpcservice.VPCPeering
 		}
 		body = append(body, []string{
 			m.GetProjectName(peering.ProjectID),
-			peering.ProjectID,
 			peering.Name,
 			peering.Network,
 			peering.PeerNetwork,
@@ -470,7 +467,6 @@ func (m *VPCNetworksModule) routesToTableBody(routes []vpcservice.RouteInfo) [][
 		}
 		body = append(body, []string{
 			m.GetProjectName(route.ProjectID),
-			route.ProjectID,
 			route.Name,
 			route.Network,
 			route.DestRange,

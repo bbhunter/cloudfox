@@ -120,6 +120,7 @@ type NodePoolInfo struct {
 	OAuthScopes       []string
 	// Pentest-specific fields
 	HasCloudPlatformScope bool     // Full access to GCP
+	ScopeSummary          string   // Human-readable scope summary (e.g., "Full Access", "Restricted")
 	RiskyScopes          []string // Scopes that enable attacks
 }
 
@@ -320,7 +321,7 @@ func parseNodePoolInfo(np *container.NodePool, clusterName, projectID, location 
 		}
 
 		// Analyze OAuth scopes for risky permissions
-		info.HasCloudPlatformScope, info.RiskyScopes = analyzeOAuthScopes(np.Config.OauthScopes)
+		info.HasCloudPlatformScope, info.ScopeSummary, info.RiskyScopes = analyzeOAuthScopes(np.Config.OauthScopes)
 	}
 
 	if np.Management != nil {
@@ -331,16 +332,16 @@ func parseNodePoolInfo(np *container.NodePool, clusterName, projectID, location 
 	return info
 }
 
-// analyzeOAuthScopes identifies risky OAuth scopes
-func analyzeOAuthScopes(scopes []string) (hasCloudPlatform bool, riskyScopes []string) {
+// analyzeOAuthScopes identifies risky OAuth scopes and returns a summary
+func analyzeOAuthScopes(scopes []string) (hasCloudPlatform bool, scopeSummary string, riskyScopes []string) {
 	riskyPatterns := map[string]string{
-		"https://www.googleapis.com/auth/cloud-platform":       "Full GCP access",
-		"https://www.googleapis.com/auth/compute":              "Full Compute Engine access",
+		"https://www.googleapis.com/auth/cloud-platform":          "Full GCP access",
+		"https://www.googleapis.com/auth/compute":                 "Full Compute Engine access",
 		"https://www.googleapis.com/auth/devstorage.full_control": "Full Cloud Storage access",
 		"https://www.googleapis.com/auth/devstorage.read_write":   "Read/write Cloud Storage",
-		"https://www.googleapis.com/auth/logging.admin":        "Logging admin (can delete logs)",
-		"https://www.googleapis.com/auth/source.full_control":  "Full source repo access",
-		"https://www.googleapis.com/auth/sqlservice.admin":     "Cloud SQL admin",
+		"https://www.googleapis.com/auth/logging.admin":           "Logging admin (can delete logs)",
+		"https://www.googleapis.com/auth/source.full_control":     "Full source repo access",
+		"https://www.googleapis.com/auth/sqlservice.admin":        "Cloud SQL admin",
 	}
 
 	for _, scope := range scopes {
@@ -350,6 +351,21 @@ func analyzeOAuthScopes(scopes []string) (hasCloudPlatform bool, riskyScopes []s
 		if desc, found := riskyPatterns[scope]; found {
 			riskyScopes = append(riskyScopes, fmt.Sprintf("%s: %s", scope, desc))
 		}
+	}
+
+	// Determine scope summary
+	// GKE default scopes (when not explicitly set) typically include:
+	// - logging.write, monitoring, devstorage.read_only, service.management.readonly, servicecontrol, trace.append
+	if hasCloudPlatform {
+		scopeSummary = "Full Access"
+	} else if len(riskyScopes) > 0 {
+		// Has some risky scopes but not full access
+		scopeSummary = fmt.Sprintf("Broad (%d risky)", len(riskyScopes))
+	} else if len(scopes) == 0 {
+		// Empty scopes likely means default GKE scopes (limited)
+		scopeSummary = "Default"
+	} else {
+		scopeSummary = "Restricted"
 	}
 
 	return

@@ -1292,8 +1292,7 @@ func (m *EndpointsModule) writeOutput(ctx context.Context, logger internal.Logge
 
 func (m *EndpointsModule) getHeader() []string {
 	return []string{
-		"Project ID",
-		"Project Name",
+		"Project",
 		"Name",
 		"Type",
 		"Exposure",
@@ -1348,7 +1347,6 @@ func (m *EndpointsModule) endpointsToTableBody(endpoints []Endpoint) [][]string 
 		}
 
 		body = append(body, []string{
-			ep.ProjectID,
 			m.GetProjectName(ep.ProjectID),
 			ep.Name,
 			ep.Type,

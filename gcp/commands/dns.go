@@ -260,8 +260,7 @@ func (m *DNSModule) writeOutput(ctx context.Context, logger internal.Logger) {
 // getZonesHeader returns the header for the zones table
 func (m *DNSModule) getZonesHeader() []string {
 	return []string{
-		"Project Name",
-		"Project ID",
+		"Project",
 		"Zone Name",
 		"DNS Name",
 		"Visibility",
@@ -269,8 +268,8 @@ func (m *DNSModule) getZonesHeader() []string {
 		"Security",
 		"Networks/Peering",
 		"Forwarding",
-		"Resource Role",
-		"Resource Principal",
+		"IAM Binding Role",
+		"IAM Binding Principal",
 	}
 }
 
@@ -324,13 +323,13 @@ func (m *DNSModule) zonesToTableBody(zones []DNSService.ZoneInfo) [][]string {
 		if len(zone.IAMBindings) > 0 {
 			for _, binding := range zone.IAMBindings {
 				body = append(body, []string{
-					m.GetProjectName(zone.ProjectID), zone.ProjectID, zone.Name, zone.DNSName,
+					m.GetProjectName(zone.ProjectID), zone.Name, zone.DNSName,
 					zone.Visibility, dnssec, security, networkInfo, forwarding, binding.Role, binding.Member,
 				})
 			}
 		} else {
 			body = append(body, []string{
-				m.GetProjectName(zone.ProjectID), zone.ProjectID, zone.Name, zone.DNSName,
+				m.GetProjectName(zone.ProjectID), zone.Name, zone.DNSName,
 				zone.Visibility, dnssec, security, networkInfo, forwarding, "-", "-",
 			})
 		}

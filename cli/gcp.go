@@ -36,6 +36,12 @@ var (
 	// Attack path analysis flag
 	GCPAttackPaths bool
 
+	// Organization cache flag - enumerates all orgs/folders/projects for cross-project analysis
+	GCPOrgCache bool
+
+	// Refresh cache flag - force re-enumeration even if cache exists
+	GCPRefreshCache bool
+
 	// misc options
 	// GCPIgnoreCache		bool
 
@@ -49,12 +55,23 @@ var (
 		Long:    `See "Available Commands" for GCP Modules below`,
 		Short:   "See \"Available Commands\" for GCP Modules below",
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
-			// Initialize project names map
+			// Reset project IDs and names to avoid accumulation across commands
+			GCPProjectIDs = nil
 			GCPProjectNames = make(map[string]string)
 
 			// Handle project discovery based on flags
-			if GCPAllProjects {
-				// Discover all accessible projects
+			// Priority: -p (single project) > -l (project list) > -A (all projects)
+			if GCPProjectID != "" {
+				// Single project specified with -p/--project
+				GCPProjectIDs = append(GCPProjectIDs, GCPProjectID)
+				resolveProjectNames(GCPProjectIDs)
+			} else if GCPProjectIDsFilePath != "" {
+				// Project list specified with -l/--project-list
+				rawProjectIDs := internal.LoadFileLinesIntoArray(GCPProjectIDsFilePath)
+				GCPProjectIDs = deduplicateProjectIDs(rawProjectIDs)
+				resolveProjectNames(GCPProjectIDs)
+			} else if GCPAllProjects {
+				// Discover all accessible projects with -A/--all-projects
 				GCPLogger.InfoM("Discovering all accessible projects...", "gcp")
 				orgsSvc := orgsservice.New()
 				projects, err := orgsSvc.SearchProjects("")
@@ -71,17 +88,8 @@ var (
 					GCPLogger.FatalM("No accessible projects found. Check your permissions.", "gcp")
 				}
 				GCPLogger.InfoM(fmt.Sprintf("Discovered %d project(s)", len(GCPProjectIDs)), "gcp")
-			} else if GCPProjectID != "" {
-				GCPProjectIDs = append(GCPProjectIDs, GCPProjectID)
-				// Resolve project name for single project
-				resolveProjectNames(GCPProjectIDs)
-			} else if GCPProjectIDsFilePath != "" {
-				rawProjectIDs := internal.LoadFileLinesIntoArray(GCPProjectIDsFilePath)
-				GCPProjectIDs = deduplicateProjectIDs(rawProjectIDs)
-				// Resolve project names for all projects in list
-				resolveProjectNames(GCPProjectIDs)
 			} else {
-				GCPLogger.InfoM("project, project-list, or all-projects flag not given, commands requiring a project ID will fail", "gcp")
+				GCPLogger.InfoM("No project scope specified. Use -p, -l, or -A flag.", "gcp")
 			}
 
 			// Create a context with project IDs and names
@@ -115,15 +123,28 @@ var (
 				}
 			}
 
-			// If --attack-paths flag is set, run attack path analysis and populate cache
+			// Get account for cache operations
+			account, _ := ctx.Value("account").(string)
+
+			// If --attack-paths flag is set, load or run attack path analysis
 			// This allows individual modules to show the Attack Paths column
 			if GCPAttackPaths && len(GCPProjectIDs) > 0 {
-				GCPLogger.InfoM("Running attack path analysis (privesc/exfil/lateral)...", "gcp")
-				attackPathCache := runAttackPathAnalysisAndPopulateCache(ctx)
+				GCPLogger.InfoM("Loading/running attack path analysis (privesc/exfil/lateral)...", "gcp")
+				attackPathCache := loadOrRunAttackPathAnalysis(ctx, GCPRefreshCache)
 				if attackPathCache != nil && attackPathCache.IsPopulated() {
 					ctx = gcpinternal.SetAttackPathCacheInContext(ctx, attackPathCache)
 					privesc, exfil, lateral := attackPathCache.GetStats()
-					GCPLogger.SuccessM(fmt.Sprintf("Attack path cache populated: %d privesc, %d exfil, %d lateral - modules will show Attack Paths column", privesc, exfil, lateral), "gcp")
+					GCPLogger.SuccessM(fmt.Sprintf("Attack path cache ready: %d privesc, %d exfil, %d lateral - modules will show Attack Paths column", privesc, exfil, lateral), "gcp")
+				}
+			}
+
+			// If --org-cache flag is set, load or enumerate all orgs/folders/projects
+			// This is useful for cross-project analysis modules
+			if GCPOrgCache {
+				GCPLogger.InfoM("Loading/enumerating organization data...", "gcp")
+				orgCache := loadOrPopulateOrgCache(account, GCPRefreshCache)
+				if orgCache != nil && orgCache.IsPopulated() {
+					ctx = gcpinternal.SetOrgCacheInContext(ctx, orgCache)
 				}
 			}
 
@@ -207,6 +228,26 @@ var GCPAllChecksCommand = &cobra.Command{
 		var executedModules []string
 		startTime := time.Now()
 		ctx := cmd.Context()
+		account, _ := ctx.Value("account").(string)
+
+		// Set all-checks mode - individual modules will skip saving cache
+		// (we'll save consolidated cache at the end)
+		ctx = gcpinternal.SetAllChecksMode(ctx, true)
+		cmd.SetContext(ctx)
+
+		// Load or populate org cache for cross-project modules
+		existingOrgCache := gcpinternal.GetOrgCacheFromContext(ctx)
+		if existingOrgCache == nil || !existingOrgCache.IsPopulated() {
+			GCPLogger.InfoM("Loading/enumerating organization data for cross-project analysis...", "all-checks")
+			orgCache := loadOrPopulateOrgCache(account, GCPRefreshCache)
+			if orgCache != nil && orgCache.IsPopulated() {
+				ctx = gcpinternal.SetOrgCacheInContext(ctx, orgCache)
+				cmd.SetContext(ctx)
+			}
+		} else {
+			orgs, folders, projects := existingOrgCache.GetStats()
+			GCPLogger.InfoM(fmt.Sprintf("Using existing org cache: %d org(s), %d folder(s), %d project(s)", orgs, folders, projects), "all-checks")
+		}
 
 		// Find the privesc command to run first
 		var privescCmd *cobra.Command
@@ -223,13 +264,22 @@ var GCPAllChecksCommand = &cobra.Command{
 			privescCmd.Run(cmd, args)
 			executedModules = append(executedModules, "privesc")
 
-			// After running privesc, populate attack path cache for other modules
-			attackPathCache := runAttackPathAnalysisAndPopulateCache(ctx)
-			if attackPathCache != nil && attackPathCache.IsPopulated() {
-				ctx = gcpinternal.SetAttackPathCacheInContext(ctx, attackPathCache)
-				cmd.SetContext(ctx)
-				privesc, exfil, lateral := attackPathCache.GetStats()
-				GCPLogger.SuccessM(fmt.Sprintf("Attack path cache populated: %d privesc, %d exfil, %d lateral", privesc, exfil, lateral), "all-checks")
+			// After running privesc, load or populate attack path cache for other modules
+			// BUT only if cache wasn't already populated by --attack-paths flag in PersistentPreRun
+			existingCache := gcpinternal.GetAttackPathCacheFromContext(ctx)
+			if existingCache != nil && existingCache.IsPopulated() {
+				// Cache already populated by --attack-paths flag, reuse it
+				privesc, exfil, lateral := existingCache.GetStats()
+				GCPLogger.InfoM(fmt.Sprintf("Using existing attack path cache: %d privesc, %d exfil, %d lateral", privesc, exfil, lateral), "all-checks")
+			} else {
+				// Load from disk or run analysis
+				attackPathCache := loadOrRunAttackPathAnalysis(ctx, GCPRefreshCache)
+				if attackPathCache != nil && attackPathCache.IsPopulated() {
+					ctx = gcpinternal.SetAttackPathCacheInContext(ctx, attackPathCache)
+					cmd.SetContext(ctx)
+					privesc, exfil, lateral := attackPathCache.GetStats()
+					GCPLogger.SuccessM(fmt.Sprintf("Attack path cache ready: %d privesc, %d exfil, %d lateral", privesc, exfil, lateral), "all-checks")
+				}
 			}
 			GCPLogger.InfoM("", "all-checks")
 		}
@@ -265,8 +315,33 @@ var GCPAllChecksCommand = &cobra.Command{
 	},
 }
 
-// runAttackPathAnalysisAndPopulateCache runs attack path analysis for all types and returns a populated cache
-func runAttackPathAnalysisAndPopulateCache(ctx context.Context) *gcpinternal.AttackPathCache {
+// loadOrRunAttackPathAnalysis loads attack path cache from disk if available, or runs analysis and saves it
+func loadOrRunAttackPathAnalysis(ctx context.Context, forceRefresh bool) *gcpinternal.AttackPathCache {
+	account, _ := ctx.Value("account").(string)
+
+	// Check if cache exists and we're not forcing refresh
+	if !forceRefresh && gcpinternal.AttackPathCacheExists(GCPOutputDirectory, account) {
+		cache, metadata, err := gcpinternal.LoadAttackPathCacheFromFile(GCPOutputDirectory, account)
+		if err == nil && cache != nil {
+			age, _ := gcpinternal.GetCacheAge(GCPOutputDirectory, account, "attack-paths")
+			privesc, exfil, lateral := cache.GetStats()
+			GCPLogger.InfoM(fmt.Sprintf("Loaded attack path cache from disk (age: %s, %d projects analyzed, P:%d E:%d L:%d)",
+				formatDuration(age), len(metadata.ProjectsIn), privesc, exfil, lateral), "gcp")
+			return cache
+		}
+		if err != nil {
+			GCPLogger.InfoM(fmt.Sprintf("Could not load attack path cache: %v, re-analyzing...", err), "gcp")
+			// Delete corrupted cache file
+			gcpinternal.DeleteCache(GCPOutputDirectory, account, "attack-paths")
+		}
+	}
+
+	// Run analysis and create cache
+	return runAttackPathAnalysisAndSave(ctx)
+}
+
+// runAttackPathAnalysisAndSave runs attack path analysis and saves to disk
+func runAttackPathAnalysisAndSave(ctx context.Context) *gcpinternal.AttackPathCache {
 	cache := gcpinternal.NewAttackPathCache()
 
 	// Get project IDs from context
@@ -274,6 +349,9 @@ func runAttackPathAnalysisAndPopulateCache(ctx context.Context) *gcpinternal.Att
 	if !ok || len(projectIDs) == 0 {
 		return cache
 	}
+
+	// Get account from context
+	account, _ := ctx.Value("account").(string)
 
 	// Get project names from context
 	projectNames, _ := ctx.Value("projectNames").(map[string]string)
@@ -287,9 +365,12 @@ func runAttackPathAnalysisAndPopulateCache(ctx context.Context) *gcpinternal.Att
 	// Run analysis for all attack path types
 	result, err := svc.CombinedAttackPathAnalysis(ctx, projectIDs, projectNames, "all")
 	if err != nil {
-		GCPLogger.ErrorM(fmt.Sprintf("Failed to run attack path analysis: %v", err), "all-checks")
+		GCPLogger.ErrorM(fmt.Sprintf("Failed to run attack path analysis: %v", err), "gcp")
 		return cache
 	}
+
+	// Store raw data for modules that need full details (like privesc)
+	cache.SetRawData(result)
 
 	// Convert paths to cache format
 	var pathInfos []gcpinternal.AttackPathInfo
@@ -323,16 +404,111 @@ func runAttackPathAnalysisAndPopulateCache(ctx context.Context) *gcpinternal.Att
 	// Populate cache
 	cache.PopulateFromPaths(pathInfos)
 
+	// Save to disk
+	err = gcpinternal.SaveAttackPathCacheToFile(cache, projectIDs, GCPOutputDirectory, account, "2.0.0")
+	if err != nil {
+		GCPLogger.InfoM(fmt.Sprintf("Could not save attack path cache to disk: %v", err), "gcp")
+	} else {
+		cacheDir := gcpinternal.GetCacheDirectory(GCPOutputDirectory, account)
+		GCPLogger.InfoM(fmt.Sprintf("Attack path cache saved to %s", cacheDir), "gcp")
+	}
+
 	privesc, exfil, lateral := cache.GetStats()
-	GCPLogger.InfoM(fmt.Sprintf("Attack path analysis: %d privesc, %d exfil, %d lateral", privesc, exfil, lateral), "all-checks")
+	GCPLogger.InfoM(fmt.Sprintf("Attack path analysis: %d privesc, %d exfil, %d lateral", privesc, exfil, lateral), "gcp")
 
 	return cache
 }
 
 // runPrivescAndPopulateCache is kept for backward compatibility
-// DEPRECATED: Use runAttackPathAnalysisAndPopulateCache instead
+// DEPRECATED: Use loadOrRunAttackPathAnalysis instead
 func runPrivescAndPopulateCache(ctx context.Context) *gcpinternal.PrivescCache {
-	return runAttackPathAnalysisAndPopulateCache(ctx)
+	return runAttackPathAnalysisAndSave(ctx)
+}
+
+// loadOrPopulateOrgCache loads org cache from disk if available, or enumerates and saves it
+func loadOrPopulateOrgCache(account string, forceRefresh bool) *gcpinternal.OrgCache {
+	// Check if cache exists and we're not forcing refresh
+	if !forceRefresh && gcpinternal.OrgCacheExists(GCPOutputDirectory, account) {
+		cache, metadata, err := gcpinternal.LoadOrgCacheFromFile(GCPOutputDirectory, account)
+		if err == nil && cache != nil {
+			age, _ := gcpinternal.GetCacheAge(GCPOutputDirectory, account, "org")
+			GCPLogger.InfoM(fmt.Sprintf("Loaded org cache from disk (age: %s, %d projects)",
+				formatDuration(age), metadata.TotalProjects), "gcp")
+			return cache
+		}
+		if err != nil {
+			GCPLogger.InfoM(fmt.Sprintf("Could not load org cache: %v, re-enumerating...", err), "gcp")
+			// Delete corrupted cache file
+			gcpinternal.DeleteCache(GCPOutputDirectory, account, "org")
+		}
+	}
+
+	// Enumerate and create cache
+	cache := enumerateAndCacheOrgs(account)
+	return cache
+}
+
+// enumerateAndCacheOrgs enumerates all orgs/folders/projects and saves to disk
+func enumerateAndCacheOrgs(account string) *gcpinternal.OrgCache {
+	cache := gcpinternal.NewOrgCache()
+
+	orgsSvc := orgsservice.New()
+
+	// Get all organizations
+	orgs, err := orgsSvc.SearchOrganizations()
+	if err == nil {
+		for _, org := range orgs {
+			cache.AddOrganization(gcpinternal.CachedOrganization{
+				ID:          org.Name[len("organizations/"):], // Strip prefix
+				Name:        org.Name,
+				DisplayName: org.DisplayName,
+			})
+		}
+	}
+
+	// Get all folders
+	folders, err := orgsSvc.SearchAllFolders()
+	if err == nil {
+		for _, folder := range folders {
+			cache.AddFolder(gcpinternal.CachedFolder{
+				ID:          folder.Name[len("folders/"):], // Strip prefix
+				Name:        folder.Name,
+				DisplayName: folder.DisplayName,
+				Parent:      folder.Parent,
+			})
+		}
+	}
+
+	// Get all projects
+	projects, err := orgsSvc.SearchProjects("")
+	if err == nil {
+		for _, project := range projects {
+			cache.AddProject(gcpinternal.CachedProject{
+				ID:          project.ProjectID,
+				Name:        project.Name,
+				DisplayName: project.DisplayName,
+				Parent:      project.Parent,
+				State:       project.State,
+			})
+		}
+	}
+
+	cache.MarkPopulated()
+
+	// Save to disk
+	err = gcpinternal.SaveOrgCacheToFile(cache, GCPOutputDirectory, account, "2.0.0")
+	if err != nil {
+		GCPLogger.InfoM(fmt.Sprintf("Could not save org cache to disk: %v", err), "gcp")
+	} else {
+		cacheDir := gcpinternal.GetCacheDirectory(GCPOutputDirectory, account)
+		GCPLogger.InfoM(fmt.Sprintf("Org cache saved to %s", cacheDir), "gcp")
+	}
+
+	orgsCount, foldersCount, projectsCount := cache.GetStats()
+	GCPLogger.InfoM(fmt.Sprintf("Organization cache populated: %d org(s), %d folder(s), %d project(s)",
+		orgsCount, foldersCount, projectsCount), "gcp")
+
+	return cache
 }
 
 // printExecutionSummary prints a summary of all executed modules
@@ -385,7 +561,7 @@ func init() {
 	// GCPCommands.PersistentFlags().StringVarP(&GCPOrganization, "organization", "o", "", "Organization name or number, repetable")
 	GCPCommands.PersistentFlags().StringVarP(&GCPProjectID, "project", "p", "", "GCP project ID")
 	GCPCommands.PersistentFlags().StringVarP(&GCPProjectIDsFilePath, "project-list", "l", "", "Path to a file containing a list of project IDs separated by newlines")
-	GCPCommands.PersistentFlags().BoolVarP(&GCPAllProjects, "all-projects", "A", true, "Automatically discover and target all accessible projects (default)")
+	GCPCommands.PersistentFlags().BoolVarP(&GCPAllProjects, "all-projects", "A", false, "Automatically discover and target all accessible projects")
 	// GCPCommands.PersistentFlags().BoolVarP(&GCPConfirm, "yes", "y", false, "Non-interactive mode (like apt/yum)")
 	// GCPCommands.PersistentFlags().StringVarP(&GCPOutputFormat, "output", "", "brief", "[\"brief\" | \"wide\" ]")
 	GCPCommands.PersistentFlags().IntVarP(&Verbosity, "verbosity", "v", 2, "1 = Print control messages only\n2 = Print control messages, module output\n3 = Print control messages, module output, and loot file output\n")
@@ -395,6 +571,8 @@ func init() {
 	GCPCommands.PersistentFlags().BoolVarP(&GCPWrapTable, "wrap", "w", false, "Wrap table to fit in terminal (complicates grepping)")
 	GCPCommands.PersistentFlags().BoolVar(&GCPFlatOutput, "flat-output", false, "Use legacy flat output structure instead of hierarchical per-project directories")
 	GCPCommands.PersistentFlags().BoolVar(&GCPAttackPaths, "attack-paths", false, "Run attack path analysis (privesc/exfil/lateral) and add Attack Paths column to module output")
+	GCPCommands.PersistentFlags().BoolVar(&GCPOrgCache, "org-cache", false, "Enumerate all accessible orgs/folders/projects and cache for cross-project analysis")
+	GCPCommands.PersistentFlags().BoolVar(&GCPRefreshCache, "refresh-cache", false, "Force re-enumeration of cached data even if cache files exist")
 
 	// Available commands
 	GCPCommands.AddCommand(
@@ -466,7 +644,6 @@ func init() {
 		commands.GCPOrgPoliciesCommand,
 		commands.GCPBucketEnumCommand,
 		commands.GCPCrossProjectCommand,
-		commands.GCPLoggingGapsCommand,
 		commands.GCPSourceReposCommand,
 		commands.GCPServiceAgentsCommand,
 		commands.GCPDomainWideDelegationCommand,
@@ -476,6 +653,12 @@ func init() {
 		commands.GCPLateralMovementCommand,
 		commands.GCPDataExfiltrationCommand,
 		commands.GCPPublicAccessCommand,
+
+		// Inventory command
+		commands.GCPInventoryCommand,
+
+		// Hidden admin commands
+		commands.GCPHiddenAdminsCommand,
 
 		// All checks (last)
 		GCPAllChecksCommand,

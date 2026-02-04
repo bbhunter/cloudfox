@@ -176,8 +176,7 @@ func (m *DataprocModule) writeOutput(ctx context.Context, logger internal.Logger
 
 func (m *DataprocModule) getTableHeader() []string {
 	return []string{
-		"Project Name",
-		"Project ID",
+		"Project",
 		"Name",
 		"Region",
 		"State",
@@ -185,11 +184,11 @@ func (m *DataprocModule) getTableHeader() []string {
 		"Master Instances",
 		"Workers",
 		"Service Account",
-		"Attack Paths",
+		"SA Attack Paths",
 		"Public IPs",
 		"Kerberos",
-		"Resource Role",
-		"Resource Principal",
+		"IAM Binding Role",
+		"IAM Binding Principal",
 	}
 }
 
@@ -202,7 +201,7 @@ func (m *DataprocModule) clustersToTableBody(clusters []dataprocservice.ClusterI
 		}
 
 		// Check attack paths (privesc/exfil/lateral) for the service account
-		attackPaths := "-"
+		attackPaths := "run --attack-paths"
 		if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
 			if sa != "(default)" && sa != "" {
 				attackPaths = m.AttackPathCache.GetAttackSummary(sa)
@@ -225,7 +224,6 @@ func (m *DataprocModule) clustersToTableBody(clusters []dataprocservice.ClusterI
 			for _, binding := range cluster.IAMBindings {
 				body = append(body, []string{
 					m.GetProjectName(cluster.ProjectID),
-					cluster.ProjectID,
 					cluster.Name,
 					cluster.Region,
 					cluster.State,
@@ -244,7 +242,6 @@ func (m *DataprocModule) clustersToTableBody(clusters []dataprocservice.ClusterI
 			// Cluster has no IAM bindings - single row
 			body = append(body, []string{
 				m.GetProjectName(cluster.ProjectID),
-				cluster.ProjectID,
 				cluster.Name,
 				cluster.Region,
 				cluster.State,

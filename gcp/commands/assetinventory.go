@@ -595,7 +595,7 @@ func (m *AssetInventoryModule) buildAssetsTable(assets []assetservice.AssetInfo)
 	}
 
 	if checkIAM {
-		header := []string{"Project ID", "Project Name", "Name", "Asset Type", "Location", "Resource Role", "Resource Principal", "Public"}
+		header := []string{"Project", "Name", "Asset Type", "Location", "IAM Binding Role", "IAM Binding Principal", "Public"}
 		var body [][]string
 		for _, asset := range assets {
 			publicAccess := "No"
@@ -605,7 +605,6 @@ func (m *AssetInventoryModule) buildAssetsTable(assets []assetservice.AssetInfo)
 
 			if len(asset.IAMBindings) == 0 {
 				body = append(body, []string{
-					asset.ProjectID,
 					m.GetProjectName(asset.ProjectID),
 					asset.Name,
 					assetservice.ExtractAssetTypeShort(asset.AssetType),
@@ -618,7 +617,6 @@ func (m *AssetInventoryModule) buildAssetsTable(assets []assetservice.AssetInfo)
 				for _, binding := range asset.IAMBindings {
 					for _, member := range binding.Members {
 						body = append(body, []string{
-							asset.ProjectID,
 							m.GetProjectName(asset.ProjectID),
 							asset.Name,
 							assetservice.ExtractAssetTypeShort(asset.AssetType),
@@ -645,7 +643,6 @@ func (m *AssetInventoryModule) buildAssetsTable(assets []assetservice.AssetInfo)
 					for _, member := range binding.Members {
 						if shared.IsPublicPrincipal(member) {
 							publicBody = append(publicBody, []string{
-								asset.ProjectID,
 								m.GetProjectName(asset.ProjectID),
 								asset.Name,
 								asset.AssetType,
@@ -661,16 +658,15 @@ func (m *AssetInventoryModule) buildAssetsTable(assets []assetservice.AssetInfo)
 		if len(publicBody) > 0 {
 			tables = append(tables, internal.TableFile{
 				Name:   "public-assets",
-				Header: []string{"Project ID", "Project Name", "Name", "Asset Type", "Resource Role", "Resource Principal"},
+				Header: []string{"Project", "Name", "Asset Type", "IAM Binding Role", "IAM Binding Principal"},
 				Body:   publicBody,
 			})
 		}
 	} else {
-		header := []string{"Project ID", "Project Name", "Name", "Asset Type", "Location"}
+		header := []string{"Project", "Name", "Asset Type", "Location"}
 		var body [][]string
 		for _, asset := range assets {
 			body = append(body, []string{
-				asset.ProjectID,
 				m.GetProjectName(asset.ProjectID),
 				asset.Name,
 				assetservice.ExtractAssetTypeShort(asset.AssetType),
@@ -692,11 +688,10 @@ func (m *AssetInventoryModule) buildDependenciesTable(deps []ResourceDependency)
 		return nil
 	}
 
-	depsHeader := []string{"Project ID", "Project Name", "Source", "Dependency Type", "Target", "Target Type"}
+	depsHeader := []string{"Project", "Source", "Dependency Type", "Target", "Target Type"}
 	var depsBody [][]string
 	for _, d := range deps {
 		depsBody = append(depsBody, []string{
-			d.ProjectID,
 			m.GetProjectName(d.ProjectID),
 			m.extractResourceName(d.SourceResource),
 			d.DependencyType,

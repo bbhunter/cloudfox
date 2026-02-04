@@ -191,11 +191,11 @@ func (m *BigtableModule) writeOutput(ctx context.Context, logger internal.Logger
 }
 
 func (m *BigtableModule) getInstanceHeader() []string {
-	return []string{"Project Name", "Project ID", "Instance", "Display Name", "Type", "State", "Clusters", "Resource Role", "Resource Principal", "Public"}
+	return []string{"Project", "Instance", "Display Name", "Type", "State", "Clusters", "IAM Binding Role", "IAM Binding Principal", "Public"}
 }
 
 func (m *BigtableModule) getTableHeader() []string {
-	return []string{"Project Name", "Project ID", "Instance", "Table", "Resource Role", "Resource Principal", "Public"}
+	return []string{"Project", "Instance", "Table", "IAM Binding Role", "IAM Binding Principal", "Public"}
 }
 
 func (m *BigtableModule) instancesToTableBody(instances []bigtableservice.BigtableInstanceInfo) [][]string {
@@ -218,7 +218,6 @@ func (m *BigtableModule) instancesToTableBody(instances []bigtableservice.Bigtab
 		if len(instance.IAMBindings) == 0 {
 			body = append(body, []string{
 				m.GetProjectName(instance.ProjectID),
-				instance.ProjectID,
 				instance.Name,
 				instance.DisplayName,
 				instance.Type,
@@ -233,7 +232,6 @@ func (m *BigtableModule) instancesToTableBody(instances []bigtableservice.Bigtab
 				for _, member := range binding.Members {
 					body = append(body, []string{
 						m.GetProjectName(instance.ProjectID),
-						instance.ProjectID,
 						instance.Name,
 						instance.DisplayName,
 						instance.Type,
@@ -261,7 +259,6 @@ func (m *BigtableModule) tablesToTableBody(tables []bigtableservice.BigtableTabl
 		if len(table.IAMBindings) == 0 {
 			body = append(body, []string{
 				m.GetProjectName(table.ProjectID),
-				table.ProjectID,
 				table.InstanceName,
 				table.Name,
 				"-",
@@ -273,7 +270,6 @@ func (m *BigtableModule) tablesToTableBody(tables []bigtableservice.BigtableTabl
 				for _, member := range binding.Members {
 					body = append(body, []string{
 						m.GetProjectName(table.ProjectID),
-						table.ProjectID,
 						table.InstanceName,
 						table.Name,
 						binding.Role,

@@ -18,8 +18,14 @@ import (
 
 	// Resource-level IAM
 	"google.golang.org/api/bigquery/v2"
+	"google.golang.org/api/cloudkms/v1"
 	"google.golang.org/api/compute/v1"
+	run "google.golang.org/api/run/v1"
+	"google.golang.org/api/pubsub/v1"
+	"google.golang.org/api/secretmanager/v1"
+	"google.golang.org/api/spanner/v1"
 	"google.golang.org/api/storage/v1"
+	cloudfunctions "google.golang.org/api/cloudfunctions/v2"
 )
 
 var logger = internal.NewLogger()
@@ -75,6 +81,54 @@ func (s *AttackPathService) getComputeService(ctx context.Context) (*compute.Ser
 		return sdk.CachedGetComputeService(ctx, s.session)
 	}
 	return compute.NewService(ctx)
+}
+
+// getSecretManagerService returns a Secret Manager service
+func (s *AttackPathService) getSecretManagerService(ctx context.Context) (*secretmanager.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetSecretManagerService(ctx, s.session)
+	}
+	return secretmanager.NewService(ctx)
+}
+
+// getCloudFunctionsService returns a Cloud Functions v2 service
+func (s *AttackPathService) getCloudFunctionsService(ctx context.Context) (*cloudfunctions.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetCloudFunctionsServiceV2(ctx, s.session)
+	}
+	return cloudfunctions.NewService(ctx)
+}
+
+// getCloudRunService returns a Cloud Run service
+func (s *AttackPathService) getCloudRunService(ctx context.Context) (*run.APIService, error) {
+	if s.session != nil {
+		return sdk.CachedGetCloudRunService(ctx, s.session)
+	}
+	return run.NewService(ctx)
+}
+
+// getKMSService returns a KMS service
+func (s *AttackPathService) getKMSService(ctx context.Context) (*cloudkms.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetKMSService(ctx, s.session)
+	}
+	return cloudkms.NewService(ctx)
+}
+
+// getPubSubService returns a Pub/Sub service
+func (s *AttackPathService) getPubSubService(ctx context.Context) (*pubsub.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetPubSubService(ctx, s.session)
+	}
+	return pubsub.NewService(ctx)
+}
+
+// getSpannerService returns a Spanner service
+func (s *AttackPathService) getSpannerService(ctx context.Context) (*spanner.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetSpannerService(ctx, s.session)
+	}
+	return spanner.NewService(ctx)
 }
 
 // DataExfilPermission represents a permission that enables data exfiltration
@@ -635,6 +689,34 @@ func (s *AttackPathService) AnalyzeResourceAttackPaths(ctx context.Context, proj
 	computePaths := s.analyzeComputeResourceIAM(ctx, projectID, pathType, exfilPermMap, lateralPermMap, privescPermMap, iamService)
 	paths = append(paths, computePaths...)
 
+	// Analyze Secret Manager IAM policies
+	secretPaths := s.analyzeSecretManagerIAM(ctx, projectID, pathType, exfilPermMap, lateralPermMap, privescPermMap, iamService)
+	paths = append(paths, secretPaths...)
+
+	// Analyze Cloud Functions IAM policies
+	functionPaths := s.analyzeCloudFunctionsIAM(ctx, projectID, pathType, exfilPermMap, lateralPermMap, privescPermMap, iamService)
+	paths = append(paths, functionPaths...)
+
+	// Analyze Cloud Run IAM policies
+	cloudRunPaths := s.analyzeCloudRunIAM(ctx, projectID, pathType, exfilPermMap, lateralPermMap, privescPermMap, iamService)
+	paths = append(paths, cloudRunPaths...)
+
+	// Analyze KMS IAM policies
+	kmsPaths := s.analyzeKMSIAM(ctx, projectID, pathType, exfilPermMap, lateralPermMap, privescPermMap, iamService)
+	paths = append(paths, kmsPaths...)
+
+	// Analyze Pub/Sub IAM policies
+	pubsubPaths := s.analyzePubSubIAM(ctx, projectID, pathType, exfilPermMap, lateralPermMap, privescPermMap, iamService)
+	paths = append(paths, pubsubPaths...)
+
+	// Analyze Spanner IAM policies
+	spannerPaths := s.analyzeSpannerIAM(ctx, projectID, pathType, exfilPermMap, lateralPermMap, privescPermMap, iamService)
+	paths = append(paths, spannerPaths...)
+
+	// Analyze Compute Instance IAM policies
+	instancePaths := s.analyzeComputeInstanceIAM(ctx, projectID, pathType, exfilPermMap, lateralPermMap, privescPermMap, iamService)
+	paths = append(paths, instancePaths...)
+
 	return paths, nil
 }
 
@@ -820,6 +902,398 @@ func (s *AttackPathService) analyzeComputeResourceIAM(ctx context.Context, proje
 					memberPaths := s.analyzePermissionsForAttackPaths(
 						member, binding.Role, permissions, projectID,
 						"resource", fmt.Sprintf("snapshot/%s", snapshot.Name), snapshot.Name,
+						pathType, exfilPermMap, lateralPermMap, privescPermMap,
+					)
+					paths = append(paths, memberPaths...)
+				}
+			}
+		}
+	}
+
+	return paths
+}
+
+// analyzeSecretManagerIAM analyzes IAM policies on Secret Manager secrets
+func (s *AttackPathService) analyzeSecretManagerIAM(ctx context.Context, projectID, pathType string, exfilPermMap map[string]DataExfilPermission, lateralPermMap map[string]LateralMovementPermission, privescPermMap map[string]PrivescPermission, iamService *iam.Service) []AttackPath {
+	var paths []AttackPath
+
+	smService, err := s.getSecretManagerService(ctx)
+	if err != nil {
+		return paths
+	}
+
+	// List secrets in the project
+	parent := fmt.Sprintf("projects/%s", projectID)
+	secrets, err := smService.Projects.Secrets.List(parent).Do()
+	if err != nil {
+		return paths
+	}
+
+	for _, secret := range secrets.Secrets {
+		// Get IAM policy for this secret
+		policy, err := smService.Projects.Secrets.GetIamPolicy(secret.Name).Do()
+		if err != nil {
+			continue
+		}
+
+		secretName := secret.Name
+		// Extract just the secret name from the full path
+		parts := strings.Split(secret.Name, "/")
+		if len(parts) > 0 {
+			secretName = parts[len(parts)-1]
+		}
+
+		for _, binding := range policy.Bindings {
+			permissions := s.getRolePermissions(iamService, binding.Role, projectID)
+			for _, member := range binding.Members {
+				memberPaths := s.analyzePermissionsForAttackPaths(
+					member, binding.Role, permissions, projectID,
+					"resource", fmt.Sprintf("secret/%s", secretName), secretName,
+					pathType, exfilPermMap, lateralPermMap, privescPermMap,
+				)
+				paths = append(paths, memberPaths...)
+			}
+		}
+	}
+
+	return paths
+}
+
+// analyzeCloudFunctionsIAM analyzes IAM policies on Cloud Functions
+func (s *AttackPathService) analyzeCloudFunctionsIAM(ctx context.Context, projectID, pathType string, exfilPermMap map[string]DataExfilPermission, lateralPermMap map[string]LateralMovementPermission, privescPermMap map[string]PrivescPermission, iamService *iam.Service) []AttackPath {
+	var paths []AttackPath
+
+	cfService, err := s.getCloudFunctionsService(ctx)
+	if err != nil {
+		return paths
+	}
+
+	// List functions in the project (all locations)
+	parent := fmt.Sprintf("projects/%s/locations/-", projectID)
+	functions, err := cfService.Projects.Locations.Functions.List(parent).Do()
+	if err != nil {
+		return paths
+	}
+
+	for _, fn := range functions.Functions {
+		// Get IAM policy for this function
+		policy, err := cfService.Projects.Locations.Functions.GetIamPolicy(fn.Name).Do()
+		if err != nil {
+			continue
+		}
+
+		fnName := fn.Name
+		// Extract just the function name from the full path
+		parts := strings.Split(fn.Name, "/")
+		if len(parts) > 0 {
+			fnName = parts[len(parts)-1]
+		}
+
+		for _, binding := range policy.Bindings {
+			permissions := s.getRolePermissions(iamService, binding.Role, projectID)
+			for _, member := range binding.Members {
+				memberPaths := s.analyzePermissionsForAttackPaths(
+					member, binding.Role, permissions, projectID,
+					"resource", fmt.Sprintf("function/%s", fnName), fnName,
+					pathType, exfilPermMap, lateralPermMap, privescPermMap,
+				)
+				paths = append(paths, memberPaths...)
+			}
+		}
+	}
+
+	return paths
+}
+
+// analyzeCloudRunIAM analyzes IAM policies on Cloud Run services
+func (s *AttackPathService) analyzeCloudRunIAM(ctx context.Context, projectID, pathType string, exfilPermMap map[string]DataExfilPermission, lateralPermMap map[string]LateralMovementPermission, privescPermMap map[string]PrivescPermission, iamService *iam.Service) []AttackPath {
+	var paths []AttackPath
+
+	runService, err := s.getCloudRunService(ctx)
+	if err != nil {
+		return paths
+	}
+
+	// List services in the project (all locations)
+	parent := fmt.Sprintf("projects/%s/locations/-", projectID)
+	services, err := runService.Projects.Locations.Services.List(parent).Do()
+	if err == nil {
+		for _, svc := range services.Items {
+			// Get IAM policy for this service
+			policy, err := runService.Projects.Locations.Services.GetIamPolicy(svc.Metadata.Name).Do()
+			if err != nil {
+				continue
+			}
+
+			svcName := svc.Metadata.Name
+			// Extract just the service name from the full path
+			parts := strings.Split(svc.Metadata.Name, "/")
+			if len(parts) > 0 {
+				svcName = parts[len(parts)-1]
+			}
+
+			for _, binding := range policy.Bindings {
+				permissions := s.getRolePermissions(iamService, binding.Role, projectID)
+				for _, member := range binding.Members {
+					memberPaths := s.analyzePermissionsForAttackPaths(
+						member, binding.Role, permissions, projectID,
+						"resource", fmt.Sprintf("run-service/%s", svcName), svcName,
+						pathType, exfilPermMap, lateralPermMap, privescPermMap,
+					)
+					paths = append(paths, memberPaths...)
+				}
+			}
+		}
+	}
+
+	return paths
+}
+
+// analyzeKMSIAM analyzes IAM policies on KMS keys
+func (s *AttackPathService) analyzeKMSIAM(ctx context.Context, projectID, pathType string, exfilPermMap map[string]DataExfilPermission, lateralPermMap map[string]LateralMovementPermission, privescPermMap map[string]PrivescPermission, iamService *iam.Service) []AttackPath {
+	var paths []AttackPath
+
+	kmsService, err := s.getKMSService(ctx)
+	if err != nil {
+		return paths
+	}
+
+	// List key rings in the project (all locations)
+	parent := fmt.Sprintf("projects/%s/locations/-", projectID)
+	keyRings, err := kmsService.Projects.Locations.KeyRings.List(parent).Do()
+	if err != nil {
+		return paths
+	}
+
+	for _, keyRing := range keyRings.KeyRings {
+		// List crypto keys in this key ring
+		keys, err := kmsService.Projects.Locations.KeyRings.CryptoKeys.List(keyRing.Name).Do()
+		if err != nil {
+			continue
+		}
+
+		for _, key := range keys.CryptoKeys {
+			// Get IAM policy for this key
+			policy, err := kmsService.Projects.Locations.KeyRings.CryptoKeys.GetIamPolicy(key.Name).Do()
+			if err != nil {
+				continue
+			}
+
+			keyName := key.Name
+			// Extract just the key name from the full path
+			parts := strings.Split(key.Name, "/")
+			if len(parts) > 0 {
+				keyName = parts[len(parts)-1]
+			}
+
+			for _, binding := range policy.Bindings {
+				permissions := s.getRolePermissions(iamService, binding.Role, projectID)
+				for _, member := range binding.Members {
+					memberPaths := s.analyzePermissionsForAttackPaths(
+						member, binding.Role, permissions, projectID,
+						"resource", fmt.Sprintf("kms-key/%s", keyName), keyName,
+						pathType, exfilPermMap, lateralPermMap, privescPermMap,
+					)
+					paths = append(paths, memberPaths...)
+				}
+			}
+		}
+	}
+
+	return paths
+}
+
+// analyzePubSubIAM analyzes IAM policies on Pub/Sub topics and subscriptions
+func (s *AttackPathService) analyzePubSubIAM(ctx context.Context, projectID, pathType string, exfilPermMap map[string]DataExfilPermission, lateralPermMap map[string]LateralMovementPermission, privescPermMap map[string]PrivescPermission, iamService *iam.Service) []AttackPath {
+	var paths []AttackPath
+
+	pubsubService, err := s.getPubSubService(ctx)
+	if err != nil {
+		return paths
+	}
+
+	// List topics in the project
+	project := fmt.Sprintf("projects/%s", projectID)
+	topics, err := pubsubService.Projects.Topics.List(project).Do()
+	if err == nil {
+		for _, topic := range topics.Topics {
+			// Get IAM policy for this topic
+			policy, err := pubsubService.Projects.Topics.GetIamPolicy(topic.Name).Do()
+			if err != nil {
+				continue
+			}
+
+			topicName := topic.Name
+			// Extract just the topic name from the full path
+			parts := strings.Split(topic.Name, "/")
+			if len(parts) > 0 {
+				topicName = parts[len(parts)-1]
+			}
+
+			for _, binding := range policy.Bindings {
+				permissions := s.getRolePermissions(iamService, binding.Role, projectID)
+				for _, member := range binding.Members {
+					memberPaths := s.analyzePermissionsForAttackPaths(
+						member, binding.Role, permissions, projectID,
+						"resource", fmt.Sprintf("topic/%s", topicName), topicName,
+						pathType, exfilPermMap, lateralPermMap, privescPermMap,
+					)
+					paths = append(paths, memberPaths...)
+				}
+			}
+		}
+	}
+
+	// List subscriptions in the project
+	subscriptions, err := pubsubService.Projects.Subscriptions.List(project).Do()
+	if err == nil {
+		for _, sub := range subscriptions.Subscriptions {
+			// Get IAM policy for this subscription
+			policy, err := pubsubService.Projects.Subscriptions.GetIamPolicy(sub.Name).Do()
+			if err != nil {
+				continue
+			}
+
+			subName := sub.Name
+			// Extract just the subscription name from the full path
+			parts := strings.Split(sub.Name, "/")
+			if len(parts) > 0 {
+				subName = parts[len(parts)-1]
+			}
+
+			for _, binding := range policy.Bindings {
+				permissions := s.getRolePermissions(iamService, binding.Role, projectID)
+				for _, member := range binding.Members {
+					memberPaths := s.analyzePermissionsForAttackPaths(
+						member, binding.Role, permissions, projectID,
+						"resource", fmt.Sprintf("subscription/%s", subName), subName,
+						pathType, exfilPermMap, lateralPermMap, privescPermMap,
+					)
+					paths = append(paths, memberPaths...)
+				}
+			}
+		}
+	}
+
+	return paths
+}
+
+// analyzeSpannerIAM analyzes IAM policies on Spanner instances and databases
+func (s *AttackPathService) analyzeSpannerIAM(ctx context.Context, projectID, pathType string, exfilPermMap map[string]DataExfilPermission, lateralPermMap map[string]LateralMovementPermission, privescPermMap map[string]PrivescPermission, iamService *iam.Service) []AttackPath {
+	var paths []AttackPath
+
+	spannerService, err := s.getSpannerService(ctx)
+	if err != nil {
+		return paths
+	}
+
+	// List instances in the project
+	parent := fmt.Sprintf("projects/%s", projectID)
+	instances, err := spannerService.Projects.Instances.List(parent).Do()
+	if err != nil {
+		return paths
+	}
+
+	for _, instance := range instances.Instances {
+		// Get IAM policy for this instance
+		policy, err := spannerService.Projects.Instances.GetIamPolicy(instance.Name, &spanner.GetIamPolicyRequest{}).Do()
+		if err == nil {
+			instanceName := instance.Name
+			// Extract just the instance name from the full path
+			parts := strings.Split(instance.Name, "/")
+			if len(parts) > 0 {
+				instanceName = parts[len(parts)-1]
+			}
+
+			for _, binding := range policy.Bindings {
+				permissions := s.getRolePermissions(iamService, binding.Role, projectID)
+				for _, member := range binding.Members {
+					memberPaths := s.analyzePermissionsForAttackPaths(
+						member, binding.Role, permissions, projectID,
+						"resource", fmt.Sprintf("spanner-instance/%s", instanceName), instanceName,
+						pathType, exfilPermMap, lateralPermMap, privescPermMap,
+					)
+					paths = append(paths, memberPaths...)
+				}
+			}
+		}
+
+		// List databases in this instance
+		databases, err := spannerService.Projects.Instances.Databases.List(instance.Name).Do()
+		if err != nil {
+			continue
+		}
+
+		for _, db := range databases.Databases {
+			// Get IAM policy for this database
+			policy, err := spannerService.Projects.Instances.Databases.GetIamPolicy(db.Name, &spanner.GetIamPolicyRequest{}).Do()
+			if err != nil {
+				continue
+			}
+
+			dbName := db.Name
+			// Extract just the database name from the full path
+			parts := strings.Split(db.Name, "/")
+			if len(parts) > 0 {
+				dbName = parts[len(parts)-1]
+			}
+
+			for _, binding := range policy.Bindings {
+				permissions := s.getRolePermissions(iamService, binding.Role, projectID)
+				for _, member := range binding.Members {
+					memberPaths := s.analyzePermissionsForAttackPaths(
+						member, binding.Role, permissions, projectID,
+						"resource", fmt.Sprintf("spanner-db/%s", dbName), dbName,
+						pathType, exfilPermMap, lateralPermMap, privescPermMap,
+					)
+					paths = append(paths, memberPaths...)
+				}
+			}
+		}
+	}
+
+	return paths
+}
+
+// analyzeComputeInstanceIAM analyzes IAM policies on Compute instances
+func (s *AttackPathService) analyzeComputeInstanceIAM(ctx context.Context, projectID, pathType string, exfilPermMap map[string]DataExfilPermission, lateralPermMap map[string]LateralMovementPermission, privescPermMap map[string]PrivescPermission, iamService *iam.Service) []AttackPath {
+	var paths []AttackPath
+
+	computeService, err := s.getComputeService(ctx)
+	if err != nil {
+		return paths
+	}
+
+	// List all instances across all zones
+	instances, err := computeService.Instances.AggregatedList(projectID).Do()
+	if err != nil {
+		return paths
+	}
+
+	for zonePath, instanceList := range instances.Items {
+		if instanceList.Instances == nil {
+			continue
+		}
+
+		// Extract zone name from path (e.g., "zones/us-central1-a" -> "us-central1-a")
+		zone := zonePath
+		if strings.HasPrefix(zonePath, "zones/") {
+			zone = strings.TrimPrefix(zonePath, "zones/")
+		}
+
+		for _, instance := range instanceList.Instances {
+			// Get IAM policy for this instance
+			policy, err := computeService.Instances.GetIamPolicy(projectID, zone, instance.Name).Do()
+			if err != nil {
+				continue
+			}
+
+			for _, binding := range policy.Bindings {
+				permissions := s.getRolePermissions(iamService, binding.Role, projectID)
+				for _, member := range binding.Members {
+					memberPaths := s.analyzePermissionsForAttackPaths(
+						member, binding.Role, permissions, projectID,
+						"resource", fmt.Sprintf("instance/%s", instance.Name), instance.Name,
 						pathType, exfilPermMap, lateralPermMap, privescPermMap,
 					)
 					paths = append(paths, memberPaths...)

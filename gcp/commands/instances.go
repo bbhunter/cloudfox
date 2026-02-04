@@ -100,6 +100,16 @@ func (m *InstancesModule) Execute(ctx context.Context, logger internal.Logger) {
 	// Get attack path cache from context (populated by all-checks or attack path analysis)
 	m.AttackPathCache = gcpinternal.GetAttackPathCacheFromContext(ctx)
 
+	// If no context cache, try loading from disk cache
+	if m.AttackPathCache == nil || !m.AttackPathCache.IsPopulated() {
+		diskCache, metadata, err := gcpinternal.LoadAttackPathCacheFromFile(m.OutputDirectory, m.Account)
+		if err == nil && diskCache != nil && diskCache.IsPopulated() {
+			logger.InfoM(fmt.Sprintf("Using attack path cache from disk (created: %s)",
+				metadata.CreatedAt.Format("2006-01-02 15:04:05")), globals.GCP_INSTANCES_MODULE_NAME)
+			m.AttackPathCache = diskCache
+		}
+	}
+
 	// Run enumeration with concurrency
 	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_INSTANCES_MODULE_NAME, m.processProject)
 
@@ -553,7 +563,7 @@ func (m *InstancesModule) getInstancesTableHeader() []string {
 		"External IP",
 		"Internal IP",
 		"Service Account",
-		"Attack Paths",
+		"SA Attack Paths",
 		"Scopes",
 		"Default SA",
 		"Broad Scopes",
@@ -569,8 +579,8 @@ func (m *InstancesModule) getInstancesTableHeader() []string {
 		"Confidential",
 		"Encryption",
 		"KMS Key",
-		"Resource Role",
-		"Resource Principal",
+		"IAM Binding Role",
+		"IAM Binding Principal",
 	}
 }
 
@@ -600,7 +610,7 @@ func (m *InstancesModule) instancesToTableBody(instances []ComputeEngineService.
 		}
 
 		// Check attack paths (privesc/exfil/lateral) for the service account
-		attackPaths := "-"
+		attackPaths := "run --attack-paths"
 		if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
 			if saEmail != "-" {
 				attackPaths = m.AttackPathCache.GetAttackSummary(saEmail)

@@ -221,29 +221,27 @@ func (m *SpannerModule) writeOutput(ctx context.Context, logger internal.Logger)
 
 func (m *SpannerModule) getInstanceHeader() []string {
 	return []string{
-		"Project Name",
-		"Project ID",
+		"Project",
 		"Instance",
 		"Display Name",
 		"Config",
 		"Nodes",
 		"State",
-		"Resource Role",
-		"Resource Principal",
+		"IAM Binding Role",
+		"IAM Binding Principal",
 	}
 }
 
 func (m *SpannerModule) getDatabaseHeader() []string {
 	return []string{
-		"Project Name",
-		"Project ID",
+		"Project",
 		"Instance",
 		"Database",
 		"State",
 		"Encryption",
 		"KMS Key",
-		"Resource Role",
-		"Resource Principal",
+		"IAM Binding Role",
+		"IAM Binding Principal",
 	}
 }
 
@@ -254,7 +252,6 @@ func (m *SpannerModule) instancesToTableBody(instances []spannerservice.SpannerI
 			for _, binding := range instance.IAMBindings {
 				body = append(body, []string{
 					m.GetProjectName(instance.ProjectID),
-					instance.ProjectID,
 					instance.Name,
 					instance.DisplayName,
 					instance.Config,
@@ -268,7 +265,6 @@ func (m *SpannerModule) instancesToTableBody(instances []spannerservice.SpannerI
 			// Instance with no IAM bindings
 			body = append(body, []string{
 				m.GetProjectName(instance.ProjectID),
-				instance.ProjectID,
 				instance.Name,
 				instance.DisplayName,
 				instance.Config,
@@ -294,7 +290,6 @@ func (m *SpannerModule) databasesToTableBody(databases []spannerservice.SpannerD
 			for _, binding := range database.IAMBindings {
 				body = append(body, []string{
 					m.GetProjectName(database.ProjectID),
-					database.ProjectID,
 					database.InstanceName,
 					database.Name,
 					database.State,
@@ -308,7 +303,6 @@ func (m *SpannerModule) databasesToTableBody(databases []spannerservice.SpannerD
 			// Database with no IAM bindings
 			body = append(body, []string{
 				m.GetProjectName(database.ProjectID),
-				database.ProjectID,
 				database.InstanceName,
 				database.Name,
 				database.State,

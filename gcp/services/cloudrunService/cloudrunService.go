@@ -80,6 +80,10 @@ type ServiceInfo struct {
 	// IAM
 	InvokerMembers          []string
 	IsPublic                bool
+	IAMBindings             []IAMBinding // All IAM bindings on this service
+
+	// Status
+	Status                  string // Service status
 }
 
 // HardcodedSecret represents a potential secret found in environment variables
@@ -107,6 +111,12 @@ type SecretRefInfo struct {
 	Type          string // "env" or "volume"
 }
 
+// IAMBinding represents a single IAM role binding
+type IAMBinding struct {
+	Role   string
+	Member string
+}
+
 // JobInfo holds Cloud Run job details
 type JobInfo struct {
 	Name            string
@@ -124,6 +134,10 @@ type JobInfo struct {
 	MaxRetries      int64
 	Timeout         string
 
+	// VPC Access
+	VPCAccess         string
+	VPCEgressSettings string
+
 	// Environment
 	EnvVarCount       int
 	SecretEnvVarCount int
@@ -136,9 +150,17 @@ type JobInfo struct {
 	// Detailed env var and secret info
 	EnvVars    []EnvVarInfo
 	SecretRefs []SecretRefInfo
+
+	// IAM
+	IAMBindings []IAMBinding // All IAM bindings on this job
+
+	// Status
+	Status string
 }
 
 // Services retrieves all Cloud Run services in a project across all regions
+// Note: This excludes Cloud Functions 2nd gen which are deployed as Cloud Run services
+// but should be enumerated via the functions module instead
 func (cs *CloudRunService) Services(projectID string) ([]ServiceInfo, error) {
 	ctx := context.Background()
 
@@ -155,12 +177,18 @@ func (cs *CloudRunService) Services(projectID string) ([]ServiceInfo, error) {
 	call := service.Projects.Locations.Services.List(parent)
 	err = call.Pages(ctx, func(page *run.GoogleCloudRunV2ListServicesResponse) error {
 		for _, svc := range page.Services {
+			// Skip Cloud Functions 2nd gen - they have label "goog-managed-by: cloudfunctions"
+			// These should be enumerated via the functions module, not cloudrun
+			if isCloudFunction(svc.Labels) {
+				continue
+			}
+
 			info := parseServiceInfo(svc, projectID)
 
 			// Try to get IAM policy
 			iamPolicy, iamErr := cs.getServiceIAMPolicy(service, svc.Name)
 			if iamErr == nil && iamPolicy != nil {
-				info.InvokerMembers, info.IsPublic = parseInvokerBindings(iamPolicy)
+				info.IAMBindings, info.InvokerMembers, info.IsPublic = parseAllIAMBindings(iamPolicy)
 			}
 
 			services = append(services, info)
@@ -173,6 +201,19 @@ func (cs *CloudRunService) Services(projectID string) ([]ServiceInfo, error) {
 	}
 
 	return services, nil
+}
+
+// isCloudFunction checks if a Cloud Run service is actually a Cloud Function 2nd gen
+// Cloud Functions 2nd gen are deployed as Cloud Run services but have specific labels
+func isCloudFunction(labels map[string]string) bool {
+	if labels == nil {
+		return false
+	}
+	// Cloud Functions 2nd gen have "goog-managed-by: cloudfunctions" label
+	if managedBy, ok := labels["goog-managed-by"]; ok && managedBy == "cloudfunctions" {
+		return true
+	}
+	return false
 }
 
 // cloudRunRegions contains all Cloud Run regions
@@ -229,6 +270,13 @@ func (cs *CloudRunService) Jobs(projectID string) ([]JobInfo, error) {
 			err := call.Pages(ctx, func(page *run.GoogleCloudRunV2ListJobsResponse) error {
 				for _, job := range page.Jobs {
 					info := parseJobInfo(job, projectID)
+
+					// Try to get IAM policy for job
+					iamPolicy, iamErr := cs.getJobIAMPolicy(service, job.Name)
+					if iamErr == nil && iamPolicy != nil {
+						info.IAMBindings, _, _ = parseAllIAMBindings(iamPolicy)
+					}
+
 					mu.Lock()
 					jobs = append(jobs, info)
 					mu.Unlock()
@@ -266,6 +314,26 @@ func parseServiceInfo(svc *run.GoogleCloudRunV2Service, projectID string) Servic
 		Creator:     svc.Creator,
 		UpdateTime:  svc.UpdateTime,
 		URL:         svc.Uri,
+	}
+
+	// Parse conditions for status
+	if len(svc.Conditions) > 0 {
+		for _, cond := range svc.Conditions {
+			if cond.Type == "Ready" {
+				if cond.State == "CONDITION_SUCCEEDED" {
+					info.Status = "Ready"
+				} else {
+					info.Status = cond.State
+					if cond.Reason != "" {
+						info.Status = cond.Reason
+					}
+				}
+				break
+			}
+		}
+	}
+	if info.Status == "" {
+		info.Status = "Unknown"
 	}
 
 	// Extract region from service name
@@ -414,6 +482,26 @@ func parseJobInfo(job *run.GoogleCloudRunV2Job, projectID string) JobInfo {
 		info.Region = parts[3]
 	}
 
+	// Parse conditions for status
+	if len(job.Conditions) > 0 {
+		for _, cond := range job.Conditions {
+			if cond.Type == "Ready" {
+				if cond.State == "CONDITION_SUCCEEDED" {
+					info.Status = "Ready"
+				} else {
+					info.Status = cond.State
+					if cond.Reason != "" {
+						info.Status = cond.Reason
+					}
+				}
+				break
+			}
+		}
+	}
+	if info.Status == "" {
+		info.Status = "Unknown"
+	}
+
 	// Last execution
 	if job.LatestCreatedExecution != nil {
 		info.LastExecution = job.LatestCreatedExecution.Name
@@ -428,6 +516,15 @@ func parseJobInfo(job *run.GoogleCloudRunV2Job, projectID string) JobInfo {
 			info.MaxRetries = job.Template.Template.MaxRetries
 			info.Timeout = job.Template.Template.Timeout
 			info.ServiceAccount = job.Template.Template.ServiceAccount
+
+			// VPC access configuration
+			if job.Template.Template.VpcAccess != nil {
+				info.VPCAccess = job.Template.Template.VpcAccess.Connector
+				info.VPCEgressSettings = job.Template.Template.VpcAccess.Egress
+				if info.VPCAccess == "" && job.Template.Template.VpcAccess.NetworkInterfaces != nil {
+					info.VPCAccess = "Direct VPC"
+				}
+			}
 
 			// Container configuration
 			if len(job.Template.Template.Containers) > 0 {
@@ -506,12 +603,32 @@ func (cs *CloudRunService) getServiceIAMPolicy(service *run.Service, serviceName
 	return policy, nil
 }
 
-// parseInvokerBindings extracts who can invoke the service and checks for public access
-func parseInvokerBindings(policy *run.GoogleIamV1Policy) ([]string, bool) {
+// getJobIAMPolicy retrieves the IAM policy for a Cloud Run job
+func (cs *CloudRunService) getJobIAMPolicy(service *run.Service, jobName string) (*run.GoogleIamV1Policy, error) {
+	ctx := context.Background()
+
+	policy, err := service.Projects.Locations.Jobs.GetIamPolicy(jobName).Context(ctx).Do()
+	if err != nil {
+		return nil, err
+	}
+
+	return policy, nil
+}
+
+// parseAllIAMBindings extracts all IAM bindings, invokers, and checks for public access
+func parseAllIAMBindings(policy *run.GoogleIamV1Policy) ([]IAMBinding, []string, bool) {
+	var allBindings []IAMBinding
 	var invokers []string
 	isPublic := false
 
 	for _, binding := range policy.Bindings {
+		for _, member := range binding.Members {
+			allBindings = append(allBindings, IAMBinding{
+				Role:   binding.Role,
+				Member: member,
+			})
+		}
+
 		// Check for invoker role
 		if binding.Role == "roles/run.invoker" {
 			invokers = append(invokers, binding.Members...)
@@ -525,7 +642,7 @@ func parseInvokerBindings(policy *run.GoogleIamV1Policy) ([]string, bool) {
 		}
 	}
 
-	return invokers, isPublic
+	return allBindings, invokers, isPublic
 }
 
 // extractName extracts just the resource name from the full resource name

@@ -36,14 +36,19 @@ Security Columns:
 - Secrets: Count of secret environment variables and volumes
 
 Resource IAM Columns:
-- Resource Role: The IAM role granted ON this function (e.g., roles/cloudfunctions.invoker)
-- Resource Principal: The principal (user/SA/group) who has that role on this function
+- IAM Binding Role: The IAM role granted ON this function (e.g., roles/cloudfunctions.invoker)
+- IAM Binding Principal: The principal (user/SA/group) who has that role on this function
 
 Attack Surface:
 - Public HTTP functions may be directly exploitable
 - Functions with default service account may have excessive permissions
 - Functions with VPC connectors can access internal resources
-- Event triggers reveal integration points (Pub/Sub, Storage, etc.)`,
+- Event triggers reveal integration points (Pub/Sub, Storage, etc.)
+
+TIP: To see service account attack paths (privesc, exfil, lateral movement),
+use the global --attack-paths flag:
+
+  cloudfox gcp functions -p PROJECT_ID --attack-paths`,
 	Run: runGCPFunctionsCommand,
 }
 
@@ -95,6 +100,16 @@ func runGCPFunctionsCommand(cmd *cobra.Command, args []string) {
 func (m *FunctionsModule) Execute(ctx context.Context, logger internal.Logger) {
 	// Get attack path cache from context (populated by all-checks or attack path analysis)
 	m.AttackPathCache = gcpinternal.GetAttackPathCacheFromContext(ctx)
+
+	// If no context cache, try loading from disk cache
+	if m.AttackPathCache == nil || !m.AttackPathCache.IsPopulated() {
+		diskCache, metadata, err := gcpinternal.LoadAttackPathCacheFromFile(m.OutputDirectory, m.Account)
+		if err == nil && diskCache != nil && diskCache.IsPopulated() {
+			logger.InfoM(fmt.Sprintf("Using attack path cache from disk (created: %s)",
+				metadata.CreatedAt.Format("2006-01-02 15:04:05")), globals.GCP_FUNCTIONS_MODULE_NAME)
+			m.AttackPathCache = diskCache
+		}
+	}
 
 	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_FUNCTIONS_MODULE_NAME, m.processProject)
 
@@ -297,8 +312,6 @@ func (m *FunctionsModule) writeOutput(ctx context.Context, logger internal.Logge
 
 // writeHierarchicalOutput writes output to per-project directories
 func (m *FunctionsModule) writeHierarchicalOutput(ctx context.Context, logger internal.Logger) {
-	header := m.getTableHeader()
-
 	// Build hierarchical output data
 	outputData := internal.HierarchicalOutputData{
 		OrgLevelData:     make(map[string]internal.CloudfoxOutput),
@@ -307,12 +320,7 @@ func (m *FunctionsModule) writeHierarchicalOutput(ctx context.Context, logger in
 
 	// Build project-level outputs
 	for projectID, functions := range m.ProjectFunctions {
-		body := m.functionsToTableBody(functions)
-		tables := []internal.TableFile{{
-			Name:   globals.GCP_FUNCTIONS_MODULE_NAME,
-			Header: header,
-			Body:   body,
-		}}
+		tables := m.buildTablesForProject(projectID, functions)
 
 		// Collect loot for this project
 		var lootFiles []internal.LootFile
@@ -347,9 +355,8 @@ func (m *FunctionsModule) writeHierarchicalOutput(ctx context.Context, logger in
 
 // writeFlatOutput writes all output to a single directory (legacy mode)
 func (m *FunctionsModule) writeFlatOutput(ctx context.Context, logger internal.Logger) {
-	header := m.getTableHeader()
 	allFunctions := m.getAllFunctions()
-	body := m.functionsToTableBody(allFunctions)
+	tables := m.buildTablesForProject("", allFunctions)
 
 	// Collect all loot files
 	var lootFiles []internal.LootFile
@@ -361,17 +368,8 @@ func (m *FunctionsModule) writeFlatOutput(ctx context.Context, logger internal.L
 		}
 	}
 
-	tableFiles := []internal.TableFile{}
-	if len(body) > 0 {
-		tableFiles = append(tableFiles, internal.TableFile{
-			Name:   globals.GCP_FUNCTIONS_MODULE_NAME,
-			Header: header,
-			Body:   body,
-		})
-	}
-
 	output := FunctionsOutput{
-		Table: tableFiles,
+		Table: tables,
 		Loot:  lootFiles,
 	}
 
@@ -405,11 +403,105 @@ func isEmptyLootFile(contents string) bool {
 		strings.HasSuffix(contents, "# Secrets used by functions (names only)\n\n")
 }
 
+// buildTablesForProject builds all tables for a given project's functions
+func (m *FunctionsModule) buildTablesForProject(projectID string, functions []FunctionsService.FunctionInfo) []internal.TableFile {
+	tableFiles := []internal.TableFile{}
+
+	// Main functions table
+	body := m.functionsToTableBody(functions)
+	if len(body) > 0 {
+		tableFiles = append(tableFiles, internal.TableFile{
+			Name:   globals.GCP_FUNCTIONS_MODULE_NAME,
+			Header: m.getTableHeader(),
+			Body:   body,
+		})
+	}
+
+	// Secrets table (env vars and secret refs - matching Cloud Run format)
+	secretsHeader := []string{
+		"Project", "Name", "Region", "Env Var", "Value/Type", "Source", "Sensitive",
+	}
+
+	var secretsBody [][]string
+	for _, fn := range functions {
+		// Add environment variables from EnvVars (has actual values)
+		for _, env := range fn.EnvVars {
+			sensitive := isFunctionSensitiveEnvVar(env.Name)
+			if env.Source == "direct" {
+				secretsBody = append(secretsBody, []string{
+					m.GetProjectName(fn.ProjectID),
+					fn.Name,
+					fn.Region,
+					env.Name,
+					env.Value,
+					"EnvVar",
+					sensitive,
+				})
+			} else {
+				// Secret Manager reference
+				secretsBody = append(secretsBody, []string{
+					m.GetProjectName(fn.ProjectID),
+					fn.Name,
+					fn.Region,
+					env.Name,
+					fmt.Sprintf("%s:%s", env.SecretName, env.SecretVersion),
+					"SecretManager",
+					"Yes",
+				})
+			}
+		}
+
+		// Add secret volumes
+		for _, volName := range fn.SecretVolumeNames {
+			secretsBody = append(secretsBody, []string{
+				m.GetProjectName(fn.ProjectID),
+				fn.Name,
+				fn.Region,
+				volName + " (volume)",
+				volName,
+				"SecretManager",
+				"Yes",
+			})
+		}
+	}
+
+	if len(secretsBody) > 0 {
+		tableFiles = append(tableFiles, internal.TableFile{
+			Name:   globals.GCP_FUNCTIONS_MODULE_NAME + "-secrets",
+			Header: secretsHeader,
+			Body:   secretsBody,
+		})
+	}
+
+	return tableFiles
+}
+
+// isFunctionSensitiveEnvVar checks if an environment variable name indicates sensitive data
+func isFunctionSensitiveEnvVar(envName string) string {
+	envNameUpper := strings.ToUpper(envName)
+	sensitivePatterns := []string{
+		"PASSWORD", "PASSWD", "SECRET", "API_KEY", "APIKEY", "API-KEY",
+		"TOKEN", "ACCESS_TOKEN", "AUTH_TOKEN", "BEARER", "CREDENTIAL",
+		"PRIVATE_KEY", "PRIVATEKEY", "CONNECTION_STRING", "CONN_STR",
+		"DATABASE_URL", "DB_PASSWORD", "DB_PASS", "MYSQL_PASSWORD",
+		"POSTGRES_PASSWORD", "REDIS_PASSWORD", "MONGODB_URI",
+		"AWS_ACCESS_KEY", "AWS_SECRET", "AZURE_KEY", "GCP_KEY",
+		"ENCRYPTION_KEY", "SIGNING_KEY", "JWT_SECRET", "SESSION_SECRET",
+		"OAUTH", "CLIENT_SECRET",
+	}
+	for _, pattern := range sensitivePatterns {
+		if strings.Contains(envNameUpper, pattern) {
+			return "Yes"
+		}
+	}
+	return "No"
+}
+
 // getTableHeader returns the functions table header
 func (m *FunctionsModule) getTableHeader() []string {
 	return []string{
-		"Project Name",
-		"Project ID",
+		"Project",
+		"Type",
 		"Name",
 		"Region",
 		"State",
@@ -419,11 +511,11 @@ func (m *FunctionsModule) getTableHeader() []string {
 		"Ingress",
 		"Public",
 		"Service Account",
-		"Attack Paths",
-		"VPC Connector",
-		"Secrets",
-		"Resource Role",
-		"Resource Principal",
+		"SA Attack Paths",
+		"Default SA",
+		"VPC Access",
+		"IAM Binding Role",
+		"IAM Binding Principal",
 	}
 }
 
@@ -434,36 +526,39 @@ func (m *FunctionsModule) functionsToTableBody(functions []FunctionsService.Func
 		// Format trigger info
 		triggerInfo := fn.TriggerType
 		if fn.TriggerEventType != "" {
-			triggerInfo = fn.TriggerType
+			triggerInfo = fmt.Sprintf("%s (%s)", fn.TriggerType, extractFunctionName(fn.TriggerEventType))
 		}
 
-		// Format URL - no truncation
+		// Format URL
 		url := "-"
 		if fn.TriggerURL != "" {
 			url = fn.TriggerURL
 		}
 
-		// Format VPC connector
-		vpcConnector := "-"
+		// Format VPC access (renamed from VPC Connector for consistency with Cloud Run)
+		vpcAccess := "-"
 		if fn.VPCConnector != "" {
-			vpcConnector = fn.VPCConnector
+			vpcAccess = extractFunctionName(fn.VPCConnector)
+			if fn.VPCEgressSettings != "" {
+				vpcAccess += fmt.Sprintf(" (%s)", strings.TrimPrefix(fn.VPCEgressSettings, "VPC_EGRESS_"))
+			}
 		}
 
-		// Format secrets count
-		secretsInfo := "-"
-		totalSecrets := fn.SecretEnvVarCount + fn.SecretVolumeCount
-		if totalSecrets > 0 {
-			secretsInfo = fmt.Sprintf("%d", totalSecrets)
-		}
-
-		// Format service account - no truncation
+		// Format service account
 		serviceAccount := fn.ServiceAccount
 		if serviceAccount == "" {
 			serviceAccount = "-"
 		}
 
+		// Check if using default service account
+		defaultSA := "No"
+		if strings.Contains(serviceAccount, "@appspot.gserviceaccount.com") ||
+			strings.Contains(serviceAccount, "-compute@developer.gserviceaccount.com") {
+			defaultSA = "Yes"
+		}
+
 		// Check attack paths (privesc/exfil/lateral) for the service account
-		attackPaths := "-"
+		attackPaths := "run --attack-paths"
 		if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
 			if serviceAccount != "-" {
 				attackPaths = m.AttackPathCache.GetAttackSummary(serviceAccount)
@@ -472,24 +567,27 @@ func (m *FunctionsModule) functionsToTableBody(functions []FunctionsService.Func
 			}
 		}
 
-		// If function has IAM bindings, create one row per binding
+		// Format ingress for display (consistent with Cloud Run)
+		ingress := formatFunctionIngress(fn.IngressSettings)
+
+		// If function has IAM bindings, create one row per binding (shows IAM Binding Role/Principal)
 		if len(fn.IAMBindings) > 0 {
 			for _, binding := range fn.IAMBindings {
 				body = append(body, []string{
 					m.GetProjectName(fn.ProjectID),
-					fn.ProjectID,
+					"Function",
 					fn.Name,
 					fn.Region,
 					fn.State,
 					fn.Runtime,
 					triggerInfo,
 					url,
-					fn.IngressSettings,
+					ingress,
 					shared.BoolToYesNo(fn.IsPublic),
 					serviceAccount,
 					attackPaths,
-					vpcConnector,
-					secretsInfo,
+					defaultSA,
+					vpcAccess,
 					binding.Role,
 					binding.Member,
 				})
@@ -498,23 +596,46 @@ func (m *FunctionsModule) functionsToTableBody(functions []FunctionsService.Func
 			// Function has no IAM bindings - single row
 			body = append(body, []string{
 				m.GetProjectName(fn.ProjectID),
-				fn.ProjectID,
+				"Function",
 				fn.Name,
 				fn.Region,
 				fn.State,
 				fn.Runtime,
 				triggerInfo,
 				url,
-				fn.IngressSettings,
+				ingress,
 				shared.BoolToYesNo(fn.IsPublic),
 				serviceAccount,
 				attackPaths,
-				vpcConnector,
-				secretsInfo,
+				defaultSA,
+				vpcAccess,
 				"-",
 				"-",
 			})
 		}
 	}
 	return body
+}
+
+// formatFunctionIngress formats ingress settings for display (consistent with Cloud Run)
+func formatFunctionIngress(ingress string) string {
+	switch ingress {
+	case "ALLOW_ALL":
+		return "ALL (Public)"
+	case "ALLOW_INTERNAL_ONLY":
+		return "INTERNAL"
+	case "ALLOW_INTERNAL_AND_GCLB":
+		return "INT+LB"
+	default:
+		return ingress
+	}
+}
+
+// extractFunctionName extracts just the name from a resource path
+func extractFunctionName(fullName string) string {
+	parts := strings.Split(fullName, "/")
+	if len(parts) > 0 {
+		return parts[len(parts)-1]
+	}
+	return fullName
 }

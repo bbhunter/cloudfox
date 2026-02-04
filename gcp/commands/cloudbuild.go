@@ -305,7 +305,7 @@ func (m *CloudBuildModule) getTriggersHeader() []string {
 		"Branch/Tag",
 		"Config File",
 		"Service Account",
-		"Attack Paths",
+		"SA Attack Paths",
 		"Disabled",
 		"Privesc Potential",
 	}
@@ -347,7 +347,7 @@ func (m *CloudBuildModule) triggersToTableBody(triggers []cloudbuildservice.Trig
 		}
 
 		// Check attack paths (privesc/exfil/lateral) for the service account
-		attackPaths := "-"
+		attackPaths := "run --attack-paths"
 		if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
 			if sa != "(default)" && sa != "" {
 				attackPaths = m.AttackPathCache.GetAttackSummary(sa)

@@ -323,25 +323,23 @@ func (m *ArtifactRegistryModule) writeOutput(ctx context.Context, logger interna
 // getRepoHeader returns the header for repository table
 func (m *ArtifactRegistryModule) getRepoHeader() []string {
 	return []string{
-		"Project ID",
-		"Project Name",
+		"Project",
 		"Name",
 		"Format",
 		"Location",
 		"Mode",
 		"Public",
 		"Encryption",
-		"Resource Role",
+		"IAM Binding Role",
 		"Principal Type",
-		"Resource Principal",
+		"IAM Binding Principal",
 	}
 }
 
 // getArtifactHeader returns the header for artifact table
 func (m *ArtifactRegistryModule) getArtifactHeader() []string {
 	return []string{
-		"Project ID",
-		"Project Name",
+		"Project",
 		"Name",
 		"Repository",
 		"Location",
@@ -380,7 +378,6 @@ func (m *ArtifactRegistryModule) reposToTableBody(repos []ArtifactRegistryServic
 				for _, member := range binding.Members {
 					memberType := ArtifactRegistryService.GetMemberType(member)
 					body = append(body, []string{
-						repo.ProjectID,
 						m.GetProjectName(repo.ProjectID),
 						repoName,
 						repo.Format,
@@ -397,7 +394,6 @@ func (m *ArtifactRegistryModule) reposToTableBody(repos []ArtifactRegistryServic
 		} else {
 			// Repository with no IAM bindings
 			body = append(body, []string{
-				repo.ProjectID,
 				m.GetProjectName(repo.ProjectID),
 				repoName,
 				repo.Format,
@@ -429,7 +425,6 @@ func (m *ArtifactRegistryModule) artifactsToTableBody(artifacts []ArtifactRegist
 		}
 
 		body = append(body, []string{
-			artifact.ProjectID,
 			m.GetProjectName(artifact.ProjectID),
 			artifact.Name,
 			artifact.Repository,

@@ -266,15 +266,15 @@ func (m *LoadBalancersModule) generateLoadBalancerDiagram() string {
 }
 
 func (m *LoadBalancersModule) getLBHeader() []string {
-	return []string{"Project Name", "Project ID", "Name", "Type", "Scheme", "Region", "IP Address", "Port", "Backend Services", "Security Policy"}
+	return []string{"Project", "Name", "Type", "Scheme", "Region", "IP Address", "Port", "Backend Services", "Security Policy"}
 }
 
 func (m *LoadBalancersModule) getSSLHeader() []string {
-	return []string{"Project Name", "Project ID", "Name", "Min TLS Version", "Profile", "Custom Features"}
+	return []string{"Project", "Name", "Min TLS Version", "Profile", "Custom Features"}
 }
 
 func (m *LoadBalancersModule) getBackendHeader() []string {
-	return []string{"Project Name", "Project ID", "Name", "Protocol", "Port", "Security Policy", "CDN Enabled", "Health Check", "Session Affinity", "Backends"}
+	return []string{"Project", "Name", "Protocol", "Port", "Security Policy", "CDN Enabled", "Health Check", "Session Affinity", "Backends"}
 }
 
 func (m *LoadBalancersModule) lbsToTableBody(lbs []loadbalancerservice.LoadBalancerInfo) [][]string {
@@ -290,7 +290,6 @@ func (m *LoadBalancersModule) lbsToTableBody(lbs []loadbalancerservice.LoadBalan
 		}
 		body = append(body, []string{
 			m.GetProjectName(lb.ProjectID),
-			lb.ProjectID,
 			lb.Name,
 			lb.Type,
 			lb.Scheme,
@@ -313,7 +312,6 @@ func (m *LoadBalancersModule) sslPoliciesToTableBody(policies []loadbalancerserv
 		}
 		body = append(body, []string{
 			m.GetProjectName(policy.ProjectID),
-			policy.ProjectID,
 			policy.Name,
 			policy.MinTLSVersion,
 			policy.Profile,
@@ -344,7 +342,6 @@ func (m *LoadBalancersModule) backendServicesToTableBody(services []loadbalancer
 		}
 		body = append(body, []string{
 			m.GetProjectName(be.ProjectID),
-			be.ProjectID,
 			be.Name,
 			be.Protocol,
 			fmt.Sprintf("%d", be.Port),

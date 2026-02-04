@@ -61,7 +61,7 @@ type FunctionInfo struct {
 	TriggerResource      string
 	TriggerRetryPolicy   string  // RETRY_POLICY_RETRY, RETRY_POLICY_DO_NOT_RETRY
 
-	// Environment variables (sanitized - just names, not values)
+	// Environment variables
 	EnvVarCount          int
 	SecretEnvVarCount    int
 	SecretVolumeCount    int
@@ -70,12 +70,24 @@ type FunctionInfo struct {
 	IAMBindings          []IAMBinding // All IAM bindings for this function
 	IsPublic             bool         // allUsers or allAuthenticatedUsers can invoke
 
-	// Pentest-specific fields
+	// Detailed env var and secret info (like Cloud Run)
+	EnvVars              []EnvVarInfo   // All environment variables with values
+	SecretEnvVarNames    []string       // Names of secret env vars
+	SecretVolumeNames    []string       // Names of secret volumes
+
+	// Legacy fields (kept for compatibility)
 	EnvVarNames          []string  // Names of env vars (may hint at secrets)
-	SecretEnvVarNames    []string  // Names of secret env vars
-	SecretVolumeNames    []string  // Names of secret volumes
 	SourceLocation       string    // GCS or repo source location
 	SourceType           string    // GCS, Repository
+}
+
+// EnvVarInfo represents an environment variable configuration
+type EnvVarInfo struct {
+	Name          string
+	Value         string // Direct value (may be empty if using secret ref)
+	Source        string // "direct" or "secret-manager"
+	SecretName    string // For Secret Manager references
+	SecretVersion string // Version (e.g., "latest", "1")
 }
 
 // IAMBinding represents a single IAM role binding
@@ -195,20 +207,36 @@ func parseFunctionInfo(fn *cloudfunctions.Function, projectID string) FunctionIn
 		info.MinInstanceCount = fn.ServiceConfig.MinInstanceCount
 		info.MaxInstanceRequestConcurrency = fn.ServiceConfig.MaxInstanceRequestConcurrency
 
-		// Extract environment variable names (pentest-relevant - may hint at secrets)
+		// Extract environment variables with values
 		if fn.ServiceConfig.EnvironmentVariables != nil {
 			info.EnvVarCount = len(fn.ServiceConfig.EnvironmentVariables)
-			for key := range fn.ServiceConfig.EnvironmentVariables {
+			for key, value := range fn.ServiceConfig.EnvironmentVariables {
 				info.EnvVarNames = append(info.EnvVarNames, key)
+				info.EnvVars = append(info.EnvVars, EnvVarInfo{
+					Name:   key,
+					Value:  value,
+					Source: "direct",
+				})
 			}
 		}
 
-		// Extract secret environment variable names
+		// Extract secret environment variables
 		if fn.ServiceConfig.SecretEnvironmentVariables != nil {
 			info.SecretEnvVarCount = len(fn.ServiceConfig.SecretEnvironmentVariables)
 			for _, secret := range fn.ServiceConfig.SecretEnvironmentVariables {
 				if secret != nil {
 					info.SecretEnvVarNames = append(info.SecretEnvVarNames, secret.Key)
+					// Extract version from the secret reference
+					version := "latest"
+					if secret.Version != "" {
+						version = secret.Version
+					}
+					info.EnvVars = append(info.EnvVars, EnvVarInfo{
+						Name:          secret.Key,
+						Source:        "secret-manager",
+						SecretName:    secret.Secret,
+						SecretVersion: version,
+					})
 				}
 			}
 		}
