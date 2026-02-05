@@ -9,6 +9,7 @@ import (
 	bigqueryservice "github.com/BishopFox/cloudfox/gcp/services/bigqueryService"
 	kmsservice "github.com/BishopFox/cloudfox/gcp/services/kmsService"
 	pubsubservice "github.com/BishopFox/cloudfox/gcp/services/pubsubService"
+	regionservice "github.com/BishopFox/cloudfox/gcp/services/regionService"
 	spannerservice "github.com/BishopFox/cloudfox/gcp/services/spannerService"
 	"github.com/BishopFox/cloudfox/gcp/shared"
 	"github.com/BishopFox/cloudfox/globals"
@@ -832,8 +833,8 @@ func (m *PublicAccessModule) checkDataprocClusters(ctx context.Context, projectI
 		return
 	}
 
-	// List clusters in all regions
-	regions := []string{"us-central1", "us-east1", "us-west1", "europe-west1", "asia-east1", "global"}
+	// Get regions from regionService (with automatic fallback)
+	regions := regionservice.GetCachedRegionNames(ctx, projectID)
 	for _, region := range regions {
 		parent := fmt.Sprintf("projects/%s/regions/%s", projectID, region)
 		req := dpService.Projects.Regions.Clusters.List(projectID, region)

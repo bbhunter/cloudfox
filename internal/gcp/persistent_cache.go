@@ -10,6 +10,10 @@ import (
 	"time"
 )
 
+// DefaultCacheExpiration is the default time after which cache is considered stale
+// and will be automatically refreshed
+const DefaultCacheExpiration = 24 * time.Hour
+
 // atomicWriteGob writes data to a file atomically using a temp file and rename
 // This prevents corruption if the process is interrupted during write
 func atomicWriteGob(filename string, data interface{}) error {

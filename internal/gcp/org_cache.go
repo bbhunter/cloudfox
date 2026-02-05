@@ -160,6 +160,32 @@ func (c *OrgCache) GetStats() (orgs, folders, projects int) {
 	return len(c.Organizations), len(c.Folders), len(c.AllProjects)
 }
 
+// HasProject returns true if the project ID exists in the org cache
+func (c *OrgCache) HasProject(projectID string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	_, exists := c.ProjectByID[projectID]
+	return exists
+}
+
+// GetProjectScope returns the scope of a project relative to the org cache:
+// - "Internal" if the project is in the cache (part of enumerated org)
+// - "External" if the cache is populated but project is not in it
+// - "Unknown" if the cache is not populated
+func (c *OrgCache) GetProjectScope(projectID string) string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if !c.Populated {
+		return "Unknown"
+	}
+
+	if _, exists := c.ProjectByID[projectID]; exists {
+		return "Internal"
+	}
+	return "External"
+}
+
 // GetProjectsInOrg returns all project IDs belonging to an organization
 func (c *OrgCache) GetProjectsInOrg(orgID string) []string {
 	c.mu.RLock()

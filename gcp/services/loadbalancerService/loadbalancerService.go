@@ -97,19 +97,27 @@ func (s *LoadBalancerService) ListLoadBalancers(projectID string) ([]LoadBalance
 		}
 	}
 
-	// Get regional forwarding rules (internal, network LB)
-	regionsResp, err := service.Regions.List(projectID).Context(ctx).Do()
-	if err == nil {
-		for _, region := range regionsResp.Items {
-			regionalRules, err := service.ForwardingRules.List(projectID, region.Name).Context(ctx).Do()
-			if err == nil {
-				for _, rule := range regionalRules.Items {
-					lb := s.parseForwardingRule(rule, projectID, region.Name)
-					loadBalancers = append(loadBalancers, lb)
-				}
+	// Get all regional forwarding rules using AggregatedList (internal, network LB)
+	// This only requires compute.forwardingRules.list permission (not compute.regions.list)
+	req := service.ForwardingRules.AggregatedList(projectID)
+	err = req.Pages(ctx, func(page *compute.ForwardingRuleAggregatedList) error {
+		for scopeName, scopedList := range page.Items {
+			if scopedList.ForwardingRules == nil {
+				continue
+			}
+			// Extract region from scope name (format: "regions/us-central1")
+			region := "unknown"
+			if strings.HasPrefix(scopeName, "regions/") {
+				region = strings.TrimPrefix(scopeName, "regions/")
+			}
+			for _, rule := range scopedList.ForwardingRules {
+				lb := s.parseForwardingRule(rule, projectID, region)
+				loadBalancers = append(loadBalancers, lb)
 			}
 		}
-	}
+		return nil
+	})
+	// Ignore errors - we still return what we found from global rules
 
 	return loadBalancers, nil
 }
@@ -155,28 +163,32 @@ func (s *LoadBalancerService) ListBackendServices(projectID string) ([]BackendSe
 
 	var backends []BackendServiceInfo
 
-	// Global backend services
-	globalBackends, err := service.BackendServices.List(projectID).Context(ctx).Do()
-	if err == nil {
-		for _, backend := range globalBackends.Items {
-			info := s.parseBackendService(backend, projectID)
-			backends = append(backends, info)
-		}
-	}
-
-	// Regional backend services
-	regionsResp, err := service.Regions.List(projectID).Context(ctx).Do()
-	if err == nil {
-		for _, region := range regionsResp.Items {
-			regionalBackends, err := service.RegionBackendServices.List(projectID, region.Name).Context(ctx).Do()
-			if err == nil {
-				for _, backend := range regionalBackends.Items {
-					info := s.parseRegionalBackendService(backend, projectID, region.Name)
-					backends = append(backends, info)
+	// Get all backend services (global and regional) using AggregatedList
+	// This only requires compute.backendServices.list permission (not compute.regions.list)
+	req := service.BackendServices.AggregatedList(projectID)
+	err = req.Pages(ctx, func(page *compute.BackendServiceAggregatedList) error {
+		for scopeName, scopedList := range page.Items {
+			if scopedList.BackendServices == nil {
+				continue
+			}
+			// Extract region from scope name (format: "regions/us-central1" or "global")
+			region := "global"
+			if strings.HasPrefix(scopeName, "regions/") {
+				region = strings.TrimPrefix(scopeName, "regions/")
+			}
+			for _, backend := range scopedList.BackendServices {
+				var info BackendServiceInfo
+				if region == "global" {
+					info = s.parseBackendService(backend, projectID)
+				} else {
+					info = s.parseRegionalBackendService(backend, projectID, region)
 				}
+				backends = append(backends, info)
 			}
 		}
-	}
+		return nil
+	})
+	// Ignore errors - return empty list if we can't access
 
 	return backends, nil
 }

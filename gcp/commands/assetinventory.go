@@ -28,16 +28,28 @@ var (
 
 var GCPAssetInventoryCommand = &cobra.Command{
 	Use:     globals.GCP_ASSET_INVENTORY_MODULE_NAME,
-	Aliases: []string{"assets", "inventory", "cai", "resource-graph"},
-	Short:   "Enumerate Cloud Asset Inventory with optional dependency analysis",
-	Long: `Enumerate resources using Cloud Asset Inventory API.
+	Aliases: []string{"assets", "cai", "resource-graph"},
+	Short:   "Deep asset analysis with IAM and dependencies (requires Cloud Asset API)",
+	Long: `Deep resource analysis using Cloud Asset Inventory API.
 
-Features:
-- Lists all assets in a project
-- Provides asset counts by type
-- Can check IAM policies for public access
-- Supports filtering by asset type
-- Analyzes resource dependencies and cross-project relationships
+USE THIS COMMAND WHEN:
+- You need IAM policy analysis (public access detection)
+- You want to analyze resource dependencies and cross-project relationships
+- You need to filter by specific asset types
+- Cloud Asset API is enabled in your projects
+
+REQUIRES: Cloud Asset API (cloudasset.googleapis.com) to be enabled.
+To enable: gcloud services enable cloudasset.googleapis.com --project=PROJECT_ID
+
+If Cloud Asset API is not enabled, use 'inventory' command instead for a quick
+overview that works without the API.
+
+FEATURES:
+- Lists all assets in a project (complete coverage via Asset API)
+- Provides asset counts by type (--counts)
+- Checks IAM policies for public access (--iam)
+- Analyzes resource dependencies and cross-project relationships (--dependencies)
+- Supports filtering by asset type (--types)
 - Generates query templates for common security use cases
 
 Flags can be combined to run multiple analyses in a single run.
@@ -47,8 +59,8 @@ Examples:
   cloudfox gcp asset-inventory -p my-project --counts
   cloudfox gcp asset-inventory -p my-project --iam
   cloudfox gcp asset-inventory -p my-project --dependencies
-  cloudfox gcp asset-inventory -p my-project --counts --iam --dependencies
   cloudfox gcp asset-inventory -p my-project --all
+  cloudfox gcp asset-inventory -A --iam                    # All projects, check public access
   cloudfox gcp asset-inventory -p my-project --types compute.googleapis.com/Instance,storage.googleapis.com/Bucket`,
 	Run: runGCPAssetInventoryCommand,
 }

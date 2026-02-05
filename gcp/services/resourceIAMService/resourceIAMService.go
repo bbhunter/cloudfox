@@ -10,6 +10,7 @@ import (
 	"cloud.google.com/go/kms/apiv1/kmspb"
 	"cloud.google.com/go/pubsub"
 	"cloud.google.com/go/storage"
+	regionservice "github.com/BishopFox/cloudfox/gcp/services/regionService"
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	run "google.golang.org/api/run/v1"
@@ -432,8 +433,10 @@ func (s *ResourceIAMService) GetKMSIAM(ctx context.Context, projectID string) ([
 	}
 	defer client.Close()
 
-	// List key rings in all locations
-	locations := []string{"global", "us", "us-central1", "us-east1", "us-west1", "europe-west1", "asia-east1"}
+	// Get regions from regionService (with automatic fallback) plus global and multi-region locations
+	regions := regionservice.GetCachedRegionNames(ctx, projectID)
+	// Add global and multi-region locations that KMS supports
+	locations := append([]string{"global", "us", "eu", "asia"}, regions...)
 
 	for _, location := range locations {
 		parent := fmt.Sprintf("projects/%s/locations/%s", projectID, location)

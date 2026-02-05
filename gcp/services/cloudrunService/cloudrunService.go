@@ -8,6 +8,7 @@ import (
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
+	regionservice "github.com/BishopFox/cloudfox/gcp/services/regionService"
 	run "google.golang.org/api/run/v2"
 )
 
@@ -216,24 +217,6 @@ func isCloudFunction(labels map[string]string) bool {
 	return false
 }
 
-// cloudRunRegions contains all Cloud Run regions
-// Note: Cloud Run Jobs API does NOT support the "-" wildcard for locations (unlike Services API)
-// so we need to iterate through regions explicitly
-var cloudRunRegions = []string{
-	// Tier 1 regions
-	"asia-east1", "asia-northeast1", "asia-northeast2", "asia-south1",
-	"europe-north1", "europe-west1", "europe-west4",
-	"me-west1", "us-central1", "us-east1", "us-east4", "us-east5", "us-south1", "us-west1",
-	// Tier 2 regions
-	"africa-south1", "asia-east2", "asia-northeast3", "asia-southeast1", "asia-southeast2", "asia-south2",
-	"australia-southeast1", "australia-southeast2",
-	"europe-central2", "europe-west2", "europe-west3", "europe-west6",
-	"me-central1", "me-central2",
-	"northamerica-northeast1", "northamerica-northeast2",
-	"southamerica-east1", "southamerica-west1",
-	"us-west2", "us-west3", "us-west4",
-}
-
 // Jobs retrieves all Cloud Run jobs in a project across all regions
 // Note: The Cloud Run Jobs API does NOT support the "-" wildcard for locations
 // unlike the Services API, so we must iterate through regions explicitly
@@ -254,8 +237,11 @@ func (cs *CloudRunService) Jobs(projectID string) ([]JobInfo, error) {
 	// Use a semaphore to limit concurrent API calls
 	semaphore := make(chan struct{}, 10) // Max 10 concurrent requests
 
+	// Get regions from regionService (with automatic fallback)
+	regions := regionservice.GetCachedRegionNames(ctx, projectID)
+
 	// Iterate through all Cloud Run regions in parallel
-	for _, region := range cloudRunRegions {
+	for _, region := range regions {
 		wg.Add(1)
 		go func(region string) {
 			defer wg.Done()

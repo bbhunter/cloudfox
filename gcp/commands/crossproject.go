@@ -35,17 +35,28 @@ Features:
 - Highlights service accounts spanning trust boundaries
 - Shows impersonation targets when --attack-paths flag is used
 
-TIP: For a complete picture including impersonation targets and attack paths,
-use the global --attack-paths flag:
+RECOMMENDED: For comprehensive cross-project analysis, use with -A and --org-cache
+to automatically discover all accessible projects in your organization:
+
+  cloudfox gcp crossproject -A --org-cache --attack-paths
+
+This will:
+- Discover all projects you have access to (--org-cache)
+- Analyze cross-project patterns across all of them (-A)
+- Include impersonation targets and attack paths (--attack-paths)
+- Show "Trust Boundary" column indicating if target is Internal, External, or Unknown
+
+TRUST BOUNDARY COLUMN (requires --org-cache):
+- "Internal" - Target project is within your organization
+- "External" - Target project is outside your organization (trust boundary crossing!)
+- "Unknown"  - Org cache not available, cannot determine boundary
+
+ALTERNATIVE: Specify projects manually with -l for a project list file:
 
   cloudfox gcp crossproject -l projects.txt --attack-paths
 
-This will populate the Target Type, Target Principal, and Attack Path columns
-with detailed information about what service accounts can be impersonated and
-what privesc/exfil/lateral movement capabilities exist.
-
 WARNING: Requires multiple projects to be specified for effective analysis.
-Use -p for single project or -l for project list file.`,
+Single project analysis (-p) will have limited results.`,
 	Run: runGCPCrossProjectCommand,
 }
 
@@ -62,6 +73,7 @@ type CrossProjectModule struct {
 	CrossProjectPubSub    []crossprojectservice.CrossProjectPubSubExport
 	LootMap               map[string]*internal.LootFile
 	AttackPathCache       *gcpinternal.AttackPathCache
+	OrgCache              *gcpinternal.OrgCache
 }
 
 // ------------------------------
@@ -116,6 +128,17 @@ func (m *CrossProjectModule) Execute(ctx context.Context, logger internal.Logger
 			logger.InfoM(fmt.Sprintf("Using attack path cache from disk (created: %s)",
 				metadata.CreatedAt.Format("2006-01-02 15:04:05")), globals.GCP_CROSSPROJECT_MODULE_NAME)
 			m.AttackPathCache = diskCache
+		}
+	}
+
+	// Get org cache from context (populated by --org-cache flag or all-checks)
+	m.OrgCache = gcpinternal.GetOrgCacheFromContext(ctx)
+
+	// If no context cache, try loading from disk cache
+	if m.OrgCache == nil || !m.OrgCache.IsPopulated() {
+		diskCache, _, err := gcpinternal.LoadOrgCacheFromFile(m.OutputDirectory, m.Account)
+		if err == nil && diskCache != nil && diskCache.IsPopulated() {
+			m.OrgCache = diskCache
 		}
 	}
 
@@ -316,7 +339,16 @@ func (m *CrossProjectModule) getHeader() []string {
 		"Target Principal",
 		"Target Role",
 		"Attack Path",
+		"Trust Boundary",
 	}
+}
+
+// getTargetProjectScope returns the scope of the target project relative to the org
+func (m *CrossProjectModule) getTargetProjectScope(targetProjectID string) string {
+	if m.OrgCache == nil || !m.OrgCache.IsPopulated() {
+		return "Unknown"
+	}
+	return m.OrgCache.GetProjectScope(targetProjectID)
 }
 
 // getImpersonationTarget checks if a role grants impersonation capabilities and returns the target
@@ -459,6 +491,7 @@ func (m *CrossProjectModule) buildTableBodyByTargetProject() map[string][][]stri
 		role := cleanRole(binding.Role)
 		attackPath := m.getAttackPathForTarget(binding.TargetProject, binding.Principal)
 		targetType, targetPrincipal := m.getImpersonationTarget(binding.Principal, binding.Role, binding.TargetProject)
+		trustBoundary := m.getTargetProjectScope(binding.TargetProject)
 
 		row := []string{
 			m.GetProjectName(binding.SourceProject),
@@ -470,6 +503,7 @@ func (m *CrossProjectModule) buildTableBodyByTargetProject() map[string][][]stri
 			targetPrincipal,
 			role,
 			attackPath,
+			trustBoundary,
 		}
 		bodyByProject[binding.TargetProject] = append(bodyByProject[binding.TargetProject], row)
 	}
@@ -488,6 +522,7 @@ func (m *CrossProjectModule) buildTableBodyByTargetProject() map[string][][]stri
 			role = cleanRole(role)
 			attackPath := m.getAttackPathForTarget(targetProject, "serviceAccount:"+sa.Email)
 			targetType, targetPrincipal := m.getImpersonationTarget(sa.Email, role, targetProject)
+			trustBoundary := m.getTargetProjectScope(targetProject)
 
 			row := []string{
 				m.GetProjectName(sa.ProjectID),
@@ -499,6 +534,7 @@ func (m *CrossProjectModule) buildTableBodyByTargetProject() map[string][][]stri
 				targetPrincipal,
 				role,
 				attackPath,
+				trustBoundary,
 			}
 			bodyByProject[targetProject] = append(bodyByProject[targetProject], row)
 		}
@@ -512,6 +548,7 @@ func (m *CrossProjectModule) buildTableBodyByTargetProject() map[string][][]stri
 			cleanedRole := cleanRole(role)
 			attackPath := m.getAttackPathForTarget(path.TargetProject, path.SourcePrincipal)
 			targetType, targetPrincipal := m.getImpersonationTarget(path.SourcePrincipal, role, path.TargetProject)
+			trustBoundary := m.getTargetProjectScope(path.TargetProject)
 
 			row := []string{
 				m.GetProjectName(path.SourceProject),
@@ -523,6 +560,7 @@ func (m *CrossProjectModule) buildTableBodyByTargetProject() map[string][][]stri
 				targetPrincipal,
 				cleanedRole,
 				attackPath,
+				trustBoundary,
 			}
 			bodyByProject[path.TargetProject] = append(bodyByProject[path.TargetProject], row)
 		}
@@ -538,6 +576,7 @@ func (m *CrossProjectModule) buildTableBodyByTargetProject() map[string][][]stri
 			}
 			dest = fmt.Sprintf("%s (%s)", sink.DestinationType, filter)
 		}
+		trustBoundary := m.getTargetProjectScope(sink.TargetProject)
 
 		row := []string{
 			m.GetProjectName(sink.SourceProject),
@@ -549,6 +588,7 @@ func (m *CrossProjectModule) buildTableBodyByTargetProject() map[string][][]stri
 			"-",
 			dest,
 			"-",
+			trustBoundary,
 		}
 		bodyByProject[sink.TargetProject] = append(bodyByProject[sink.TargetProject], row)
 	}
@@ -560,6 +600,7 @@ func (m *CrossProjectModule) buildTableBodyByTargetProject() map[string][][]stri
 			destName := extractCrossProjectResourceName(export.ExportDest)
 			dest = fmt.Sprintf("%s: %s", export.ExportType, destName)
 		}
+		trustBoundary := m.getTargetProjectScope(export.TargetProject)
 
 		row := []string{
 			m.GetProjectName(export.SourceProject),
@@ -571,6 +612,7 @@ func (m *CrossProjectModule) buildTableBodyByTargetProject() map[string][][]stri
 			"-",
 			dest,
 			"-",
+			trustBoundary,
 		}
 		bodyByProject[export.TargetProject] = append(bodyByProject[export.TargetProject], row)
 	}

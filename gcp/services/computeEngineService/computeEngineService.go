@@ -78,10 +78,12 @@ type ComputeEngineInfo struct {
 	SerialPortEnabled   bool `json:"serialPortEnabled"`   // Serial port access enabled
 
 	// Pentest-specific fields: actual content extraction
-	StartupScriptContent string   `json:"startupScriptContent"` // Actual startup script content
-	StartupScriptURL     string   `json:"startupScriptURL"`     // URL to startup script if remote
-	SSHKeys              []string `json:"sshKeys"`              // Extracted SSH keys
-	CustomMetadata       []string `json:"customMetadata"`       // Other custom metadata keys
+	StartupScriptContent string            `json:"startupScriptContent"` // Actual startup script content
+	StartupScriptURL     string            `json:"startupScriptURL"`     // URL to startup script if remote
+	SSHKeys              []string          `json:"sshKeys"`              // Extracted SSH keys
+	CustomMetadata       []string          `json:"customMetadata"`       // Other custom metadata keys
+	RawMetadata          map[string]string `json:"rawMetadata"`          // Full raw metadata key-value pairs
+	SensitiveMetadata    []SensitiveItem   `json:"sensitiveMetadata"`    // Detected sensitive items in metadata
 
 	// Disk encryption
 	BootDiskEncryption string `json:"bootDiskEncryption"` // "Google-managed", "CMEK", or "CSEK"
@@ -97,15 +99,17 @@ type ComputeEngineInfo struct {
 
 // ProjectMetadataInfo contains project-level metadata security info
 type ProjectMetadataInfo struct {
-	ProjectID               string   `json:"projectId"`
-	HasProjectSSHKeys       bool     `json:"hasProjectSSHKeys"`
-	ProjectSSHKeys          []string `json:"projectSSHKeys"`
-	HasProjectStartupScript bool     `json:"hasProjectStartupScript"`
-	ProjectStartupScript    string   `json:"projectStartupScript"`
-	OSLoginEnabled          bool     `json:"osLoginEnabled"`
-	OSLogin2FAEnabled       bool     `json:"osLogin2FAEnabled"`
-	SerialPortEnabled       bool     `json:"serialPortEnabled"`
-	CustomMetadataKeys      []string `json:"customMetadataKeys"`
+	ProjectID               string            `json:"projectId"`
+	HasProjectSSHKeys       bool              `json:"hasProjectSSHKeys"`
+	ProjectSSHKeys          []string          `json:"projectSSHKeys"`
+	HasProjectStartupScript bool              `json:"hasProjectStartupScript"`
+	ProjectStartupScript    string            `json:"projectStartupScript"`
+	OSLoginEnabled          bool              `json:"osLoginEnabled"`
+	OSLogin2FAEnabled       bool              `json:"osLogin2FAEnabled"`
+	SerialPortEnabled       bool              `json:"serialPortEnabled"`
+	CustomMetadataKeys      []string          `json:"customMetadataKeys"`
+	RawMetadata             map[string]string `json:"rawMetadata"`
+	SensitiveMetadata       []SensitiveItem   `json:"sensitiveMetadata"`
 }
 
 // InstanceIAMInfo contains IAM policy info for an instance
@@ -160,20 +164,23 @@ func (ces *ComputeEngineService) Instances(projectID string) ([]ComputeEngineInf
 		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
 
-	regions, err := computeService.Regions.List(projectID).Do()
-	if err != nil {
-		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
-	}
-
+	// Use AggregatedList to get all instances across all zones in one call
+	// This only requires compute.instances.list permission (not compute.regions.list)
 	var instanceInfos []ComputeEngineInfo
-	for _, region := range regions.Items {
-		for _, zoneURL := range region.Zones {
-			zone := getZoneNameFromURL(zoneURL)
-			instanceList, err := computeService.Instances.List(projectID, zone).Do()
-			if err != nil {
-				return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
+
+	req := computeService.Instances.AggregatedList(projectID)
+	err = req.Pages(ctx, func(page *compute.InstanceAggregatedList) error {
+		for scopeName, scopedList := range page.Items {
+			if scopedList.Instances == nil {
+				continue
 			}
-			for _, instance := range instanceList.Items {
+			// Extract zone from scope name (format: "zones/us-central1-a")
+			zone := ""
+			if strings.HasPrefix(scopeName, "zones/") {
+				zone = strings.TrimPrefix(scopeName, "zones/")
+			}
+
+			for _, instance := range scopedList.Instances {
 				info := ComputeEngineInfo{
 					Name:               instance.Name,
 					ID:                 fmt.Sprintf("%v", instance.Id),
@@ -223,18 +230,30 @@ func (ces *ComputeEngineService) Instances(projectID string) ([]ComputeEngineInf
 					info.StartupScriptURL = metaResult.StartupScriptURL
 					info.SSHKeys = metaResult.SSHKeys
 					info.CustomMetadata = metaResult.CustomMetadata
+					info.RawMetadata = metaResult.RawMetadata
+					// Mark source for sensitive items
+					for i := range metaResult.SensitiveItems {
+						metaResult.SensitiveItems[i].Source = "instance"
+					}
+					info.SensitiveMetadata = metaResult.SensitiveItems
 				}
 
 				// Parse boot disk encryption
 				info.BootDiskEncryption, info.BootDiskKMSKey = parseBootDiskEncryption(instance.Disks)
 
-				// Fetch IAM bindings for this instance
+				// Fetch IAM bindings for this instance (may fail silently if no permission)
 				info.IAMBindings = ces.getInstanceIAMBindings(computeService, projectID, zone, instance.Name)
 
 				instanceInfos = append(instanceInfos, info)
 			}
 		}
+		return nil
+	})
+
+	if err != nil {
+		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
+
 	return instanceInfos, nil
 }
 
@@ -308,6 +327,15 @@ func parseServiceAccounts(sas []*compute.ServiceAccount, projectID string) ([]Se
 	return accounts, hasDefaultSA, hasCloudScopes
 }
 
+// SensitiveItem represents a potentially sensitive metadata item
+type SensitiveItem struct {
+	Key         string `json:"key"`
+	Value       string `json:"value"`
+	Type        string `json:"type"`        // password, api-key, token, credential, connection-string, secret, env-var
+	Source      string `json:"source"`      // instance or project
+	Truncated   bool   `json:"truncated"`   // Whether value was truncated for display
+}
+
 // MetadataParseResult contains all parsed metadata fields
 type MetadataParseResult struct {
 	HasStartupScript     bool
@@ -320,6 +348,8 @@ type MetadataParseResult struct {
 	StartupScriptURL     string
 	SSHKeys              []string
 	CustomMetadata       []string
+	RawMetadata          map[string]string
+	SensitiveItems       []SensitiveItem
 }
 
 // parseMetadata checks instance metadata for security-relevant settings
@@ -329,24 +359,73 @@ func parseMetadata(metadata *compute.Metadata) (hasStartupScript, hasSSHKeys, bl
 		result.OSLoginEnabled, result.OSLogin2FA, result.SerialPortEnabled
 }
 
+// sensitivePatterns maps key name patterns to secret types
+var sensitivePatterns = map[string]string{
+	"PASSWORD":          "password",
+	"PASSWD":            "password",
+	"SECRET":            "secret",
+	"API_KEY":           "api-key",
+	"APIKEY":            "api-key",
+	"API-KEY":           "api-key",
+	"TOKEN":             "token",
+	"ACCESS_TOKEN":      "token",
+	"AUTH_TOKEN":        "token",
+	"BEARER":            "token",
+	"CREDENTIAL":        "credential",
+	"PRIVATE_KEY":       "credential",
+	"PRIVATEKEY":        "credential",
+	"CONNECTION_STRING": "connection-string",
+	"CONN_STR":          "connection-string",
+	"DATABASE_URL":      "connection-string",
+	"DB_PASSWORD":       "password",
+	"DB_PASS":           "password",
+	"MYSQL_PASSWORD":    "password",
+	"POSTGRES_PASSWORD": "password",
+	"REDIS_PASSWORD":    "password",
+	"MONGODB_URI":       "connection-string",
+	"AWS_ACCESS_KEY":    "credential",
+	"AWS_SECRET":        "credential",
+	"AZURE_KEY":         "credential",
+	"GCP_KEY":           "credential",
+	"ENCRYPTION_KEY":    "credential",
+	"SIGNING_KEY":       "credential",
+	"JWT_SECRET":        "credential",
+	"SESSION_SECRET":    "credential",
+	"OAUTH":             "credential",
+	"CLIENT_SECRET":     "credential",
+}
+
+// detectSensitiveType checks if a key name matches sensitive patterns
+func detectSensitiveType(key string) string {
+	keyUpper := strings.ToUpper(key)
+	for pattern, secretType := range sensitivePatterns {
+		if strings.Contains(keyUpper, pattern) {
+			return secretType
+		}
+	}
+	return ""
+}
+
 // parseMetadataFull extracts all metadata including content
 func parseMetadataFull(metadata *compute.Metadata) MetadataParseResult {
-	result := MetadataParseResult{}
+	result := MetadataParseResult{
+		RawMetadata: make(map[string]string),
+	}
 	if metadata == nil || metadata.Items == nil {
 		return result
 	}
 
 	// Known metadata keys to exclude from custom metadata
 	knownKeys := map[string]bool{
-		"startup-script":         true,
-		"startup-script-url":     true,
-		"ssh-keys":               true,
-		"sshKeys":                true,
-		"block-project-ssh-keys": true,
-		"enable-oslogin":         true,
-		"enable-oslogin-2fa":     true,
-		"serial-port-enable":     true,
-		"google-compute-default-zone": true,
+		"startup-script":                true,
+		"startup-script-url":            true,
+		"ssh-keys":                      true,
+		"sshKeys":                       true,
+		"block-project-ssh-keys":        true,
+		"enable-oslogin":                true,
+		"enable-oslogin-2fa":            true,
+		"serial-port-enable":            true,
+		"google-compute-default-zone":   true,
 		"google-compute-default-region": true,
 	}
 
@@ -355,11 +434,19 @@ func parseMetadataFull(metadata *compute.Metadata) MetadataParseResult {
 			continue
 		}
 
+		// Store all raw metadata
+		if item.Value != nil {
+			result.RawMetadata[item.Key] = *item.Value
+		}
+
 		switch item.Key {
 		case "startup-script":
 			result.HasStartupScript = true
 			if item.Value != nil {
 				result.StartupScriptContent = *item.Value
+				// Check startup script for sensitive patterns
+				sensitiveItems := extractSensitiveFromScript(*item.Value, "startup-script")
+				result.SensitiveItems = append(result.SensitiveItems, sensitiveItems...)
 			}
 		case "startup-script-url":
 			result.HasStartupScript = true
@@ -398,11 +485,61 @@ func parseMetadataFull(metadata *compute.Metadata) MetadataParseResult {
 			// Track custom metadata keys (may contain secrets)
 			if !knownKeys[item.Key] {
 				result.CustomMetadata = append(result.CustomMetadata, item.Key)
+
+				// Check if key name suggests sensitive content
+				if item.Value != nil {
+					if sensitiveType := detectSensitiveType(item.Key); sensitiveType != "" {
+						result.SensitiveItems = append(result.SensitiveItems, SensitiveItem{
+							Key:   item.Key,
+							Value: *item.Value,
+							Type:  sensitiveType,
+						})
+					}
+				}
 			}
 		}
 	}
 
 	return result
+}
+
+// extractSensitiveFromScript extracts potential sensitive values from scripts
+func extractSensitiveFromScript(script, source string) []SensitiveItem {
+	var items []SensitiveItem
+	lines := strings.Split(script, "\n")
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		// Skip comments and empty lines
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		// Look for export VAR=value or VAR=value patterns
+		if strings.Contains(line, "=") {
+			// Handle export statements
+			line = strings.TrimPrefix(line, "export ")
+
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) == 2 {
+				key := strings.TrimSpace(parts[0])
+				value := strings.TrimSpace(parts[1])
+				// Remove quotes from value
+				value = strings.Trim(value, "\"'")
+
+				if sensitiveType := detectSensitiveType(key); sensitiveType != "" && value != "" {
+					items = append(items, SensitiveItem{
+						Key:    key,
+						Value:  value,
+						Type:   sensitiveType,
+						Source: source,
+					})
+				}
+			}
+		}
+	}
+
+	return items
 }
 
 // parseBootDiskEncryption checks the boot disk encryption type
@@ -460,13 +597,19 @@ func (ces *ComputeEngineService) GetProjectMetadata(projectID string) (*ProjectM
 	}
 
 	info := &ProjectMetadataInfo{
-		ProjectID: projectID,
+		ProjectID:   projectID,
+		RawMetadata: make(map[string]string),
 	}
 
 	if project.CommonInstanceMetadata != nil {
 		for _, item := range project.CommonInstanceMetadata.Items {
 			if item == nil {
 				continue
+			}
+
+			// Store all raw metadata
+			if item.Value != nil {
+				info.RawMetadata[item.Key] = *item.Value
 			}
 
 			switch item.Key {
@@ -485,6 +628,12 @@ func (ces *ComputeEngineService) GetProjectMetadata(projectID string) (*ProjectM
 				info.HasProjectStartupScript = true
 				if item.Value != nil {
 					info.ProjectStartupScript = *item.Value
+					// Check startup script for sensitive patterns
+					sensitiveItems := extractSensitiveFromScript(*item.Value, "project-startup-script")
+					for i := range sensitiveItems {
+						sensitiveItems[i].Source = "project"
+					}
+					info.SensitiveMetadata = append(info.SensitiveMetadata, sensitiveItems...)
 				}
 			case "enable-oslogin":
 				if item.Value != nil && strings.ToLower(*item.Value) == "true" {
@@ -502,6 +651,18 @@ func (ces *ComputeEngineService) GetProjectMetadata(projectID string) (*ProjectM
 				// Track other custom metadata that might contain secrets
 				if !isKnownMetadataKey(item.Key) {
 					info.CustomMetadataKeys = append(info.CustomMetadataKeys, item.Key)
+
+					// Check if key name suggests sensitive content
+					if item.Value != nil {
+						if sensitiveType := detectSensitiveType(item.Key); sensitiveType != "" {
+							info.SensitiveMetadata = append(info.SensitiveMetadata, SensitiveItem{
+								Key:    item.Key,
+								Value:  *item.Value,
+								Type:   sensitiveType,
+								Source: "project",
+							})
+						}
+					}
 				}
 			}
 		}

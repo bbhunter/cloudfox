@@ -7,6 +7,7 @@ import (
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
+	regionservice "github.com/BishopFox/cloudfox/gcp/services/regionService"
 	iap "google.golang.org/api/iap/v1"
 )
 
@@ -72,8 +73,10 @@ func (s *IAPService) ListTunnelDestGroups(projectID string) ([]TunnelDestGroup, 
 
 	var groups []TunnelDestGroup
 
-	// List across common regions
-	regions := []string{"us-central1", "us-east1", "us-west1", "europe-west1", "asia-east1", "-"}
+	// Get regions from regionService (with automatic fallback)
+	// Also try "-" wildcard in case it's supported
+	regions := regionservice.GetCachedRegionNames(ctx, projectID)
+	regions = append(regions, "-")
 
 	for _, region := range regions {
 		parent := fmt.Sprintf("projects/%s/iap_tunnel/locations/%s", projectID, region)

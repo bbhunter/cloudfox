@@ -49,30 +49,46 @@ const GCP_INVENTORY_MODULE_NAME = "inventory"
 var GCPInventoryCommand = &cobra.Command{
 	Use:     GCP_INVENTORY_MODULE_NAME,
 	Aliases: []string{"inv", "resources"},
-	Short:   "Enumerate all GCP resources across projects",
-	Long: `Enumerate all GCP resources across projects and display counts by resource type and region.
+	Short:   "Quick resource inventory - works without Cloud Asset API",
+	Long: `Quick resource inventory that works even when Cloud Asset API is not enabled.
 
-This module provides a comprehensive inventory of your GCP environment, showing:
+USE THIS COMMAND WHEN:
+- You want a quick overview of resources across projects
+- Cloud Asset API is not enabled in your projects
+- You need a fallback that always works
+
+For deep analysis with IAM policies and resource dependencies, use 'asset-inventory' instead
+(requires Cloud Asset API to be enabled).
+
+HOW IT WORKS:
+1. Tries Cloud Asset API first (if enabled) for complete coverage
+2. Falls back to Service Usage API to identify enabled services
+3. Always runs dedicated CloudFox enumeration for security-relevant resources
+
+This ensures you get results even in restricted environments where the
+Cloud Asset API (cloudasset.googleapis.com) is not enabled.
+
+OUTPUT INCLUDES:
 - Resource counts by type (Compute instances, GKE clusters, Cloud Functions, etc.)
 - Regional distribution of resources
+- CloudFox coverage analysis (identifies potential blind spots)
 - Total resource counts per project
 
-The output helps identify:
-- Attack surface scope and breadth
-- Resource distribution patterns
-- High-value target areas (dense resource regions)
-
-Supported Resource Types:
+SUPPORTED RESOURCE TYPES:
 - Compute: Instances, Disks, Snapshots, Images
 - Containers: GKE Clusters, Cloud Run Services/Jobs
 - Serverless: Cloud Functions, App Engine
 - Storage: Buckets, Filestore, BigQuery Datasets
 - Databases: Cloud SQL, Spanner, Bigtable, Memorystore
-- Networking: VPCs, Subnets, Firewalls, Load Balancers, DNS Zones
+- Networking: DNS Zones
 - Security: Service Accounts, KMS Keys, Secrets, API Keys
 - DevOps: Cloud Build Triggers, Source Repos, Artifact Registry
 - Data: Pub/Sub Topics, Dataflow Jobs, Dataproc Clusters
-- AI/ML: Notebooks, Composer Environments`,
+- AI/ML: Notebooks, Composer Environments
+
+Examples:
+  cloudfox gcp inventory -p my-project
+  cloudfox gcp inventory -A                  # All accessible projects`,
 	Run: runGCPInventoryCommand,
 }
 
@@ -1265,31 +1281,59 @@ func extractRegionFromZone(zone string) string {
 	return zone
 }
 
-// writeOutput generates the table and loot files
+// writeOutput generates the table and loot files per-project
 func (m *InventoryModule) writeOutput(ctx context.Context, logger internal.Logger) {
+	// Build hierarchical output data with per-project results
+	outputData := internal.HierarchicalOutputData{
+		OrgLevelData:     make(map[string]internal.CloudfoxOutput),
+		ProjectLevelData: make(map[string]internal.CloudfoxOutput),
+	}
+
+	// Generate output for each project
+	for _, projectID := range m.ProjectIDs {
+		projectOutput := m.buildProjectOutput(projectID)
+		if projectOutput != nil {
+			outputData.ProjectLevelData[projectID] = projectOutput
+		}
+	}
+
+	// Use hierarchical output to write to per-project directories
+	pathBuilder := m.BuildPathBuilder()
+	err := internal.HandleHierarchicalOutputSmart("gcp", m.Format, m.Verbosity, m.WrapTable, pathBuilder, outputData)
+	if err != nil {
+		logger.ErrorM(fmt.Sprintf("Error writing output: %v", err), GCP_INVENTORY_MODULE_NAME)
+	}
+}
+
+// buildProjectOutput generates output data for a single project
+func (m *InventoryModule) buildProjectOutput(projectID string) internal.CloudfoxOutput {
 	var tableFiles []internal.TableFile
+
+	// Get project-specific asset counts
+	projectAssets := m.assetCounts[projectID]
+	projectAssetTotal := 0
+	for _, count := range projectAssets {
+		projectAssetTotal += count
+	}
 
 	// ========================================
 	// Table 1: Complete Asset Inventory (from Cloud Asset API)
-	// This shows ALL resources, including ones CloudFox doesn't have dedicated modules for
 	// ========================================
-	if m.assetGrandTotal > 0 {
-		assetTotals := m.getAssetTypeTotals()
-
+	if projectAssetTotal > 0 {
 		// Sort asset types by count (descending)
 		var assetTypes []string
-		for at := range assetTotals {
+		for at := range projectAssets {
 			assetTypes = append(assetTypes, at)
 		}
 		sort.Slice(assetTypes, func(i, j int) bool {
-			return assetTotals[assetTypes[i]] > assetTotals[assetTypes[j]]
+			return projectAssets[assetTypes[i]] > projectAssets[assetTypes[j]]
 		})
 
 		assetHeader := []string{"Asset Type", "Count", "CloudFox Coverage"}
 		var assetBody [][]string
 
 		// Add total row
-		assetBody = append(assetBody, []string{"TOTAL", strconv.Itoa(m.assetGrandTotal), "-"})
+		assetBody = append(assetBody, []string{"TOTAL", strconv.Itoa(projectAssetTotal), "-"})
 
 		// Add uncovered assets first (these are areas CloudFox might miss)
 		var uncoveredTypes []string
@@ -1307,7 +1351,7 @@ func (m *InventoryModule) writeOutput(ctx context.Context, logger internal.Logge
 			coverage := "NO - potential blind spot"
 			assetBody = append(assetBody, []string{
 				formatAssetType(at),
-				strconv.Itoa(assetTotals[at]),
+				strconv.Itoa(projectAssets[at]),
 				coverage,
 			})
 		}
@@ -1317,7 +1361,7 @@ func (m *InventoryModule) writeOutput(ctx context.Context, logger internal.Logge
 			coverage := "Yes"
 			assetBody = append(assetBody, []string{
 				formatAssetType(at),
-				strconv.Itoa(assetTotals[at]),
+				strconv.Itoa(projectAssets[at]),
 				coverage,
 			})
 		}
@@ -1327,26 +1371,16 @@ func (m *InventoryModule) writeOutput(ctx context.Context, logger internal.Logge
 			Header: assetHeader,
 			Body:   assetBody,
 		})
-	} else if len(m.enabledServices) > 0 {
+	} else if services, ok := m.enabledServices[projectID]; ok && len(services) > 0 {
 		// ========================================
 		// Table 1b: Enabled Services (fallback when Asset API not available)
-		// Shows which services are enabled to help identify potential blind spots
 		// ========================================
 		serviceHeader := []string{"Service", "CloudFox Coverage", "Description"}
 		var serviceBody [][]string
 
-		// Aggregate all services across projects
-		serviceCounts := make(map[string]int)
-		for _, services := range m.enabledServices {
-			for _, svc := range services {
-				serviceCounts[svc]++
-			}
-		}
-
 		// Filter to interesting services and sort
 		var interestingServices []string
-		for svc := range serviceCounts {
-			// Only include services that likely contain resources
+		for _, svc := range services {
 			if isInterestingService(svc) {
 				interestingServices = append(interestingServices, svc)
 			}
@@ -1387,7 +1421,8 @@ func (m *InventoryModule) writeOutput(ctx context.Context, logger internal.Logge
 
 	// ========================================
 	// Table 2: Detailed Enumeration by Region (from dedicated CloudFox modules)
-	// This shows resources with security metadata, organized by region
+	// Note: resourceCounts/resourceIDs are currently aggregated, not per-project
+	// This table shows the aggregated view (same for all projects for now)
 	// ========================================
 	if m.grandTotal > 0 {
 		sortedRegions := m.getSortedRegions()
@@ -1446,8 +1481,9 @@ func (m *InventoryModule) writeOutput(ctx context.Context, logger internal.Logge
 	// ========================================
 	var lootContent strings.Builder
 	lootContent.WriteString("# GCP Resource Inventory\n")
+	lootContent.WriteString(fmt.Sprintf("# Project: %s\n", projectID))
 	lootContent.WriteString("# Generated by CloudFox\n")
-	lootContent.WriteString(fmt.Sprintf("# Total resources (Asset Inventory): %d\n", m.assetGrandTotal))
+	lootContent.WriteString(fmt.Sprintf("# Total resources (Asset Inventory): %d\n", projectAssetTotal))
 	lootContent.WriteString(fmt.Sprintf("# Total resources (Detailed): %d\n\n", m.grandTotal))
 
 	// Sort resource types
@@ -1476,31 +1512,14 @@ func (m *InventoryModule) writeOutput(ctx context.Context, logger internal.Logge
 		Contents: lootContent.String(),
 	}}
 
-	output := InventoryOutput{
+	// Only return output if we have data
+	if len(tableFiles) == 0 && lootContent.Len() == 0 {
+		return nil
+	}
+
+	return InventoryOutput{
 		Table: tableFiles,
 		Loot:  lootFiles,
-	}
-
-	// Write output
-	scopeNames := make([]string, len(m.ProjectIDs))
-	for i, id := range m.ProjectIDs {
-		scopeNames[i] = m.GetProjectName(id)
-	}
-
-	err := internal.HandleOutputSmart(
-		"gcp",
-		m.Format,
-		m.OutputDirectory,
-		m.Verbosity,
-		m.WrapTable,
-		"project",
-		m.ProjectIDs,
-		scopeNames,
-		m.Account,
-		output,
-	)
-	if err != nil {
-		logger.ErrorM(fmt.Sprintf("Error writing output: %v", err), GCP_INVENTORY_MODULE_NAME)
 	}
 }
 

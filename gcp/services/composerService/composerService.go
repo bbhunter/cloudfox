@@ -8,30 +8,9 @@ import (
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
+	regionservice "github.com/BishopFox/cloudfox/gcp/services/regionService"
 	composer "google.golang.org/api/composer/v1"
 )
-
-// composerRegions contains all Cloud Composer regions
-// Note: Cloud Composer API does NOT support the "-" wildcard for locations
-// so we need to iterate through regions explicitly
-var composerRegions = []string{
-	// Americas
-	"northamerica-northeast1", "northamerica-northeast2", "northamerica-south1",
-	"southamerica-east1", "southamerica-west1",
-	"us-central1", "us-east1", "us-east4", "us-east5", "us-east7",
-	"us-south1", "us-west1", "us-west2", "us-west3", "us-west4",
-	// Europe
-	"europe-central2", "europe-north1", "europe-north2",
-	"europe-southwest1", "europe-west1", "europe-west2", "europe-west3",
-	"europe-west4", "europe-west6", "europe-west8", "europe-west9",
-	"europe-west10", "europe-west12",
-	// Asia Pacific
-	"asia-east1", "asia-east2", "asia-northeast1", "asia-northeast2", "asia-northeast3",
-	"asia-south1", "asia-south2", "asia-southeast1", "asia-southeast2",
-	"australia-southeast1", "australia-southeast2",
-	// Middle East & Africa
-	"africa-south1", "me-central1", "me-central2", "me-west1",
-}
 
 type ComposerService struct {
 	session *gcpinternal.SafeSession
@@ -103,8 +82,11 @@ func (s *ComposerService) ListEnvironments(projectID string) ([]EnvironmentInfo,
 	// Use a semaphore to limit concurrent API calls
 	semaphore := make(chan struct{}, 10) // Max 10 concurrent requests
 
+	// Get regions from regionService (with automatic fallback)
+	regions := regionservice.GetCachedRegionNames(ctx, projectID)
+
 	// Iterate through all Composer regions in parallel
-	for _, region := range composerRegions {
+	for _, region := range regions {
 		wg.Add(1)
 		go func(region string) {
 			defer wg.Done()

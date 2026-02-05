@@ -156,69 +156,40 @@ func (s *CertManagerService) GetSSLCertificates(projectID string) ([]SSLCertific
 
 	var certificates []SSLCertificate
 
-	// Global SSL certificates
-	resp, err := service.SslCertificates.List(projectID).Context(ctx).Do()
-	if err != nil {
-		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
-	}
-
-	for _, cert := range resp.Items {
-		c := SSLCertificate{
-			Name:         cert.Name,
-			ProjectID:    projectID,
-			Type:         cert.Type,
-			CreationTime: cert.CreationTimestamp,
-			SelfManaged:  cert.Type == "SELF_MANAGED",
-		}
-
-		// Get domains from managed certificate
-		if cert.Managed != nil {
-			c.Domains = cert.Managed.Domains
-		}
-
-		// Parse expiration
-		if cert.ExpireTime != "" {
-			c.ExpireTime = cert.ExpireTime
-			expTime, err := time.Parse(time.RFC3339, cert.ExpireTime)
-			if err == nil {
-				c.DaysUntilExpiry = int(time.Until(expTime).Hours() / 24)
-				c.Expired = c.DaysUntilExpiry < 0
-			}
-		}
-
-		// Check for wildcard domains
-		for _, domain := range c.Domains {
-			if strings.HasPrefix(domain, "*") {
-				c.Wildcard = true
-				break
-			}
-		}
-
-		certificates = append(certificates, c)
-	}
-
-	// Regional SSL certificates
-	regionsResp, err := service.Regions.List(projectID).Context(ctx).Do()
-	if err == nil {
-		for _, region := range regionsResp.Items {
-			regionalCerts, err := service.RegionSslCertificates.List(projectID, region.Name).Context(ctx).Do()
-			if err != nil {
+	// Get all SSL certificates (global and regional) using AggregatedList
+	// This only requires compute.sslCertificates.list permission (not compute.regions.list)
+	req := service.SslCertificates.AggregatedList(projectID)
+	err = req.Pages(ctx, func(page *compute.SslCertificateAggregatedList) error {
+		for scopeName, scopedList := range page.Items {
+			if scopedList.SslCertificates == nil {
 				continue
 			}
+			// Extract region from scope name (format: "regions/us-central1" or "global")
+			region := ""
+			if strings.HasPrefix(scopeName, "regions/") {
+				region = strings.TrimPrefix(scopeName, "regions/")
+			}
 
-			for _, cert := range regionalCerts.Items {
+			for _, cert := range scopedList.SslCertificates {
 				c := SSLCertificate{
-					Name:         fmt.Sprintf("%s (%s)", cert.Name, region.Name),
+					Name:         cert.Name,
 					ProjectID:    projectID,
 					Type:         cert.Type,
 					CreationTime: cert.CreationTimestamp,
 					SelfManaged:  cert.Type == "SELF_MANAGED",
 				}
 
+				// Add region to name for regional certs
+				if region != "" {
+					c.Name = fmt.Sprintf("%s (%s)", cert.Name, region)
+				}
+
+				// Get domains from managed certificate
 				if cert.Managed != nil {
 					c.Domains = cert.Managed.Domains
 				}
 
+				// Parse expiration
 				if cert.ExpireTime != "" {
 					c.ExpireTime = cert.ExpireTime
 					expTime, err := time.Parse(time.RFC3339, cert.ExpireTime)
@@ -239,6 +210,11 @@ func (s *CertManagerService) GetSSLCertificates(projectID string) ([]SSLCertific
 				certificates = append(certificates, c)
 			}
 		}
+		return nil
+	})
+
+	if err != nil {
+		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
 
 	return certificates, nil

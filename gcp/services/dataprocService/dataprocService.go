@@ -7,6 +7,7 @@ import (
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
+	regionservice "github.com/BishopFox/cloudfox/gcp/services/regionService"
 	dataproc "google.golang.org/api/dataproc/v1"
 )
 
@@ -89,15 +90,6 @@ type JobInfo struct {
 	EndTime          string   `json:"endTime"`
 }
 
-// Common GCP regions for Dataproc
-var dataprocRegions = []string{
-	"us-central1", "us-east1", "us-east4", "us-west1", "us-west2", "us-west3", "us-west4",
-	"europe-west1", "europe-west2", "europe-west3", "europe-west4", "europe-west6",
-	"asia-east1", "asia-east2", "asia-northeast1", "asia-northeast2", "asia-northeast3",
-	"asia-south1", "asia-southeast1", "asia-southeast2",
-	"australia-southeast1", "southamerica-east1", "northamerica-northeast1",
-}
-
 // ListClusters retrieves all Dataproc clusters
 func (s *DataprocService) ListClusters(projectID string) ([]ClusterInfo, error) {
 	ctx := context.Background()
@@ -109,8 +101,11 @@ func (s *DataprocService) ListClusters(projectID string) ([]ClusterInfo, error) 
 
 	var clusters []ClusterInfo
 
-	// List across common regions
-	for _, region := range dataprocRegions {
+	// Get regions from regionService (with automatic fallback)
+	regions := regionservice.GetCachedRegionNames(ctx, projectID)
+
+	// List across all regions
+	for _, region := range regions {
 		regionClusters, err := service.Projects.Regions.Clusters.List(projectID, region).Context(ctx).Do()
 		if err != nil {
 			continue // Skip regions with errors (API not enabled, no permissions, etc.)

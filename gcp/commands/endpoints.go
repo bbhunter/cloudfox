@@ -242,41 +242,45 @@ func (m *EndpointsModule) getStaticExternalIPs(ctx context.Context, svc *compute
 		return nil
 	})
 
-	// Regional addresses
-	regionsReq := svc.Regions.List(projectID)
-	_ = regionsReq.Pages(ctx, func(page *compute.RegionList) error {
-		for _, region := range page.Items {
-			addrReq := svc.Addresses.List(projectID, region.Name)
-			_ = addrReq.Pages(ctx, func(addrPage *compute.AddressList) error {
-				for _, addr := range addrPage.Items {
-					if addr.AddressType == "EXTERNAL" {
-						user := ""
-						if len(addr.Users) > 0 {
-							user = extractResourceName(addr.Users[0])
-						}
-						security := ""
-						if user == "" {
-							security = "Unused"
-						}
-						ep := Endpoint{
-							ProjectID:    projectID,
-							Name:         addr.Name,
-							Type:         "Static IP",
-							ExternalIP:   addr.Address,
-							Protocol:     "TCP/UDP",
-							Port:         "ALL",
-							Resource:     user,
-							ResourceType: "Address",
-							Region:       region.Name,
-							Status:       addr.Status,
-							IsExternal:   true,
-							Security:     security,
-						}
-						m.addEndpoint(projectID, ep)
+	// Regional addresses - use AggregatedList to avoid needing compute.regions.list permission
+	addrReq := svc.Addresses.AggregatedList(projectID)
+	_ = addrReq.Pages(ctx, func(page *compute.AddressAggregatedList) error {
+		for scopeName, scopedList := range page.Items {
+			if scopedList.Addresses == nil {
+				continue
+			}
+			// Extract region from scope name (format: "regions/us-central1")
+			regionName := "unknown"
+			if strings.HasPrefix(scopeName, "regions/") {
+				regionName = strings.TrimPrefix(scopeName, "regions/")
+			}
+			for _, addr := range scopedList.Addresses {
+				if addr.AddressType == "EXTERNAL" {
+					user := ""
+					if len(addr.Users) > 0 {
+						user = extractResourceName(addr.Users[0])
 					}
+					security := ""
+					if user == "" {
+						security = "Unused"
+					}
+					ep := Endpoint{
+						ProjectID:    projectID,
+						Name:         addr.Name,
+						Type:         "Static IP",
+						ExternalIP:   addr.Address,
+						Protocol:     "TCP/UDP",
+						Port:         "ALL",
+						Resource:     user,
+						ResourceType: "Address",
+						Region:       regionName,
+						Status:       addr.Status,
+						IsExternal:   true,
+						Security:     security,
+					}
+					m.addEndpoint(projectID, ep)
 				}
-				return nil
-			})
+			}
 		}
 		return nil
 	})

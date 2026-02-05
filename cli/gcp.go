@@ -321,18 +321,24 @@ func loadOrRunAttackPathAnalysis(ctx context.Context, forceRefresh bool) *gcpint
 
 	// Check if cache exists and we're not forcing refresh
 	if !forceRefresh && gcpinternal.AttackPathCacheExists(GCPOutputDirectory, account) {
-		cache, metadata, err := gcpinternal.LoadAttackPathCacheFromFile(GCPOutputDirectory, account)
-		if err == nil && cache != nil {
+		// Check if cache is stale (older than 24 hours)
+		if gcpinternal.IsCacheStale(GCPOutputDirectory, account, "attack-paths", gcpinternal.DefaultCacheExpiration) {
 			age, _ := gcpinternal.GetCacheAge(GCPOutputDirectory, account, "attack-paths")
-			privesc, exfil, lateral := cache.GetStats()
-			GCPLogger.InfoM(fmt.Sprintf("Loaded attack path cache from disk (age: %s, %d projects analyzed, P:%d E:%d L:%d)",
-				formatDuration(age), len(metadata.ProjectsIn), privesc, exfil, lateral), "gcp")
-			return cache
-		}
-		if err != nil {
-			GCPLogger.InfoM(fmt.Sprintf("Could not load attack path cache: %v, re-analyzing...", err), "gcp")
-			// Delete corrupted cache file
-			gcpinternal.DeleteCache(GCPOutputDirectory, account, "attack-paths")
+			GCPLogger.InfoM(fmt.Sprintf("Attack path cache is stale (age: %s > 24h), refreshing...", formatDuration(age)), "gcp")
+		} else {
+			cache, metadata, err := gcpinternal.LoadAttackPathCacheFromFile(GCPOutputDirectory, account)
+			if err == nil && cache != nil {
+				age, _ := gcpinternal.GetCacheAge(GCPOutputDirectory, account, "attack-paths")
+				privesc, exfil, lateral := cache.GetStats()
+				GCPLogger.InfoM(fmt.Sprintf("Loaded attack path cache from disk (age: %s, %d projects analyzed, P:%d E:%d L:%d)",
+					formatDuration(age), len(metadata.ProjectsIn), privesc, exfil, lateral), "gcp")
+				return cache
+			}
+			if err != nil {
+				GCPLogger.InfoM(fmt.Sprintf("Could not load attack path cache: %v, re-analyzing...", err), "gcp")
+				// Delete corrupted cache file
+				gcpinternal.DeleteCache(GCPOutputDirectory, account, "attack-paths")
+			}
 		}
 	}
 
@@ -429,17 +435,23 @@ func runPrivescAndPopulateCache(ctx context.Context) *gcpinternal.PrivescCache {
 func loadOrPopulateOrgCache(account string, forceRefresh bool) *gcpinternal.OrgCache {
 	// Check if cache exists and we're not forcing refresh
 	if !forceRefresh && gcpinternal.OrgCacheExists(GCPOutputDirectory, account) {
-		cache, metadata, err := gcpinternal.LoadOrgCacheFromFile(GCPOutputDirectory, account)
-		if err == nil && cache != nil {
+		// Check if cache is stale (older than 24 hours)
+		if gcpinternal.IsCacheStale(GCPOutputDirectory, account, "org", gcpinternal.DefaultCacheExpiration) {
 			age, _ := gcpinternal.GetCacheAge(GCPOutputDirectory, account, "org")
-			GCPLogger.InfoM(fmt.Sprintf("Loaded org cache from disk (age: %s, %d projects)",
-				formatDuration(age), metadata.TotalProjects), "gcp")
-			return cache
-		}
-		if err != nil {
-			GCPLogger.InfoM(fmt.Sprintf("Could not load org cache: %v, re-enumerating...", err), "gcp")
-			// Delete corrupted cache file
-			gcpinternal.DeleteCache(GCPOutputDirectory, account, "org")
+			GCPLogger.InfoM(fmt.Sprintf("Org cache is stale (age: %s > 24h), refreshing...", formatDuration(age)), "gcp")
+		} else {
+			cache, metadata, err := gcpinternal.LoadOrgCacheFromFile(GCPOutputDirectory, account)
+			if err == nil && cache != nil {
+				age, _ := gcpinternal.GetCacheAge(GCPOutputDirectory, account, "org")
+				GCPLogger.InfoM(fmt.Sprintf("Loaded org cache from disk (age: %s, %d projects)",
+					formatDuration(age), metadata.TotalProjects), "gcp")
+				return cache
+			}
+			if err != nil {
+				GCPLogger.InfoM(fmt.Sprintf("Could not load org cache: %v, re-enumerating...", err), "gcp")
+				// Delete corrupted cache file
+				gcpinternal.DeleteCache(GCPOutputDirectory, account, "org")
+			}
 		}
 	}
 
@@ -572,7 +584,7 @@ func init() {
 	GCPCommands.PersistentFlags().BoolVar(&GCPFlatOutput, "flat-output", false, "Use legacy flat output structure instead of hierarchical per-project directories")
 	GCPCommands.PersistentFlags().BoolVar(&GCPAttackPaths, "attack-paths", false, "Run attack path analysis (privesc/exfil/lateral) and add Attack Paths column to module output")
 	GCPCommands.PersistentFlags().BoolVar(&GCPOrgCache, "org-cache", false, "Enumerate all accessible orgs/folders/projects and cache for cross-project analysis")
-	GCPCommands.PersistentFlags().BoolVar(&GCPRefreshCache, "refresh-cache", false, "Force re-enumeration of cached data even if cache files exist")
+	GCPCommands.PersistentFlags().BoolVar(&GCPRefreshCache, "refresh-cache", false, "Force re-enumeration of cached data (cache auto-expires after 24 hours)")
 
 	// Available commands
 	GCPCommands.AddCommand(

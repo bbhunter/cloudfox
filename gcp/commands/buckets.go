@@ -204,13 +204,15 @@ func (m *BucketsModule) addBucketToLoot(projectID string, bucket CloudStorageSer
 			"gsutil ls -r gs://%s/**\n"+
 			"# Get bucket size:\n"+
 			"gsutil du -s gs://%s/\n"+
-			"# Download all contents:\n"+
-			"gsutil -m cp -r gs://%s/ ./loot/%s/\n"+
+			"# Download all contents (create directory first):\n"+
+			"mkdir -p bucket/%s/\n"+
+			"gsutil -m cp -r gs://%s/ bucket/%s/\n"+
 			"# Check for public access:\n"+
 			"curl -s https://storage.googleapis.com/%s/ | head -20\n\n",
 		bucket.Name, bucket.ProjectID, bucket.Location,
 		bucket.Name, bucket.ProjectID,
 		bucket.Name, bucket.ProjectID,
+		bucket.Name,
 		bucket.Name,
 		bucket.Name,
 		bucket.Name,
