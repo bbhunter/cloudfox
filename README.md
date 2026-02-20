@@ -54,7 +54,7 @@ For the full documentation please refer to our [wiki](https://github.com/BishopF
 | - | - |
 | AWS | 34 |
 | Azure | 4 |
-| GCP | 58 |
+| GCP | 60 |
 | Kubernetes | Support Planned | 
 
 
@@ -208,8 +208,7 @@ For detailed setup instructions, see the [GCP Setup Guide](https://github.com/Bi
 
 For detailed documentation on each GCP command, see the [GCP Commands Wiki](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands).
 
-## Identity & Access Management
-| Provider | Command Name | Description |
+| Provider | Command Name | Description
 | - | - | - |
 | GCP | [whoami](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#whoami) | Display identity context for the authenticated GCP user/service account |
 | GCP | [iam](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#iam) | Enumerate GCP IAM principals across organizations, folders, and projects |
@@ -220,10 +219,8 @@ For detailed documentation on each GCP command, see the [GCP Commands Wiki](http
 | GCP | [resource-iam](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#resource-iam) | Enumerate IAM policies on GCP resources (buckets, datasets, secrets, etc.) |
 | GCP | [domain-wide-delegation](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#domain-wide-delegation) | Find service accounts with Domain-Wide Delegation to Google Workspace |
 | GCP | [privesc](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#privesc) | Identify privilege escalation paths in GCP projects |
-
-## Compute & Containers
-| Provider | Command Name | Description |
-| - | - | - |
+| GCP | [hidden-admins](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#hidden-admins) | Identify principals who can modify IAM policies (hidden admins) |
+| GCP | [identity-federation](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#identity-federation) | Enumerate Workload Identity Federation (external identities) |
 | GCP | [instances](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#instances) | Enumerate GCP Compute Engine instances with security configuration |
 | GCP | [gke](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#gke) | Enumerate GKE clusters with security analysis |
 | GCP | [cloudrun](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#cloudrun) | Enumerate Cloud Run services and jobs with security analysis |
@@ -234,10 +231,7 @@ For detailed documentation on each GCP command, see the [GCP Commands Wiki](http
 | GCP | [dataflow](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#dataflow) | Enumerate Dataflow jobs and pipelines |
 | GCP | [notebooks](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#notebooks) | Enumerate Vertex AI Workbench notebooks |
 | GCP | [workload-identity](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#workload-identity) | Enumerate GKE Workload Identity and Workload Identity Federation |
-
-## Storage & Databases
-| Provider | Command Name | Description |
-| - | - | - |
+| GCP | [inventory](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#inventory) | Quick resource inventory - works without Cloud Asset API |
 | GCP | [buckets](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#buckets) | Enumerate GCP Cloud Storage buckets with security configuration |
 | GCP | [bucket-enum](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#bucket-enum) | Enumerate GCS buckets for sensitive files (credentials, secrets, configs) |
 | GCP | [bigquery](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#bigquery) | Enumerate GCP BigQuery datasets and tables with security analysis |
@@ -246,10 +240,6 @@ For detailed documentation on each GCP command, see the [GCP Commands Wiki](http
 | GCP | [bigtable](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#bigtable) | Enumerate Cloud Bigtable instances and tables |
 | GCP | [filestore](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#filestore) | Enumerate Filestore NFS instances |
 | GCP | [memorystore](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#memorystore) | Enumerate Memorystore (Redis) instances |
-
-## Networking
-| Provider | Command Name | Description |
-| - | - | - |
 | GCP | [vpc-networks](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#vpc-networks) | Enumerate VPC Networks |
 | GCP | [firewall](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#firewall) | Enumerate VPC networks and firewall rules with security analysis |
 | GCP | [loadbalancers](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#loadbalancers) | Enumerate Load Balancers |
@@ -257,10 +247,6 @@ For detailed documentation on each GCP command, see the [GCP Commands Wiki](http
 | GCP | [endpoints](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#endpoints) | Enumerate all network endpoints (external and internal) with IPs, ports, and hostnames |
 | GCP | [private-service-connect](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#private-service-connect) | Enumerate Private Service Connect endpoints and service attachments |
 | GCP | [network-topology](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#network-topology) | Visualize VPC network topology, peering relationships, and trust boundaries |
-
-## Security & Compliance
-| Provider | Command Name | Description |
-| - | - | - |
 | GCP | [vpc-sc](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#vpc-sc) | Enumerate VPC Service Controls |
 | GCP | [access-levels](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#access-levels) | Enumerate Access Context Manager access levels |
 | GCP | [cloud-armor](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#cloud-armor) | Enumerate Cloud Armor security policies and find weaknesses |
@@ -270,61 +256,20 @@ For detailed documentation on each GCP command, see the [GCP Commands Wiki](http
 | GCP | [secrets](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#secrets) | Enumerate GCP Secret Manager secrets with security configuration |
 | GCP | [cert-manager](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#cert-manager) | Enumerate SSL/TLS certificates and find expiring or misconfigured certs |
 | GCP | [org-policies](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#org-policies) | Enumerate organization policies and identify security weaknesses |
-
-## CI/CD & Source Control
-| Provider | Command Name | Description |
-| - | - | - |
 | GCP | [artifact-registry](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#artifact-registry) | Enumerate GCP Artifact Registry and Container Registry with security configuration |
 | GCP | [cloudbuild](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#cloudbuild) | Enumerate Cloud Build triggers and builds |
 | GCP | [source-repos](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#source-repos) | Enumerate Cloud Source Repositories |
 | GCP | [scheduler](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#scheduler) | Enumerate Cloud Scheduler jobs with security analysis |
-
-## Messaging & Events
-| Provider | Command Name | Description |
-| - | - | - |
 | GCP | [pubsub](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#pubsub) | Enumerate Pub/Sub topics and subscriptions with security analysis |
-
-## Logging & Monitoring
-| Provider | Command Name | Description |
-| - | - | - |
 | GCP | [logging](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#logging) | Enumerate Cloud Logging sinks and metrics with security analysis |
-| GCP | [logging-gaps](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#logging-gaps) | Find resources with missing or incomplete logging |
-
-## Organization & Projects
-| Provider | Command Name | Description |
-| - | - | - |
 | GCP | [organizations](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#organizations) | Enumerate GCP organization hierarchy |
 | GCP | [asset-inventory](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#asset-inventory) | Enumerate Cloud Asset Inventory with optional dependency analysis |
 | GCP | [backup-inventory](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#backup-inventory) | Enumerate backup policies, protected resources, and identify backup gaps |
-
-## Attack Path Analysis
-
-CloudFox GCP uses a **unified attack path analysis** system that combines privilege escalation, lateral movement, and data exfiltration analysis. The three attack path modules share a common backend (`attackpathService`) that analyzes IAM policies across all 4 hierarchy levels: Organization → Folder → Project → Resource.
-
-### Attack Path Column
-
-CloudFox automatically loads FoxMapper graph data when available and shows attack path capabilities in module output. Run foxmapper first to populate the Attack Paths column:
-
-```bash
-# First, generate the attack path graph
-foxmapper gcp graph create -p my-project
-
-# Then run cloudfox modules - Attack Paths column will be populated automatically
-cloudfox gcp instances -p my-project
-cloudfox gcp serviceaccounts --all-projects
-```
-
-The **"Attack Paths"** column shows: `Yes (P:3 E:2 L:1)` where P=Privesc, E=Exfil, L=Lateral counts. If foxmapper hasn't been run, the column shows "run foxmapper".
-
-**Modules with Attack Paths column**: instances, serviceaccounts, functions, cloudrun, gke, composer, dataproc, dataflow, notebooks, cloudbuild, scheduler, appengine, service-agents
-
-| Provider | Command Name | Description |
-| - | - | - |
-| GCP | [privesc](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#privesc) | Identify privilege escalation paths (SA impersonation, key creation, IAM modification) |
 | GCP | [lateral-movement](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#lateral-movement) | Map lateral movement paths, credential theft vectors, and pivot opportunities |
 | GCP | [data-exfiltration](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#data-exfiltration) | Identify data exfiltration paths, potential vectors, and missing security hardening |
 | GCP | [public-access](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#public-access) | Find resources with allUsers/allAuthenticatedUsers access across 16 GCP services |
 | GCP | [cross-project](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#cross-project) | Analyze cross-project IAM bindings, logging sinks, and Pub/Sub exports for lateral movement |
+| GCP | [foxmapper](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#foxmapper) | Run FoxMapper (graph-based IAM analysis) for privilege escalation path discovery |
 
 
 
