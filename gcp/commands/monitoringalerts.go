@@ -487,10 +487,15 @@ func (m *MonitoringAlertsModule) addPolicyToLoot(projectID string, p AlertPolicy
 		return
 	}
 	lootFile.Contents += fmt.Sprintf(
-		"## Policy: %s (Project: %s)\n"+
+		"# =============================================================================\n"+
+			"# POLICY: %s\n"+
+			"# =============================================================================\n"+
+			"# Project: %s\n\n"+
+			"# === ENUMERATION COMMANDS ===\n\n"+
 			"# Describe alert policy:\n"+
 			"gcloud alpha monitoring policies describe %s --project=%s\n\n",
-		p.DisplayName, p.ProjectID,
+		p.DisplayName,
+		p.ProjectID,
 		extractResourceName(p.Name), p.ProjectID,
 	)
 }
@@ -501,10 +506,15 @@ func (m *MonitoringAlertsModule) addChannelToLoot(projectID string, c Notificati
 		return
 	}
 	lootFile.Contents += fmt.Sprintf(
-		"## Channel: %s (Project: %s)\n"+
+		"# =============================================================================\n"+
+			"# CHANNEL: %s\n"+
+			"# =============================================================================\n"+
+			"# Project: %s\n\n"+
+			"# === ENUMERATION COMMANDS ===\n\n"+
 			"# Describe notification channel:\n"+
 			"gcloud alpha monitoring channels describe %s --project=%s\n\n",
-		c.DisplayName, c.ProjectID,
+		c.DisplayName,
+		c.ProjectID,
 		extractResourceName(c.Name), c.ProjectID,
 	)
 }
@@ -515,10 +525,15 @@ func (m *MonitoringAlertsModule) addUptimeCheckToLoot(projectID string, u Uptime
 		return
 	}
 	lootFile.Contents += fmt.Sprintf(
-		"## Uptime Check: %s (Project: %s)\n"+
+		"# =============================================================================\n"+
+			"# UPTIME CHECK: %s\n"+
+			"# =============================================================================\n"+
+			"# Project: %s\n\n"+
+			"# === ENUMERATION COMMANDS ===\n\n"+
 			"# Describe uptime check:\n"+
 			"gcloud alpha monitoring uptime describe %s --project=%s\n\n",
-		u.DisplayName, u.ProjectID,
+		u.DisplayName,
+		u.ProjectID,
 		extractResourceName(u.Name), u.ProjectID,
 	)
 }

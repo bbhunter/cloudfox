@@ -214,14 +214,14 @@ func (m *InstancesModule) addProjectMetadataToLoot(projectID string, meta *Compu
 	}
 
 	lootFile.Contents += fmt.Sprintf(
-		"# ==========================================\n"+
+		"# =============================================================================\n"+
 			"# PROJECT-LEVEL COMMANDS (Project: %s)\n"+
-			"# ==========================================\n\n",
+			"# =============================================================================\n\n",
 		meta.ProjectID,
 	)
 
 	// --- PROJECT ENUMERATION ---
-	lootFile.Contents += "# --- PROJECT ENUMERATION ---\n"
+	lootFile.Contents += "# === PROJECT ENUMERATION ===\n\n"
 	lootFile.Contents += fmt.Sprintf(
 		"gcloud compute project-info describe --project=%s\n"+
 			"gcloud compute project-info describe --project=%s --format='yaml(commonInstanceMetadata)'\n"+
@@ -238,7 +238,7 @@ func (m *InstancesModule) addProjectMetadataToLoot(projectID string, meta *Compu
 	}
 
 	// --- PROJECT-LEVEL EXPLOITATION ---
-	lootFile.Contents += "\n# --- PROJECT-LEVEL EXPLOITATION ---\n"
+	lootFile.Contents += "\n# === PROJECT-LEVEL EXPLOITATION ===\n\n"
 	lootFile.Contents += fmt.Sprintf(
 		"# Add project-wide SSH key (applies to all instances not blocking project keys)\n"+
 			"gcloud compute project-info add-metadata --project=%s --metadata=ssh-keys='USERNAME:SSH_PUBLIC_KEY'\n"+
@@ -264,9 +264,9 @@ func (m *InstancesModule) addProjectMetadataFullToLoot(projectID string, meta *C
 	}
 
 	lootFile.Contents += fmt.Sprintf(
-		"================================================================================\n"+
-			"PROJECT METADATA: %s\n"+
-			"================================================================================\n\n",
+		"# =============================================================================\n"+
+			"# PROJECT METADATA: %s\n"+
+			"# =============================================================================\n\n",
 		meta.ProjectID,
 	)
 
@@ -296,14 +296,13 @@ func (m *InstancesModule) addInstanceToLoot(projectID string, instance ComputeEn
 	}
 
 	lootFile.Contents += fmt.Sprintf(
-		"# ==========================================\n"+
+		"# =============================================================================\n"+
 			"# INSTANCE: %s (Zone: %s)\n"+
-			"# ==========================================\n\n",
+			"# =============================================================================\n\n",
 		instance.Name, instance.Zone,
 	)
 
-	// --- ENUMERATION ---
-	lootFile.Contents += "# --- ENUMERATION ---\n"
+	lootFile.Contents += "# === ENUMERATION COMMANDS ===\n\n"
 	lootFile.Contents += fmt.Sprintf(
 		"gcloud compute instances describe %s --zone=%s --project=%s\n"+
 			"gcloud compute instances get-iam-policy %s --zone=%s --project=%s\n"+
@@ -313,8 +312,7 @@ func (m *InstancesModule) addInstanceToLoot(projectID string, instance ComputeEn
 		instance.Name, instance.Zone, instance.ProjectID,
 	)
 
-	// --- METADATA ENUMERATION ---
-	lootFile.Contents += "\n# --- METADATA ENUMERATION ---\n"
+	lootFile.Contents += "\n# === METADATA ENUMERATION ===\n\n"
 	lootFile.Contents += fmt.Sprintf(
 		"gcloud compute instances describe %s --zone=%s --project=%s --format='value(metadata.items)'\n",
 		instance.Name, instance.Zone, instance.ProjectID,
@@ -328,8 +326,7 @@ func (m *InstancesModule) addInstanceToLoot(projectID string, instance ComputeEn
 		)
 	}
 
-	// --- CODE EXECUTION / ACCESS ---
-	lootFile.Contents += "\n# --- CODE EXECUTION / ACCESS ---\n"
+	lootFile.Contents += "\n# === CODE EXECUTION / ACCESS ===\n\n"
 
 	// SSH with external IP
 	if instance.ExternalIP != "" {
@@ -377,8 +374,7 @@ func (m *InstancesModule) addInstanceToLoot(projectID string, instance ComputeEn
 		instance.Name, instance.Zone, instance.ProjectID,
 	)
 
-	// --- EXPLOITATION / PERSISTENCE ---
-	lootFile.Contents += "\n# --- EXPLOITATION / PERSISTENCE ---\n"
+	lootFile.Contents += "\n# === EXPLOIT COMMANDS ===\n\n"
 
 	// Startup script injection
 	lootFile.Contents += fmt.Sprintf(
@@ -426,9 +422,9 @@ func (m *InstancesModule) addInstanceMetadataToLoot(projectID string, instance C
 	}
 
 	lootFile.Contents += fmt.Sprintf(
-		"================================================================================\n"+
-			"INSTANCE: %s (Zone: %s)\n"+
-			"================================================================================\n\n",
+		"# =============================================================================\n"+
+			"# INSTANCE: %s (Zone: %s)\n"+
+			"# =============================================================================\n\n",
 		instance.Name, instance.Zone,
 	)
 
@@ -471,9 +467,9 @@ func (m *InstancesModule) addInstanceSSHKeysToLoot(projectID string, instance Co
 	}
 
 	lootFile.Contents += fmt.Sprintf(
-		"================================================================================\n"+
-			"INSTANCE: %s (Zone: %s)\n"+
-			"================================================================================\n",
+		"# =============================================================================\n"+
+			"# INSTANCE: %s (Zone: %s)\n"+
+			"# =============================================================================\n",
 		instance.Name, instance.Zone,
 	)
 
@@ -495,9 +491,9 @@ func (m *InstancesModule) addProjectSSHKeysToLoot(projectID string, meta *Comput
 	}
 
 	lootFile.Contents += fmt.Sprintf(
-		"================================================================================\n"+
-			"PROJECT-LEVEL SSH KEYS (apply to all instances not blocking project keys)\n"+
-			"================================================================================\n",
+		"# =============================================================================\n"+
+			"# PROJECT-LEVEL SSH KEYS (apply to all instances not blocking project keys)\n"+
+			"# =============================================================================\n",
 	)
 
 	for _, key := range meta.ProjectSSHKeys {

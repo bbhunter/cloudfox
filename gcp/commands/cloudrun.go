@@ -221,17 +221,22 @@ func (m *CloudRunModule) addServiceToLoot(projectID string, svc CloudRunService.
 
 	// All commands for this service
 	commandsLoot.Contents += fmt.Sprintf(
-		"## Service: %s (Project: %s, Region: %s)\n"+
+		"# =============================================================================\n"+
+			"# SERVICE: %s\n"+
+			"# =============================================================================\n"+
+			"# Project: %s, Region: %s\n"+
 			"# Image: %s\n"+
 			"# Service Account: %s\n"+
 			"# Public: %v\n"+
 			"# URL: %s\n\n"+
+			"# === ENUMERATION COMMANDS ===\n\n"+
 			"# Describe service:\n"+
 			"gcloud run services describe %s --region=%s --project=%s\n"+
 			"# Get IAM policy:\n"+
 			"gcloud run services get-iam-policy %s --region=%s --project=%s\n"+
 			"# List revisions:\n"+
-			"gcloud run revisions list --service=%s --region=%s --project=%s\n"+
+			"gcloud run revisions list --service=%s --region=%s --project=%s\n\n"+
+			"# === EXPLOIT COMMANDS ===\n\n"+
 			"# Invoke the service (if you have run.routes.invoke):\n"+
 			"curl -H \"Authorization: Bearer $(gcloud auth print-identity-token)\" %s\n\n",
 		svc.Name, svc.ProjectID, svc.Region,
@@ -247,7 +252,10 @@ func (m *CloudRunModule) addServiceToLoot(projectID string, svc CloudRunService.
 
 	// Add secret references to loot
 	if len(svc.SecretRefs) > 0 && secretRefsLoot != nil {
-		secretRefsLoot.Contents += fmt.Sprintf("## Service: %s (Project: %s, Region: %s)\n", svc.Name, svc.ProjectID, svc.Region)
+		secretRefsLoot.Contents += fmt.Sprintf(
+			"# =============================================================================\n"+
+				"# SERVICE: %s (Project: %s, Region: %s)\n"+
+				"# =============================================================================\n", svc.Name, svc.ProjectID, svc.Region)
 		for _, ref := range svc.SecretRefs {
 			if ref.Type == "env" {
 				secretRefsLoot.Contents += fmt.Sprintf(
@@ -275,13 +283,18 @@ func (m *CloudRunModule) addJobToLoot(projectID string, job CloudRunService.JobI
 
 	// All commands for this job
 	commandsLoot.Contents += fmt.Sprintf(
-		"## Job: %s (Project: %s, Region: %s)\n"+
+		"# =============================================================================\n"+
+			"# JOB: %s\n"+
+			"# =============================================================================\n"+
+			"# Project: %s, Region: %s\n"+
 			"# Image: %s\n"+
 			"# Service Account: %s\n\n"+
+			"# === ENUMERATION COMMANDS ===\n\n"+
 			"# Describe job:\n"+
 			"gcloud run jobs describe %s --region=%s --project=%s\n"+
 			"# List executions:\n"+
-			"gcloud run jobs executions list --job=%s --region=%s --project=%s\n"+
+			"gcloud run jobs executions list --job=%s --region=%s --project=%s\n\n"+
+			"# === EXPLOIT COMMANDS ===\n\n"+
 			"# Execute the job (if you have run.jobs.run):\n"+
 			"gcloud run jobs execute %s --region=%s --project=%s\n\n",
 		job.Name, job.ProjectID, job.Region,
@@ -294,7 +307,10 @@ func (m *CloudRunModule) addJobToLoot(projectID string, job CloudRunService.JobI
 
 	// Add secret references to loot
 	if len(job.SecretRefs) > 0 && secretRefsLoot != nil {
-		secretRefsLoot.Contents += fmt.Sprintf("## Job: %s (Project: %s, Region: %s)\n", job.Name, job.ProjectID, job.Region)
+		secretRefsLoot.Contents += fmt.Sprintf(
+			"# =============================================================================\n"+
+				"# JOB: %s (Project: %s, Region: %s)\n"+
+				"# =============================================================================\n", job.Name, job.ProjectID, job.Region)
 		for _, ref := range job.SecretRefs {
 			if ref.Type == "env" {
 				secretRefsLoot.Contents += fmt.Sprintf(

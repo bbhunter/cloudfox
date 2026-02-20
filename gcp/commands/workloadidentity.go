@@ -340,13 +340,14 @@ func (m *WorkloadIdentityModule) addClusterToLoot(projectID string, cwi ClusterW
 	}
 	if cwi.WorkloadPoolEnabled {
 		lootFile.Contents += fmt.Sprintf(
-			"# ==========================================\n"+
+			"# =============================================================================\n"+
 				"# GKE CLUSTER: %s\n"+
-				"# ==========================================\n"+
+				"# =============================================================================\n"+
 				"# Location: %s\n"+
 				"# Workload Pool: %s\n"+
-				"# Node Pools with WI: %d/%d\n"+
-				"\n# Get cluster credentials:\n"+
+				"# Node Pools with WI: %d/%d\n\n"+
+				"# === ENUMERATION COMMANDS ===\n\n"+
+				"# Get cluster credentials:\n"+
 				"gcloud container clusters get-credentials %s --zone=%s --project=%s\n\n",
 			cwi.ClusterName,
 			cwi.Location,
@@ -371,9 +372,9 @@ func (m *WorkloadIdentityModule) addBindingToLoot(projectID string, binding Work
 	}
 
 	lootFile.Contents += fmt.Sprintf(
-		"# ------------------------------------------\n"+
+		"# -----------------------------------------------------------------------------\n"+
 			"# K8s SA BINDING: %s/%s -> %s%s\n"+
-			"# ------------------------------------------\n"+
+			"# -----------------------------------------------------------------------------\n"+
 			"# Cluster: %s (%s)\n",
 		binding.KubernetesNS,
 		binding.KubernetesSA,
@@ -390,8 +391,9 @@ func (m *WorkloadIdentityModule) addBindingToLoot(projectID string, binding Work
 		)
 	}
 
+	lootFile.Contents += "\n# === EXPLOIT COMMANDS ===\n\n"
 	lootFile.Contents += fmt.Sprintf(
-		"\n# To exploit, create pod with this service account:\n"+
+		"# To exploit, create pod with this service account:\n"+
 			"# kubectl run exploit-pod --image=google/cloud-sdk:slim --serviceaccount=%s -n %s -- sleep infinity\n"+
 			"# kubectl exec -it exploit-pod -n %s -- gcloud auth list\n\n",
 		binding.KubernetesSA,

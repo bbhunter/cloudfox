@@ -183,9 +183,9 @@ func (m *ServiceAgentsModule) addAgentToLoot(projectID string, agent serviceagen
 	}
 
 	lootFile.Contents += fmt.Sprintf(
-		"# ==========================================\n"+
+		"# =============================================================================\n"+
 			"# SERVICE AGENT: %s%s\n"+
-			"# ==========================================\n"+
+			"# =============================================================================\n"+
 			"# Email: %s\n"+
 			"# Description: %s\n",
 		agent.ServiceName, crossProjectNote,

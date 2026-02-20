@@ -162,9 +162,9 @@ func (m *VPCSCModule) addAllToLoot() {
 	// Add policies to loot
 	for _, policy := range m.Policies {
 		m.LootMap["vpcsc-commands"].Contents += fmt.Sprintf(
-			"# ==========================================\n"+
+			"# =============================================================================\n"+
 				"# POLICY: %s\n"+
-				"# ==========================================\n"+
+				"# =============================================================================\n"+
 				"# Title: %s\n"+
 				"# Parent: %s\n"+
 				"\n# Describe access policy:\n"+
@@ -181,24 +181,76 @@ func (m *VPCSCModule) addAllToLoot() {
 	// Add perimeters to loot
 	for _, perimeter := range m.Perimeters {
 		m.LootMap["vpcsc-commands"].Contents += fmt.Sprintf(
-			"# ------------------------------------------\n"+
+			"# -----------------------------------------------------------------------------\n"+
 				"# PERIMETER: %s (Policy: %s)\n"+
-				"# ------------------------------------------\n"+
+				"# -----------------------------------------------------------------------------\n"+
 				"# Title: %s\n"+
 				"# Type: %s\n"+
 				"# Resources: %d\n"+
 				"# Restricted Services: %d\n"+
 				"# Ingress Policies: %d\n"+
 				"# Egress Policies: %d\n"+
-				"\n# Describe perimeter:\n"+
+				"\n# === ENUMERATION COMMANDS ===\n\n"+
+				"# Describe perimeter:\n"+
 				"gcloud access-context-manager perimeters describe %s --policy=%s\n\n"+
 				"# List protected resources:\n"+
-				"gcloud access-context-manager perimeters describe %s --policy=%s --format=\"value(status.resources)\"\n\n",
+				"gcloud access-context-manager perimeters describe %s --policy=%s --format=\"value(status.resources)\"\n\n"+
+				"# List restricted services:\n"+
+				"gcloud access-context-manager perimeters describe %s --policy=%s --format=json | jq '.status.restrictedServices'\n\n"+
+				"# List ingress policies (who can access from outside):\n"+
+				"gcloud access-context-manager perimeters describe %s --policy=%s --format=json | jq '.status.ingressPolicies'\n\n"+
+				"# List egress policies (what can leave the perimeter):\n"+
+				"gcloud access-context-manager perimeters describe %s --policy=%s --format=json | jq '.status.egressPolicies'\n\n",
 			perimeter.Name, perimeter.PolicyName,
 			perimeter.Title, perimeter.PerimeterType,
 			len(perimeter.Resources), len(perimeter.RestrictedServices),
 			perimeter.IngressPolicyCount, perimeter.EgressPolicyCount,
 			perimeter.Name, perimeter.PolicyName,
+			perimeter.Name, perimeter.PolicyName,
+			perimeter.Name, perimeter.PolicyName,
+			perimeter.Name, perimeter.PolicyName,
+			perimeter.Name, perimeter.PolicyName,
+		)
+
+		// Exploit/bypass commands
+		m.LootMap["vpcsc-commands"].Contents += "# === EXPLOIT / BYPASS COMMANDS ===\n\n"
+
+		if perimeter.IngressPolicyCount > 0 {
+			m.LootMap["vpcsc-commands"].Contents += fmt.Sprintf(
+				"# Ingress policies exist - check for overly permissive access:\n"+
+					"# Review which identities/access levels are allowed ingress\n"+
+					"gcloud access-context-manager perimeters describe %s --policy=%s --format=json | jq '.status.ingressPolicies[] | {from: .ingressFrom, to: .ingressTo}'\n\n",
+				perimeter.Name, perimeter.PolicyName,
+			)
+		}
+
+		if perimeter.EgressPolicyCount > 0 {
+			m.LootMap["vpcsc-commands"].Contents += fmt.Sprintf(
+				"# Egress policies exist - check for data exfil paths:\n"+
+					"# Review what services/resources can send data outside the perimeter\n"+
+					"gcloud access-context-manager perimeters describe %s --policy=%s --format=json | jq '.status.egressPolicies[] | {from: .egressFrom, to: .egressTo}'\n\n",
+				perimeter.Name, perimeter.PolicyName,
+			)
+		}
+
+		if perimeter.PerimeterType == "PERIMETER_TYPE_BRIDGE" {
+			m.LootMap["vpcsc-commands"].Contents += "# [FINDING] This is a BRIDGE perimeter - it connects two perimeters\n" +
+				"# Bridge perimeters can be used to exfiltrate data between perimeters\n" +
+				"# Check which perimeters are bridged and what services flow between them\n\n"
+		}
+
+		// Common bypass techniques
+		m.LootMap["vpcsc-commands"].Contents += fmt.Sprintf(
+			"# VPC-SC Bypass Techniques:\n"+
+				"# 1. If you have access to a project INSIDE the perimeter, use it as a pivot\n"+
+				"# 2. Check if any access levels use overly permissive IP ranges\n"+
+				"# 3. Look for services NOT in the restricted list (data can flow through unrestricted services)\n"+
+				"# 4. Check for ingress policies that allow specific identities you control\n"+
+				"# 5. Use Cloud Shell (if accessible) - it may bypass VPC-SC\n\n"+
+				"# Test if you're inside the perimeter:\n"+
+				"gcloud storage ls gs://BUCKET_IN_PERIMETER 2>&1 | grep -i 'Request is prohibited by organization'\n\n"+
+				"# Check dry-run mode (violations logged but not blocked):\n"+
+				"gcloud access-context-manager perimeters describe %s --policy=%s --format=json | jq '.useExplicitDryRunSpec'\n\n",
 			perimeter.Name, perimeter.PolicyName,
 		)
 	}
@@ -215,9 +267,9 @@ func (m *VPCSCModule) addAllToLoot() {
 		}
 
 		m.LootMap["vpcsc-commands"].Contents += fmt.Sprintf(
-			"# ------------------------------------------\n"+
+			"# -----------------------------------------------------------------------------\n"+
 				"# ACCESS LEVEL: %s (Policy: %s)\n"+
-				"# ------------------------------------------\n"+
+				"# -----------------------------------------------------------------------------\n"+
 				"# Title: %s\n"+
 				"# IP Subnets: %s\n"+
 				"# Regions: %s\n"+

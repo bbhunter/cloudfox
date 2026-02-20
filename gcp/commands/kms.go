@@ -209,16 +209,20 @@ func (m *KMSModule) addKeyToLoot(projectID string, key KMSService.CryptoKeyInfo)
 	}
 
 	lootFile.Contents += fmt.Sprintf(
-		"## Key: %s (Project: %s, KeyRing: %s, Location: %s)\n"+
+		"# =============================================================================\n"+
+			"# KMS KEY: %s\n"+
+			"# =============================================================================\n"+
+			"# Project: %s, KeyRing: %s, Location: %s\n"+
 			"# Purpose: %s, Protection: %s\n",
-		key.Name, key.ProjectID,
-		key.KeyRing, key.Location,
+		key.Name,
+		key.ProjectID, key.KeyRing, key.Location,
 		key.Purpose, key.ProtectionLevel,
 	)
 
 	// Commands
 	lootFile.Contents += fmt.Sprintf(
-		"\n# Describe key:\n"+
+		"\n# === ENUMERATION COMMANDS ===\n\n"+
+			"# Describe key:\n"+
 			"gcloud kms keys describe %s --keyring=%s --location=%s --project=%s\n"+
 			"# Get IAM policy:\n"+
 			"gcloud kms keys get-iam-policy %s --keyring=%s --location=%s --project=%s\n"+
@@ -230,6 +234,7 @@ func (m *KMSModule) addKeyToLoot(projectID string, key KMSService.CryptoKeyInfo)
 	)
 
 	// Purpose-specific commands
+	lootFile.Contents += "\n# === EXPLOIT COMMANDS ===\n\n"
 	switch key.Purpose {
 	case "ENCRYPT_DECRYPT":
 		lootFile.Contents += fmt.Sprintf(

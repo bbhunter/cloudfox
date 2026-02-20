@@ -133,30 +133,91 @@ func (m *DataflowModule) addToLoot(projectID string, job dataflowservice.JobInfo
 		return
 	}
 	lootFile.Contents += fmt.Sprintf(
-		"## Job: %s (Project: %s, Location: %s)\n"+
+		"# =============================================================================\n"+
+			"# DATAFLOW JOB: %s\n"+
+			"# =============================================================================\n"+
+			"# Project: %s\n"+
+			"# Location: %s\n"+
 			"# ID: %s\n"+
 			"# Type: %s\n"+
 			"# State: %s\n"+
 			"# Service Account: %s\n"+
 			"# Public IPs: %v\n"+
-			"# Workers: %d\n\n"+
-			"# Describe job:\n"+
-			"gcloud dataflow jobs describe %s --project=%s --region=%s\n"+
-			"# Show job details:\n"+
-			"gcloud dataflow jobs show %s --project=%s --region=%s\n"+
-			"# Cancel job (if running):\n"+
-			"gcloud dataflow jobs cancel %s --project=%s --region=%s\n\n",
+			"# Workers: %d\n",
 		job.Name, job.ProjectID, job.Location,
-		job.ID,
-		job.Type,
-		job.State,
-		job.ServiceAccount,
-		job.UsePublicIPs,
-		job.NumWorkers,
+		job.ID, job.Type, job.State,
+		job.ServiceAccount, job.UsePublicIPs, job.NumWorkers,
+	)
+
+	lootFile.Contents += fmt.Sprintf(`
+# === ENUMERATION COMMANDS ===
+
+# Describe job:
+gcloud dataflow jobs describe %s --project=%s --region=%s
+
+# Show job details:
+gcloud dataflow jobs show %s --project=%s --region=%s
+
+# List all Dataflow jobs:
+gcloud dataflow jobs list --project=%s --region=%s
+
+# Get job metrics:
+gcloud dataflow metrics list %s --project=%s --region=%s
+
+`,
 		job.ID, job.ProjectID, job.Location,
 		job.ID, job.ProjectID, job.Location,
+		job.ProjectID, job.Location,
 		job.ID, job.ProjectID, job.Location,
 	)
+
+	// Bucket inspection
+	if job.TempLocation != "" {
+		lootFile.Contents += fmt.Sprintf(
+			"# Inspect temp bucket (may contain intermediate data):\n"+
+				"gsutil ls -r %s\n\n",
+			job.TempLocation,
+		)
+	}
+	if job.StagingLocation != "" {
+		lootFile.Contents += fmt.Sprintf(
+			"# Inspect staging bucket (contains job artifacts):\n"+
+				"gsutil ls -r %s\n\n",
+			job.StagingLocation,
+		)
+	}
+
+	// === EXPLOIT COMMANDS ===
+	lootFile.Contents += "# === EXPLOIT COMMANDS ===\n\n"
+
+	lootFile.Contents += fmt.Sprintf(
+		"# Cancel running job:\n"+
+			"gcloud dataflow jobs cancel %s --project=%s --region=%s\n\n"+
+			"# Drain running job (graceful stop):\n"+
+			"gcloud dataflow jobs drain %s --project=%s --region=%s\n\n"+
+			"# Submit a new Dataflow job (code execution as SA: %s):\n"+
+			"# Template-based job:\n"+
+			"gcloud dataflow jobs run cloudfox-test --gcs-location=gs://dataflow-templates/latest/Word_Count --region=%s --project=%s --parameters=inputFile=gs://BUCKET/input.txt,output=gs://BUCKET/output\n\n"+
+			"# Flex template job (custom container = full code execution):\n"+
+			"gcloud dataflow flex-template run cloudfox-flex --template-file-gcs-location=gs://YOUR_BUCKET/template.json --region=%s --project=%s --service-account-email=%s\n\n",
+		job.ID, job.ProjectID, job.Location,
+		job.ID, job.ProjectID, job.Location,
+		job.ServiceAccount,
+		job.Location, job.ProjectID,
+		job.Location, job.ProjectID, job.ServiceAccount,
+	)
+
+	// Inspect staging/temp for secrets
+	if job.TempLocation != "" || job.StagingLocation != "" {
+		lootFile.Contents += "# Search job buckets for secrets/credentials:\n"
+		if job.TempLocation != "" {
+			lootFile.Contents += fmt.Sprintf("gsutil cat %s/** 2>/dev/null | grep -iE '(password|secret|token|key|credential)'\n", job.TempLocation)
+		}
+		if job.StagingLocation != "" {
+			lootFile.Contents += fmt.Sprintf("gsutil cat %s/** 2>/dev/null | grep -iE '(password|secret|token|key|credential)'\n", job.StagingLocation)
+		}
+		lootFile.Contents += "\n"
+	}
 }
 
 func (m *DataflowModule) writeOutput(ctx context.Context, logger internal.Logger) {
@@ -192,10 +253,12 @@ func (m *DataflowModule) jobsToTableBody(jobs []dataflowservice.JobInfo) [][]str
 
 		// Check attack paths (privesc/exfil/lateral) for the service account
 		attackPaths := "run foxmapper"
-		if job.ServiceAccount != "" && m.FoxMapperCache != nil && m.FoxMapperCache.IsPopulated() {
-			attackPaths = gcpinternal.GetAttackSummaryFromCaches(m.FoxMapperCache, nil, job.ServiceAccount)
-		} else {
-			attackPaths = "No"
+		if m.FoxMapperCache != nil && m.FoxMapperCache.IsPopulated() {
+			if job.ServiceAccount != "" {
+				attackPaths = gcpinternal.GetAttackSummaryFromCaches(m.FoxMapperCache, nil, job.ServiceAccount)
+			} else {
+				attackPaths = "No"
+			}
 		}
 
 		body = append(body, []string{

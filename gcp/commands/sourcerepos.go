@@ -156,9 +156,9 @@ func (m *SourceReposModule) addRepoToLoot(projectID string, repo sourcereposserv
 	}
 
 	lootFile.Contents += fmt.Sprintf(
-		"# ==========================================\n"+
+		"# =============================================================================\n"+
 			"# REPOSITORY: %s\n"+
-			"# ==========================================\n"+
+			"# =============================================================================\n"+
 			"# Project: %s\n",
 		repo.Name, repo.ProjectID,
 	)

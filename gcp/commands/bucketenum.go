@@ -240,7 +240,20 @@ func (m *BucketEnumModule) processProject(ctx context.Context, projectID string,
 
 		m.mu.Lock()
 		m.ProjectAllObjects[projectID] = projectObjects
+		// Group objects by bucket and add bucket-level headers
+		currentBucket := ""
 		for _, obj := range projectObjects {
+			if obj.BucketName != currentBucket {
+				currentBucket = obj.BucketName
+				if lootFile := m.LootMap[projectID]["bucket-enum-all-commands"]; lootFile != nil {
+					lootFile.Contents += fmt.Sprintf(
+						"# =============================================================================\n"+
+							"# BUCKET: gs://%s\n"+
+							"# =============================================================================\n\n",
+						currentBucket,
+					)
+				}
+			}
 			m.addObjectToLoot(projectID, obj)
 		}
 		m.mu.Unlock()
@@ -260,7 +273,22 @@ func (m *BucketEnumModule) processProject(ctx context.Context, projectID string,
 
 		m.mu.Lock()
 		m.ProjectSensitiveFiles[projectID] = projectFiles
+		// Group files by bucket and add bucket-level headers
+		currentBucket := ""
 		for _, file := range projectFiles {
+			if file.BucketName != currentBucket {
+				currentBucket = file.BucketName
+				for _, lootName := range []string{"bucket-enum-commands", "bucket-enum-sensitive-commands"} {
+					if lootFile := m.LootMap[projectID][lootName]; lootFile != nil {
+						lootFile.Contents += fmt.Sprintf(
+							"# =============================================================================\n"+
+								"# BUCKET: gs://%s\n"+
+								"# =============================================================================\n\n",
+							currentBucket,
+						)
+					}
+				}
+			}
 			m.addFileToLoot(projectID, file)
 		}
 		m.mu.Unlock()

@@ -361,7 +361,9 @@ func (m *SecurityCenterModule) addFindingToLoot(finding SCCFinding, projectID st
 	}
 
 	m.LootMap[projectID]["security-center-commands"].Contents += fmt.Sprintf(
-		"## Finding: %s (%s)\n"+
+		"# =============================================================================\n"+
+			"# FINDING: %s (%s)\n"+
+			"# =============================================================================\n"+
 			"# Category: %s\n"+
 			"# Resource: %s\n"+
 			"# Project: %s\n",
@@ -380,13 +382,15 @@ func (m *SecurityCenterModule) addFindingToLoot(finding SCCFinding, projectID st
 	}
 
 	// Add gcloud commands
+	m.LootMap[projectID]["security-center-commands"].Contents += "\n# === ENUMERATION COMMANDS ===\n\n"
 	m.LootMap[projectID]["security-center-commands"].Contents += fmt.Sprintf(
-		"\n# View finding details:\n"+
+		"# View finding details:\n"+
 			"gcloud scc findings list --source=\"-\" --project=%s --filter=\"name:\\\"%s\\\"\"\n\n",
 		projectID, finding.Name,
 	)
 
 	// Add specific commands based on category
+	m.LootMap[projectID]["security-center-commands"].Contents += "# === REMEDIATION COMMANDS ===\n\n"
 	categoryLower := strings.ToLower(finding.Category)
 	switch {
 	case strings.Contains(categoryLower, "public_bucket"):

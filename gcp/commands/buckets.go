@@ -196,7 +196,11 @@ func (m *BucketsModule) addBucketToLoot(projectID string, bucket CloudStorageSer
 
 	// All commands for this bucket
 	lootFile.Contents += fmt.Sprintf(
-		"## Bucket: gs://%s (Project: %s, Location: %s)\n"+
+		"# =============================================================================\n"+
+			"# BUCKET: gs://%s\n"+
+			"# =============================================================================\n"+
+			"# Project: %s, Location: %s\n\n"+
+			"# === ENUMERATION COMMANDS ===\n\n"+
 			"# Describe bucket:\n"+
 			"gcloud storage buckets describe gs://%s --project=%s\n"+
 			"# Get IAM policy:\n"+
@@ -207,7 +211,8 @@ func (m *BucketsModule) addBucketToLoot(projectID string, bucket CloudStorageSer
 			"# List all objects recursively:\n"+
 			"gsutil ls -r gs://%s/**\n"+
 			"# Get bucket size:\n"+
-			"gsutil du -s gs://%s/\n"+
+			"gsutil du -s gs://%s/\n\n"+
+			"# === EXPLOIT COMMANDS ===\n\n"+
 			"# Download all contents (create directory first):\n"+
 			"mkdir -p bucket/%s/\n"+
 			"gsutil -m cp -r gs://%s/ bucket/%s/\n"+

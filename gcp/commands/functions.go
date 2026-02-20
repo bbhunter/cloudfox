@@ -194,11 +194,15 @@ func (m *FunctionsModule) addFunctionToLoot(projectID string, fn FunctionsServic
 
 	// All commands for this function
 	commandsLoot.Contents += fmt.Sprintf(
-		"#### Function: %s (Project: %s, Region: %s)\n"+
+		"# =============================================================================\n"+
+			"# FUNCTION: %s\n"+
+			"# =============================================================================\n"+
+			"# Project: %s, Region: %s\n"+
 			"# Runtime: %s, Trigger: %s\n"+
 			"# Service Account: %s\n"+
 			"# Public: %v, Ingress: %s\n",
-		fn.Name, fn.ProjectID, fn.Region,
+		fn.Name,
+		fn.ProjectID, fn.Region,
 		fn.Runtime, fn.TriggerType,
 		fn.ServiceAccount,
 		fn.IsPublic, fn.IngressSettings,
@@ -213,7 +217,8 @@ func (m *FunctionsModule) addFunctionToLoot(projectID string, fn FunctionsServic
 	}
 
 	commandsLoot.Contents += fmt.Sprintf(
-		"\n# Describe function:\n"+
+		"\n# === ENUMERATION COMMANDS ===\n\n"+
+			"# Describe function:\n"+
 			"gcloud functions describe %s --region=%s --project=%s --gen2\n"+
 			"# Get IAM policy:\n"+
 			"gcloud functions get-iam-policy %s --region=%s --project=%s --gen2\n"+
@@ -225,6 +230,7 @@ func (m *FunctionsModule) addFunctionToLoot(projectID string, fn FunctionsServic
 	)
 
 	// HTTP invocation commands
+	commandsLoot.Contents += "\n# === EXPLOIT COMMANDS ===\n\n"
 	if fn.TriggerType == "HTTP" && fn.TriggerURL != "" {
 		commandsLoot.Contents += fmt.Sprintf(
 			"# Invoke (GET):\n"+

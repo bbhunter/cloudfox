@@ -233,9 +233,9 @@ func (m *PubSubModule) addTopicToLoot(projectID string, topic PubSubService.Topi
 	}
 
 	lootFile.Contents += fmt.Sprintf(
-		"# ==========================================\n"+
+		"# =============================================================================\n"+
 			"# TOPIC: %s%s\n"+
-			"# ==========================================\n"+
+			"# =============================================================================\n"+
 			"# Project: %s\n"+
 			"# Subscriptions: %d\n",
 		topic.Name, publicAccess,
@@ -272,7 +272,7 @@ gcloud pubsub topics list-subscriptions %s --project=%s
 # List snapshots for this topic
 gcloud pubsub snapshots list --filter="topic:%s" --project=%s
 
-# === EXPLOITATION COMMANDS ===
+# === EXPLOIT COMMANDS ===
 
 # Publish a test message (requires pubsub.topics.publish)
 gcloud pubsub topics publish %s --message='{"test": "message"}' --project=%s
@@ -341,9 +341,9 @@ func (m *PubSubModule) addSubscriptionToLoot(projectID string, sub PubSubService
 	}
 
 	lootFile.Contents += fmt.Sprintf(
-		"# ==========================================\n"+
+		"# -----------------------------------------------------------------------------\n"+
 			"# SUBSCRIPTION: %s%s\n"+
-			"# ==========================================\n"+
+			"# -----------------------------------------------------------------------------\n"+
 			"# Project: %s\n"+
 			"# Topic: %s\n",
 		sub.Name, publicAccess,
@@ -418,7 +418,7 @@ gcloud pubsub subscriptions get-iam-policy %s --project=%s
 # List snapshots for this subscription
 gcloud pubsub snapshots list --project=%s
 
-# === EXPLOITATION COMMANDS ===
+# === EXPLOIT COMMANDS ===
 
 # Pull messages WITHOUT acknowledging (peek at messages, they stay in queue)
 gcloud pubsub subscriptions pull %s --project=%s --limit=100

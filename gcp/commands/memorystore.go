@@ -125,17 +125,22 @@ func (m *MemorystoreModule) addInstanceToLoot(projectID string, instance memorys
 		return
 	}
 	lootFile.Contents += fmt.Sprintf(
-		"## Instance: %s (Project: %s, Location: %s)\n"+
+		"# =============================================================================\n"+
+			"# MEMORYSTORE: %s\n"+
+			"# =============================================================================\n"+
+			"# Project: %s, Location: %s\n"+
 			"# Host: %s:%d\n"+
 			"# Auth: %v, Encryption: %s\n\n",
-		instance.Name, instance.ProjectID, instance.Location,
+		instance.Name,
+		instance.ProjectID, instance.Location,
 		instance.Host, instance.Port,
 		instance.AuthEnabled, instance.TransitEncryption,
 	)
 
 	// gcloud commands
 	lootFile.Contents += fmt.Sprintf(
-		"# Describe instance:\n"+
+		"# === ENUMERATION COMMANDS ===\n\n"+
+			"# Describe instance:\n"+
 			"gcloud redis instances describe %s --region=%s --project=%s\n\n",
 		instance.Name, instance.Location, instance.ProjectID,
 	)
@@ -150,6 +155,7 @@ func (m *MemorystoreModule) addInstanceToLoot(projectID string, instance memorys
 	}
 
 	// Redis CLI connection command
+	lootFile.Contents += "# === EXPLOIT COMMANDS ===\n\n"
 	authStr := ""
 	if instance.AuthEnabled {
 		authStr = " -a $(gcloud redis instances get-auth-string " + instance.Name +

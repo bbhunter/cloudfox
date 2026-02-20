@@ -199,7 +199,10 @@ func (m *ArtifactRegistryModule) addRepositoryToLoot(projectID string, repo Arti
 	// Handle legacy Container Registry differently
 	if repo.RegistryType == "container-registry" {
 		lootFile.Contents += fmt.Sprintf(
-			"## Legacy Container Registry: %s (Project: %s)\n"+
+			"# =============================================================================\n"+
+				"# LEGACY CONTAINER REGISTRY: %s\n"+
+				"# =============================================================================\n"+
+				"# Project: %s\n"+
 				"# Note: Consider migrating to Artifact Registry\n"+
 				"# Configure Docker authentication:\n"+
 				"gcloud auth configure-docker %s\n"+
@@ -217,8 +220,12 @@ func (m *ArtifactRegistryModule) addRepositoryToLoot(projectID string, repo Arti
 
 	// Repository header and enumeration commands
 	lootFile.Contents += fmt.Sprintf(
-		"## Repository: %s (Project: %s, Location: %s)\n"+
-			"# Format: %s, Mode: %s, Encryption: %s, Public: %s\n"+
+		"# =============================================================================\n"+
+			"# REPOSITORY: %s\n"+
+			"# =============================================================================\n"+
+			"# Project: %s, Location: %s\n"+
+			"# Format: %s, Mode: %s, Encryption: %s, Public: %s\n\n"+
+			"# === ENUMERATION COMMANDS ===\n\n"+
 			"# Describe repository:\n"+
 			"gcloud artifacts repositories describe %s --project=%s --location=%s\n"+
 			"# Get IAM policy:\n"+
@@ -259,14 +266,18 @@ func (m *ArtifactRegistryModule) addArtifactToLoot(projectID string, artifact Ar
 			artifact.Location, artifact.ProjectID, artifact.Repository, artifact.Name)
 
 		lootFile.Contents += fmt.Sprintf(
-			"## Docker Image: %s (Project: %s)\n"+
-				"# Repository: %s, Location: %s\n"+
+			"# -----------------------------------------------------------------------------\n"+
+				"# DOCKER IMAGE: %s\n"+
+				"# -----------------------------------------------------------------------------\n"+
+				"# Project: %s, Repository: %s, Location: %s\n"+
 				"# Digest: %s\n",
-			artifact.Name, artifact.ProjectID,
+			artifact.Name,
+			artifact.ProjectID,
 			artifact.Repository, artifact.Location,
 			artifact.Digest,
 		)
 
+		lootFile.Contents += "\n# === EXPLOIT COMMANDS ===\n\n"
 		// Generate commands for each tag
 		if len(artifact.Tags) > 0 {
 			for _, tag := range artifact.Tags {

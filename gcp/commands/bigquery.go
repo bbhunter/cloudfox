@@ -174,7 +174,11 @@ func (m *BigQueryModule) addDatasetToLoot(projectID string, dataset BigQueryServ
 
 	// All commands for this dataset
 	lootFile.Contents += fmt.Sprintf(
-		"## Dataset: %s (Project: %s, Location: %s)\n"+
+		"# =============================================================================\n"+
+			"# DATASET: %s\n"+
+			"# =============================================================================\n"+
+			"# Project: %s, Location: %s\n\n"+
+			"# === ENUMERATION COMMANDS ===\n\n"+
 			"# Show dataset info\n"+
 			"bq show --project_id=%s %s\n"+
 			"bq show --format=prettyjson %s:%s\n\n"+
@@ -195,15 +199,21 @@ func (m *BigQueryModule) addTableToLoot(projectID string, table BigQueryService.
 
 	// Table info and query commands
 	lootFile.Contents += fmt.Sprintf(
-		"## Table: %s.%s (Project: %s)\n"+
-			"# Type: %s, Size: %d bytes, Rows: %d\n"+
+		"# -----------------------------------------------------------------------------\n"+
+			"# TABLE: %s.%s (Dataset: %s)\n"+
+			"# -----------------------------------------------------------------------------\n"+
+			"# Project: %s\n"+
+			"# Type: %s, Size: %d bytes, Rows: %d\n\n"+
+			"# === ENUMERATION COMMANDS ===\n\n"+
 			"# Show table schema:\n"+
-			"bq show --schema --project_id=%s %s:%s.%s\n"+
+			"bq show --schema --project_id=%s %s:%s.%s\n\n"+
+			"# === EXPLOIT COMMANDS ===\n\n"+
 			"# Query first 100 rows:\n"+
 			"bq query --project_id=%s --use_legacy_sql=false 'SELECT * FROM `%s.%s.%s` LIMIT 100'\n"+
 			"# Export table to GCS:\n"+
 			"bq extract --project_id=%s '%s:%s.%s' gs://<bucket>/export_%s_%s.json\n\n",
-		table.DatasetID, table.TableID, table.ProjectID,
+		table.DatasetID, table.TableID, table.DatasetID,
+		table.ProjectID,
 		table.TableType, table.NumBytes, table.NumRows,
 		table.ProjectID, table.ProjectID, table.DatasetID, table.TableID,
 		table.ProjectID, table.ProjectID, table.DatasetID, table.TableID,

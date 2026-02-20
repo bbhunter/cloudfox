@@ -214,20 +214,28 @@ func (m *PrivateServiceConnectModule) addPSCEndpointToLoot(projectID string, end
 		return
 	}
 	lootFile.Contents += fmt.Sprintf(
-		"## PSC Endpoint: %s (Project: %s, Region: %s)\n"+
+		"# =============================================================================\n"+
+			"# PSC ENDPOINT: %s\n"+
+			"# =============================================================================\n"+
+			"# Project: %s, Region: %s\n"+
 			"# Network: %s, Subnet: %s\n"+
 			"# Target Type: %s, Target: %s\n"+
-			"# State: %s, IP: %s\n\n"+
-			"# Describe forwarding rule:\n"+
-			"gcloud compute forwarding-rules describe %s --region=%s --project=%s\n\n",
+			"# State: %s, IP: %s\n\n",
 		endpoint.Name, endpoint.ProjectID, endpoint.Region,
 		endpoint.Network, endpoint.Subnetwork,
 		endpoint.TargetType, endpoint.Target,
 		endpoint.ConnectionState, endpoint.IPAddress,
+	)
+
+	lootFile.Contents += "# === ENUMERATION COMMANDS ===\n\n"
+	lootFile.Contents += fmt.Sprintf(
+		"# Describe forwarding rule:\n"+
+			"gcloud compute forwarding-rules describe %s --region=%s --project=%s\n\n",
 		endpoint.Name, endpoint.Region, endpoint.ProjectID,
 	)
 
 	if endpoint.IPAddress != "" {
+		lootFile.Contents += "# === EXPLOIT COMMANDS ===\n\n"
 		lootFile.Contents += fmt.Sprintf(
 			"# Scan internal endpoint (from within VPC):\n"+
 				"nmap -sV -Pn %s\n\n",
@@ -251,22 +259,32 @@ func (m *PrivateServiceConnectModule) addPrivateConnectionToLoot(projectID strin
 	}
 
 	lootFile.Contents += fmt.Sprintf(
-		"## Private Connection: %s (Project: %s)\n"+
+		"# =============================================================================\n"+
+			"# PRIVATE CONNECTION: %s\n"+
+			"# =============================================================================\n"+
+			"# Project: %s\n"+
 			"# Network: %s, Service: %s\n"+
 			"# Peering: %s\n"+
 			"# Reserved Ranges: %s\n"+
-			"# Accessible Services: %s\n\n"+
-			"# List private connections:\n"+
-			"gcloud services vpc-peerings list --network=%s --project=%s\n\n",
+			"# Accessible Services: %s\n\n",
 		conn.Name, conn.ProjectID,
 		conn.Network, conn.Service,
 		conn.PeeringName,
 		reservedRanges,
 		accessibleServices,
+	)
+
+	lootFile.Contents += "# === ENUMERATION COMMANDS ===\n\n"
+	lootFile.Contents += fmt.Sprintf(
+		"# List private connections:\n"+
+			"gcloud services vpc-peerings list --network=%s --project=%s\n\n",
 		conn.Network, conn.ProjectID,
 	)
 
 	// Add nmap commands for each reserved range
+	if len(conn.ReservedRanges) > 0 {
+		lootFile.Contents += "# === EXPLOIT COMMANDS ===\n\n"
+	}
 	for _, ipRange := range conn.ReservedRanges {
 		lootFile.Contents += fmt.Sprintf(
 			"# Scan private connection range (from within VPC):\n"+
@@ -287,12 +305,16 @@ func (m *PrivateServiceConnectModule) addServiceAttachmentToLoot(projectID strin
 	}
 
 	lootFile.Contents += fmt.Sprintf(
-		"## Service Attachment: %s (Project: %s, Region: %s)\n"+
+		"# =============================================================================\n"+
+			"# SERVICE ATTACHMENT: %s\n"+
+			"# =============================================================================\n"+
+			"# Project: %s, Region: %s\n"+
 			"# Target Service: %s\n"+
 			"# Connection Preference: %s\n"+
 			"# Connected Endpoints: %d\n"+
 			"# NAT Subnets: %s\n",
-		attachment.Name, attachment.ProjectID, attachment.Region,
+		attachment.Name,
+		attachment.ProjectID, attachment.Region,
 		attachment.TargetService,
 		attachment.ConnectionPreference,
 		attachment.ConnectedEndpoints,
@@ -314,8 +336,9 @@ func (m *PrivateServiceConnectModule) addServiceAttachmentToLoot(projectID strin
 		}
 	}
 
+	lootFile.Contents += "\n# === ENUMERATION COMMANDS ===\n\n"
 	lootFile.Contents += fmt.Sprintf(
-		"\n# Describe service attachment:\n"+
+		"# Describe service attachment:\n"+
 			"gcloud compute service-attachments describe %s --region=%s --project=%s\n\n"+
 			"# Get IAM policy:\n"+
 			"gcloud compute service-attachments get-iam-policy %s --region=%s --project=%s\n\n",
@@ -325,6 +348,7 @@ func (m *PrivateServiceConnectModule) addServiceAttachmentToLoot(projectID strin
 
 	// If auto-accept, add exploitation command
 	if attachment.ConnectionPreference == "ACCEPT_AUTOMATIC" {
+		lootFile.Contents += "# === EXPLOIT COMMANDS ===\n\n"
 		lootFile.Contents += fmt.Sprintf(
 			"# [HIGH RISK] This service attachment accepts connections from ANY project!\n"+
 				"# To connect from another project:\n"+

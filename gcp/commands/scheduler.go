@@ -185,11 +185,15 @@ func (m *SchedulerModule) addJobToLoot(projectID string, job SchedulerService.Jo
 	target := formatTargetFull(job)
 
 	lootFile.Contents += fmt.Sprintf(
-		"## Job: %s (Project: %s, Location: %s)\n"+
+		"# =============================================================================\n"+
+			"# SCHEDULER JOB: %s\n"+
+			"# =============================================================================\n"+
+			"# Project: %s, Location: %s\n"+
 			"# State: %s\n"+
 			"# Schedule: %s (%s)\n"+
 			"# Target: %s -> %s\n",
-		job.Name, job.ProjectID, job.Location,
+		job.Name,
+		job.ProjectID, job.Location,
 		job.State,
 		job.Schedule, job.TimeZone,
 		job.TargetType, target,
@@ -203,8 +207,10 @@ func (m *SchedulerModule) addJobToLoot(projectID string, job SchedulerService.Jo
 	}
 
 	lootFile.Contents += fmt.Sprintf(
-		"\n# Describe job:\n"+
+		"\n# === ENUMERATION COMMANDS ===\n\n"+
+			"# Describe job:\n"+
 			"gcloud scheduler jobs describe %s --location=%s --project=%s\n\n"+
+			"# === EXPLOIT COMMANDS ===\n\n"+
 			"# Run job immediately:\n"+
 			"gcloud scheduler jobs run %s --location=%s --project=%s\n\n"+
 			"# Pause job:\n"+

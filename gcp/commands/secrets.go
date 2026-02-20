@@ -188,9 +188,9 @@ func (m *SecretsModule) addSecretToLoot(projectID string, secret SecretsService.
 	secretName := getSecretShortName(secret.Name)
 
 	lootFile.Contents += fmt.Sprintf(
-		"# ==========================================\n"+
+		"# =============================================================================\n"+
 			"# SECRET: %s (Project: %s)\n"+
-			"# ==========================================\n"+
+			"# =============================================================================\n"+
 			"# Encryption: %s, Replication: %s, Rotation: %s\n"+
 			"# Created: %s\n",
 		secretName, secret.ProjectID,
@@ -227,12 +227,14 @@ func (m *SecretsModule) addSecretToLoot(projectID string, secret SecretsService.
 
 	// Commands
 	lootFile.Contents += fmt.Sprintf(
-		"\n# Describe secret:\n"+
+		"\n# === ENUMERATION COMMANDS ===\n\n"+
+			"# Describe secret:\n"+
 			"gcloud secrets describe %s --project=%s\n"+
 			"# List versions:\n"+
 			"gcloud secrets versions list %s --project=%s\n"+
 			"# Get IAM policy:\n"+
-			"gcloud secrets get-iam-policy %s --project=%s\n"+
+			"gcloud secrets get-iam-policy %s --project=%s\n\n"+
+			"# === EXPLOIT COMMANDS ===\n\n"+
 			"# Access latest version:\n"+
 			"gcloud secrets versions access latest --secret=%s --project=%s\n"+
 			"# Download all versions:\n"+

