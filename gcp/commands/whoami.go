@@ -890,6 +890,11 @@ func (m *WhoAmIModule) identifyPrivEscPathsFromAnalysis(ctx context.Context, rel
 				permission = path.Edges[0].ShortReason
 			}
 
+			pathConf := path.Confidence
+			if pathConf == "" || pathConf == "high" {
+				pathConf = "confirmed"
+			}
+
 			privEscPath := PrivilegeEscalationPath{
 				ProjectID:     "", // FoxMapper doesn't track project per edge
 				Permission:    permission,
@@ -898,7 +903,7 @@ func (m *WhoAmIModule) identifyPrivEscPathsFromAnalysis(ctx context.Context, rel
 				SourceRole:    finding.Principal,
 				SourceScope:   path.AdminLevel,
 				Command:       command,
-				Confidence:    "confirmed",
+				Confidence:    pathConf,
 				RequiredPerms: permission,
 			}
 
@@ -1470,23 +1475,31 @@ func (m *WhoAmIModule) generatePrivescPlaybook() string {
 				if path.ScopeBlocked {
 					scopeStatus = " [SCOPE-BLOCKED]"
 				}
+				confidenceStatus := ""
+				if path.Confidence != "" && path.Confidence != "high" {
+					confidenceStatus = fmt.Sprintf(" [%s confidence]", path.Confidence)
+				}
 
-				sb.WriteString(fmt.Sprintf("--- Path %d: %s → %s (%s admin, %d hops)%s ---\n\n",
-					pathIdx+1, path.Source, path.Destination, path.AdminLevel, path.HopCount, scopeStatus))
+				sb.WriteString(fmt.Sprintf("--- Path %d: %s → %s (%s admin, %d hops)%s%s ---\n\n",
+					pathIdx+1, path.Source, path.Destination, path.AdminLevel, path.HopCount, scopeStatus, confidenceStatus))
 
 				// Show the path as a visual chain
 				sb.WriteString(fmt.Sprintf("  %s\n", path.Source))
 				for i, edge := range path.Edges {
 					sb.WriteString("    │\n")
 
-					scopeWarning := ""
+					annotations := ""
 					if edge.ScopeBlocksEscalation {
-						scopeWarning = " ⚠️  BLOCKED BY OAUTH SCOPE"
+						annotations = " ⚠️  BLOCKED BY OAUTH SCOPE"
 					} else if edge.ScopeLimited {
-						scopeWarning = " ⚠️  scope-limited"
+						annotations = " ⚠️  scope-limited"
+					}
+					edgeConf := edge.EffectiveConfidence()
+					if edgeConf != "high" {
+						annotations += fmt.Sprintf(" [%s confidence]", edgeConf)
 					}
 
-					sb.WriteString(fmt.Sprintf("    ├── [%d] %s%s\n", i+1, edge.ShortReason, scopeWarning))
+					sb.WriteString(fmt.Sprintf("    ├── [%d] %s%s\n", i+1, edge.ShortReason, annotations))
 
 					if edge.Resource != "" {
 						sb.WriteString(fmt.Sprintf("    │       Resource: %s\n", edge.Resource))

@@ -72,18 +72,42 @@ func (fb *FlexibleBool) UnmarshalJSON(data []byte) error {
 
 // Edge represents a privilege escalation edge from FoxMapper graph
 type Edge struct {
-	Source                string       `json:"source"`
-	Destination           string       `json:"destination"`
-	Reason                string       `json:"reason"`
-	ShortReason           string       `json:"short_reason"`
-	EdgeType              string       `json:"edge_type"`
-	Resource              string       `json:"resource"`
+	Source                string         `json:"source"`
+	Destination           string         `json:"destination"`
+	Reason                string         `json:"reason"`
+	ShortReason           string         `json:"short_reason"`
+	EdgeType              string         `json:"edge_type"`
+	Resource              string         `json:"resource"`
+	Confidence            string         `json:"confidence,omitempty"` // high (default/empty), medium, low
 	Conditions            map[string]any `json:"conditions"`
-	ScopeLimited          FlexibleBool `json:"scope_limited"`
-	ScopeWarning          string       `json:"scope_warning"`
-	ScopeBlocksEscalation FlexibleBool `json:"scope_blocks_escalation"`
-	ScopeAllowsMethods    []string     `json:"scope_allows_methods"`
-	Scopes                []string     `json:"scopes"`
+	ScopeLimited          FlexibleBool   `json:"scope_limited"`
+	ScopeWarning          string         `json:"scope_warning"`
+	ScopeBlocksEscalation FlexibleBool   `json:"scope_blocks_escalation"`
+	ScopeAllowsMethods    []string       `json:"scope_allows_methods"`
+	Scopes                []string       `json:"scopes"`
+}
+
+// EffectiveConfidence returns the edge's confidence, defaulting to "high" if empty
+func (e Edge) EffectiveConfidence() string {
+	if e.Confidence == "" {
+		return "high"
+	}
+	return e.Confidence
+}
+
+// WorstConfidence returns the worse of two confidence levels (low < medium < high)
+func WorstConfidence(a, b string) string {
+	order := map[string]int{"low": 0, "medium": 1, "high": 2}
+	if a == "" {
+		a = "high"
+	}
+	if b == "" {
+		b = "high"
+	}
+	if order[a] <= order[b] {
+		return a
+	}
+	return b
 }
 
 // Policy represents an IAM policy from FoxMapper graph
@@ -116,6 +140,7 @@ type PrivescPath struct {
 	HopCount    int
 	AdminLevel  string // org, folder, project
 	ScopeBlocked bool
+	Confidence   string // worst confidence across all edges in path (high, medium, low)
 }
 
 // FoxMapperService provides access to FoxMapper graph data
@@ -614,6 +639,7 @@ func (s *FoxMapperService) GetPrivescPaths(principal string) []PrivescPath {
 			// Build edges for this path
 			var pathEdges []Edge
 			scopeBlocked := false
+			pathConfidence := "high"
 			for i := 0; i < len(shortestPath)-1; i++ {
 				edge := s.findEdge(shortestPath[i], shortestPath[i+1])
 				if edge != nil {
@@ -621,16 +647,18 @@ func (s *FoxMapperService) GetPrivescPaths(principal string) []PrivescPath {
 					if edge.ScopeBlocksEscalation {
 						scopeBlocked = true
 					}
+					pathConfidence = WorstConfidence(pathConfidence, edge.EffectiveConfidence())
 				}
 			}
 
 			paths = append(paths, PrivescPath{
-				Source:      node.Email,
-				Destination: admin.Email,
-				Edges:       pathEdges,
-				HopCount:    len(pathEdges),
-				AdminLevel:  admin.AdminLevel,
+				Source:       node.Email,
+				Destination:  admin.Email,
+				Edges:        pathEdges,
+				HopCount:     len(pathEdges),
+				AdminLevel:   admin.AdminLevel,
 				ScopeBlocked: scopeBlocked,
+				Confidence:   pathConfidence,
 			})
 		}
 	}
@@ -676,15 +704,19 @@ func (s *FoxMapperService) GetAttackSummary(principal string) string {
 	if node.PathToAdmin {
 		paths := s.GetPrivescPaths(principal)
 		if len(paths) > 0 {
-			// Find the highest admin level reachable
+			// Find the highest admin level reachable and best confidence
 			highestLevel := "project"
 			shortestHops := paths[0].HopCount
+			bestConfidence := paths[0].Confidence
 			for _, p := range paths {
 				if p.AdminLevel == "org" {
 					highestLevel = "org"
 				} else if p.AdminLevel == "folder" && highestLevel != "org" {
 					highestLevel = "folder"
 				}
+			}
+			if bestConfidence != "" && bestConfidence != "high" {
+				return fmt.Sprintf("Privesc->%s (%d hops, %s confidence)", highestLevel, shortestHops, bestConfidence)
 			}
 			return fmt.Sprintf("Privesc->%s (%d hops)", highestLevel, shortestHops)
 		}
@@ -752,15 +784,23 @@ func (s *FoxMapperService) GetPrivescSummary() map[string]interface{} {
 // FormatPrivescPath formats a privesc path for display
 func FormatPrivescPath(path PrivescPath) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("%s -> %s (%d hops)\n", path.Source, path.Destination, path.HopCount))
+	confidenceInfo := ""
+	if path.Confidence != "" && path.Confidence != "high" {
+		confidenceInfo = fmt.Sprintf(", %s confidence", path.Confidence)
+	}
+	sb.WriteString(fmt.Sprintf("%s -> %s (%d hops%s)\n", path.Source, path.Destination, path.HopCount, confidenceInfo))
 	for i, edge := range path.Edges {
-		scopeInfo := ""
+		annotations := ""
 		if edge.ScopeBlocksEscalation {
-			scopeInfo = " [BLOCKED BY SCOPE]"
+			annotations = " [BLOCKED BY SCOPE]"
 		} else if edge.ScopeLimited {
-			scopeInfo = " [scope-limited]"
+			annotations = " [scope-limited]"
 		}
-		sb.WriteString(fmt.Sprintf("  (%d) %s%s\n", i+1, edge.Reason, scopeInfo))
+		edgeConf := edge.EffectiveConfidence()
+		if edgeConf != "high" {
+			annotations += fmt.Sprintf(" [%s confidence]", edgeConf)
+		}
+		sb.WriteString(fmt.Sprintf("  (%d) %s%s\n", i+1, edge.Reason, annotations))
 	}
 	return sb.String()
 }
@@ -890,6 +930,7 @@ type PrivescFinding struct {
 	PathsToFolderAdmin   int      `json:"paths_to_folder_admin"`
 	PathsToProjectAdmin  int      `json:"paths_to_project_admin"`
 	ShortestPathHops     int      `json:"shortest_path_hops"`
+	BestPathConfidence   string   `json:"best_path_confidence,omitempty"` // confidence of best path (high, medium, low)
 	Paths                []PrivescPath `json:"paths,omitempty"`
 }
 
@@ -973,6 +1014,7 @@ func (s *FoxMapperService) AnalyzePrivesc() []PrivescFinding {
 			// Set the highest reachable target info
 			if bestPath != nil {
 				finding.HighestReachableTarget = bestPath.Destination
+				finding.BestPathConfidence = bestPath.Confidence
 				// Try to get project info from the destination node
 				destNode := s.GetNode(bestPath.Destination)
 				if destNode != nil {

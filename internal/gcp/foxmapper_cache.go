@@ -175,6 +175,10 @@ func (c *FoxMapperCache) HasPrivesc(serviceAccount string) (bool, string) {
 	if node.PathToAdmin {
 		paths := c.service.GetPrivescPaths(serviceAccount)
 		if len(paths) > 0 {
+			conf := paths[0].Confidence
+			if conf != "" && conf != "high" {
+				return true, fmt.Sprintf("Privesc (%d hops, %s confidence)", paths[0].HopCount, conf)
+			}
 			return true, fmt.Sprintf("Privesc (%d hops)", paths[0].HopCount)
 		}
 		return true, "Privesc"

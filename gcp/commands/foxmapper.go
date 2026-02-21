@@ -257,7 +257,7 @@ func (m *FoxMapperModule) generateOutputForProject(logger internal.Logger, proje
 
 	// Main table: principals with admin or path to admin
 	// Read left to right: Project -> Type -> Principal -> Admin Status -> Privesc Target -> Privesc Admin Level -> Hops
-	mainHeader := []string{"Project", "Type", "Principal", "Is Admin", "Admin Level", "Privesc To", "Privesc Admin Level", "Hops"}
+	mainHeader := []string{"Project", "Type", "Principal", "Is Admin", "Admin Level", "Privesc To", "Privesc Admin Level", "Hops", "Confidence"}
 	var mainBody [][]string
 
 	// First add admins
@@ -275,6 +275,7 @@ func (m *FoxMapperModule) generateOutputForProject(logger internal.Logger, proje
 			"-",
 			"-",
 			"-",
+			"-",
 		})
 	}
 
@@ -284,6 +285,7 @@ func (m *FoxMapperModule) generateOutputForProject(logger internal.Logger, proje
 		shortestPath := "-"
 		privescTo := "-"
 		privescAdminLevel := "-"
+		confidence := "-"
 		if len(paths) > 0 {
 			bestPath := paths[0]
 			shortestPath = strconv.Itoa(bestPath.HopCount)
@@ -294,6 +296,12 @@ func (m *FoxMapperModule) generateOutputForProject(logger internal.Logger, proje
 				privescTo = strings.TrimPrefix(privescTo, "serviceAccount:")
 			} else if strings.HasPrefix(privescTo, "user:") {
 				privescTo = strings.TrimPrefix(privescTo, "user:")
+			}
+
+			// Confidence from the best path
+			confidence = bestPath.Confidence
+			if confidence == "" {
+				confidence = "high"
 			}
 
 			// Format privesc admin level
@@ -344,6 +352,7 @@ func (m *FoxMapperModule) generateOutputForProject(logger internal.Logger, proje
 			privescTo,
 			privescAdminLevel,
 			shortestPath,
+			confidence,
 		})
 	}
 
@@ -395,27 +404,31 @@ func (m *FoxMapperModule) generatePathsLootContentForProject(projectID string, f
 			if path.ScopeBlocked {
 				scopeStatus = " [SCOPE-BLOCKED]"
 			}
+			confidenceStatus := ""
+			if path.Confidence != "" && path.Confidence != "high" {
+				confidenceStatus = fmt.Sprintf(" [%s confidence]", path.Confidence)
+			}
 
-			sb.WriteString(fmt.Sprintf("--- Path %d: %s → %s (%s admin, %d hops)%s ---\n\n",
-				pathIdx+1, path.Source, path.Destination, path.AdminLevel, path.HopCount, scopeStatus))
+			sb.WriteString(fmt.Sprintf("--- Path %d: %s → %s (%s admin, %d hops)%s%s ---\n\n",
+				pathIdx+1, path.Source, path.Destination, path.AdminLevel, path.HopCount, scopeStatus, confidenceStatus))
 
 			// Show the path as a visual chain
 			sb.WriteString(fmt.Sprintf("  %s\n", path.Source))
 			for i, edge := range path.Edges {
-				if i < len(path.Edges)-1 {
-					sb.WriteString("    │\n")
-				} else {
-					sb.WriteString("    │\n")
-				}
+				sb.WriteString("    │\n")
 
-				scopeWarning := ""
+				annotations := ""
 				if edge.ScopeBlocksEscalation {
-					scopeWarning = " ⚠️  BLOCKED BY OAUTH SCOPE"
+					annotations = " ⚠️  BLOCKED BY OAUTH SCOPE"
 				} else if edge.ScopeLimited {
-					scopeWarning = " ⚠️  scope-limited"
+					annotations = " ⚠️  scope-limited"
+				}
+				edgeConf := edge.EffectiveConfidence()
+				if edgeConf != "high" {
+					annotations += fmt.Sprintf(" [%s confidence]", edgeConf)
 				}
 
-				sb.WriteString(fmt.Sprintf("    ├── [%d] %s%s\n", i+1, edge.ShortReason, scopeWarning))
+				sb.WriteString(fmt.Sprintf("    ├── [%d] %s%s\n", i+1, edge.ShortReason, annotations))
 
 				if edge.Resource != "" {
 					sb.WriteString(fmt.Sprintf("    │       Resource: %s\n", edge.Resource))
@@ -485,18 +498,25 @@ func (m *FoxMapperModule) generateLootContentForProject(projectID string, fm *fo
 			sb.WriteString(fmt.Sprintf("  Start: %s\n", path.Source))
 			sb.WriteString(fmt.Sprintf("  End:   %s\n", path.Destination))
 			sb.WriteString(fmt.Sprintf("  Hops:  %d\n", path.HopCount))
+			if path.Confidence != "" && path.Confidence != "high" {
+				sb.WriteString(fmt.Sprintf("  Confidence: %s\n", path.Confidence))
+			}
 			if path.ScopeBlocked {
 				sb.WriteString("  WARNING: Path may be blocked by OAuth scopes\n")
 			}
 			sb.WriteString("  Path:\n")
 			for i, edge := range path.Edges {
-				scopeInfo := ""
+				annotations := ""
 				if edge.ScopeBlocksEscalation {
-					scopeInfo = " [BLOCKED BY SCOPE]"
+					annotations = " [BLOCKED BY SCOPE]"
 				} else if edge.ScopeLimited {
-					scopeInfo = " [scope-limited]"
+					annotations = " [scope-limited]"
 				}
-				sb.WriteString(fmt.Sprintf("    (%d) %s%s\n", i+1, edge.Reason, scopeInfo))
+				edgeConf := edge.EffectiveConfidence()
+				if edgeConf != "high" {
+					annotations += fmt.Sprintf(" [%s confidence]", edgeConf)
+				}
+				sb.WriteString(fmt.Sprintf("    (%d) %s%s\n", i+1, edge.Reason, annotations))
 			}
 			sb.WriteString("\n")
 		}
@@ -520,7 +540,7 @@ func (m *FoxMapperModule) generateOutput(logger internal.Logger, identifier stri
 
 	// Main table: principals with admin or path to admin
 	// Read left to right: Project -> Type -> Principal -> Admin Status -> Privesc Target -> Privesc Admin Level -> Hops
-	mainHeader := []string{"Project", "Type", "Principal", "Is Admin", "Admin Level", "Privesc To", "Privesc Admin Level", "Hops"}
+	mainHeader := []string{"Project", "Type", "Principal", "Is Admin", "Admin Level", "Privesc To", "Privesc Admin Level", "Hops", "Confidence"}
 	var mainBody [][]string
 
 	// First add admins
@@ -538,6 +558,7 @@ func (m *FoxMapperModule) generateOutput(logger internal.Logger, identifier stri
 			"-",
 			"-",
 			"-",
+			"-",
 		})
 	}
 
@@ -547,6 +568,7 @@ func (m *FoxMapperModule) generateOutput(logger internal.Logger, identifier stri
 		shortestPath := "-"
 		privescTo := "-"
 		privescAdminLevel := "-"
+		confidence := "-"
 		if len(paths) > 0 {
 			bestPath := paths[0]
 			shortestPath = strconv.Itoa(bestPath.HopCount)
@@ -557,6 +579,12 @@ func (m *FoxMapperModule) generateOutput(logger internal.Logger, identifier stri
 				privescTo = strings.TrimPrefix(privescTo, "serviceAccount:")
 			} else if strings.HasPrefix(privescTo, "user:") {
 				privescTo = strings.TrimPrefix(privescTo, "user:")
+			}
+
+			// Confidence from the best path
+			confidence = bestPath.Confidence
+			if confidence == "" {
+				confidence = "high"
 			}
 
 			// Format privesc admin level
@@ -607,6 +635,7 @@ func (m *FoxMapperModule) generateOutput(logger internal.Logger, identifier stri
 			privescTo,
 			privescAdminLevel,
 			shortestPath,
+			confidence,
 		})
 	}
 
@@ -753,18 +782,25 @@ func (m *FoxMapperModule) generateLootContent(identifier string) string {
 			sb.WriteString(fmt.Sprintf("  Start: %s\n", path.Source))
 			sb.WriteString(fmt.Sprintf("  End:   %s\n", path.Destination))
 			sb.WriteString(fmt.Sprintf("  Hops:  %d\n", path.HopCount))
+			if path.Confidence != "" && path.Confidence != "high" {
+				sb.WriteString(fmt.Sprintf("  Confidence: %s\n", path.Confidence))
+			}
 			if path.ScopeBlocked {
 				sb.WriteString("  WARNING: Path may be blocked by OAuth scopes\n")
 			}
 			sb.WriteString("  Path:\n")
 			for i, edge := range path.Edges {
-				scopeInfo := ""
+				annotations := ""
 				if edge.ScopeBlocksEscalation {
-					scopeInfo = " [BLOCKED BY SCOPE]"
+					annotations = " [BLOCKED BY SCOPE]"
 				} else if edge.ScopeLimited {
-					scopeInfo = " [scope-limited]"
+					annotations = " [scope-limited]"
 				}
-				sb.WriteString(fmt.Sprintf("    (%d) %s%s\n", i+1, edge.Reason, scopeInfo))
+				edgeConf := edge.EffectiveConfidence()
+				if edgeConf != "high" {
+					annotations += fmt.Sprintf(" [%s confidence]", edgeConf)
+				}
+				sb.WriteString(fmt.Sprintf("    (%d) %s%s\n", i+1, edge.Reason, annotations))
 			}
 			sb.WriteString("\n")
 		}

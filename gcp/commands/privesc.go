@@ -303,7 +303,11 @@ func (m *PrivescModule) writePrivescFindingToPlaybook(sb *strings.Builder, f fox
 	}
 
 	sb.WriteString(fmt.Sprintf("# %s (%s)\n", f.Principal, f.MemberType))
-	sb.WriteString(fmt.Sprintf("# Shortest path: %d hops | Viable paths: %d\n", f.ShortestPathHops, f.ViablePathCount))
+	confidenceNote := ""
+	if f.BestPathConfidence != "" && f.BestPathConfidence != "high" {
+		confidenceNote = fmt.Sprintf(" | Confidence: %s", f.BestPathConfidence)
+	}
+	sb.WriteString(fmt.Sprintf("# Shortest path: %d hops | Viable paths: %d%s\n", f.ShortestPathHops, f.ViablePathCount, confidenceNote))
 	if f.ScopeBlockedCount > 0 {
 		sb.WriteString(fmt.Sprintf("# WARNING: %d paths blocked by OAuth scopes\n", f.ScopeBlockedCount))
 	}
@@ -326,11 +330,15 @@ func (m *PrivescModule) writePrivescFindingToPlaybook(sb *strings.Builder, f fox
 		// Generate commands for each edge in the path
 		currentPrincipal := f.Principal
 		for i, edge := range path.Edges {
-			scopeWarning := ""
+			annotations := ""
 			if edge.ScopeBlocksEscalation {
-				scopeWarning = " [BLOCKED BY SCOPE]"
+				annotations = " [BLOCKED BY SCOPE]"
 			} else if edge.ScopeLimited {
-				scopeWarning = " [scope-limited]"
+				annotations = " [scope-limited]"
+			}
+			edgeConf := edge.EffectiveConfidence()
+			if edgeConf != "high" {
+				annotations += fmt.Sprintf(" [%s confidence]", edgeConf)
 			}
 
 			// Use full reason if available, otherwise short reason
@@ -339,7 +347,7 @@ func (m *PrivescModule) writePrivescFindingToPlaybook(sb *strings.Builder, f fox
 				displayReason = edge.ShortReason
 			}
 
-			sb.WriteString(fmt.Sprintf("# Step %d: %s%s\n", i+1, displayReason, scopeWarning))
+			sb.WriteString(fmt.Sprintf("# Step %d: %s%s\n", i+1, displayReason, annotations))
 
 			// Get the exploit command for this technique (pass both short and full reason)
 			cmd := getPrivescExploitCommand(edge.ShortReason, edge.Reason, currentPrincipal, edge.Destination, sourceProject)
@@ -378,6 +386,7 @@ func (m *PrivescModule) getHeader() []string {
 		"Privesc To",
 		"Privesc Admin Level",
 		"Hops",
+		"Confidence",
 		"Permission",
 	}
 }
@@ -405,6 +414,7 @@ func (m *PrivescModule) findingsToTableBody() [][]string {
 		privescTo := "-"
 		privescAdminLevel := "-"
 		hops := "-"
+		confidence := "-"
 		permission := "-"
 
 		if f.CanEscalate && len(f.Paths) > 0 {
@@ -418,6 +428,12 @@ func (m *PrivescModule) findingsToTableBody() [][]string {
 				privescTo = strings.TrimPrefix(privescTo, "user:")
 			}
 			hops = fmt.Sprintf("%d", bestPath.HopCount)
+
+			// Confidence from the best path
+			confidence = bestPath.Confidence
+			if confidence == "" {
+				confidence = "high"
+			}
 
 			// Get the permission from the first edge - prefer Reason over ShortReason
 			if len(bestPath.Edges) > 0 {
@@ -476,6 +492,7 @@ func (m *PrivescModule) findingsToTableBody() [][]string {
 			privescTo,
 			privescAdminLevel,
 			hops,
+			confidence,
 			permission,
 		})
 	}
@@ -663,6 +680,7 @@ func (m *PrivescModule) findingsToTableBodyForProject(projectID string) [][]stri
 		privescTo := "-"
 		privescAdminLevel := "-"
 		hops := "-"
+		confidence := "-"
 		permission := "-"
 
 		if f.CanEscalate && len(f.Paths) > 0 {
@@ -674,6 +692,12 @@ func (m *PrivescModule) findingsToTableBodyForProject(projectID string) [][]stri
 				privescTo = strings.TrimPrefix(privescTo, "user:")
 			}
 			hops = fmt.Sprintf("%d", bestPath.HopCount)
+
+			// Confidence from the best path
+			confidence = bestPath.Confidence
+			if confidence == "" {
+				confidence = "high"
+			}
 
 			// Get the permission from the first edge
 			if len(bestPath.Edges) > 0 {
@@ -729,6 +753,7 @@ func (m *PrivescModule) findingsToTableBodyForProject(projectID string) [][]stri
 			privescTo,
 			privescAdminLevel,
 			hops,
+			confidence,
 			permission,
 		})
 	}
